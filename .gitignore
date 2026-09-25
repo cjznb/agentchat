@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+*.db
+*.db-wal
+*.db-shm
+
+# BEGIN oh-my-opencode-slim clonedeps
+.slim/clonedeps/repos/
+# END oh-my-opencode-slim clonedeps

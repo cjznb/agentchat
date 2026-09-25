@@ -1,0 +1,22 @@
+{
+  "version": "1.0.0",
+  "updatedAt": "2026-09-25T00:00:00.000Z",
+  "dependencies": [
+    {
+      "name": "claude-codex-mcp-bridge",
+      "resolvedVersion": "8f12c88",
+      "repoUrl": "https://github.com/WebisityStudio/claude-codex-mcp-bridge.git",
+      "ref": "8f12c88",
+      "path": ".slim/clonedeps/repos/WebisityStudio__claude-codex-mcp-bridge",
+      "reason": "Reference for bridge_wait blocking-until-reply + wake:auto background pings + SQLite WAL mailbox + agent roster with unread/ping health"
+    },
+    {
+      "name": "ThreadGram",
+      "resolvedVersion": "6a44cc2",
+      "repoUrl": "https://github.com/MethosPi/ThreadGram.git",
+      "ref": "6a44cc2",
+      "path": ".slim/clonedeps/repos/MethosPi__ThreadGram",
+      "reason": "Reference for server-side wait API (--wait-mode auto blocks agent until new mail), FastAPI + web dashboard, MCP HTTP integration for Codex/Claude Code"
+    }
+  ]
+}
