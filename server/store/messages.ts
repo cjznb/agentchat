@@ -155,3 +155,32 @@ export function messagesAfter(db: Db, conversationId: string, afterSeq: number):
     .all(conversationId, afterSeq)
   return rows.map(toMessage)
 }
+
+export interface InboxQuery {
+  readonly agentId: string
+  /** 喊话广播会话 id；尚无喊话会话时传 `""`（空串恒不匹配真实 id）。 */
+  readonly shoutConversationId: string
+  /** 游标（seq，不含）；0 = 从头。 */
+  readonly after: number
+  readonly limit: number
+}
+
+export const DEFAULT_INBOX_LIMIT = 50
+
+/**
+ * 收件箱：agent 可见会话（其参与的会话 + 喊话广播会话，决议 3）中游标之后的消息，
+ * 全局 seq 升序。可见性只由成员表与广播会话决定，不过滤己方消息（DoD：喊话对每个节点各得一条）。
+ */
+export function inboxMessages(db: Db, query: InboxQuery): Message[] {
+  const rows = db
+    .prepare<InboxQuery, MessageRow>(
+      `SELECT * FROM messages
+        WHERE seq > $after
+          AND (conversation_id = $shoutConversationId
+               OR conversation_id IN (SELECT conversation_id FROM participants WHERE agent_id = $agentId))
+        ORDER BY seq ASC
+        LIMIT $limit`,
+    )
+    .all(query)
+  return rows.map(toMessage)
+}

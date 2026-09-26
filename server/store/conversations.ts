@@ -1,6 +1,7 @@
 /**
- * 会话、成员与已读位点（spec §5.3/§5.4）：
- * DM key 成员排序、自动两行成员、群 owner+成员、`read_states` upsert（只前进）。
+ * 会话、成员与未读聚合（spec §5.3/§5.4）：
+ * DM key 成员排序、自动两行成员、群 owner+成员、喊话广播会话（无成员行）、
+ * 全员直达未读计数。已读位点（`read_states`）访问器在 `./read_states.ts`。
  * 多行写入一律 `BEGIN IMMEDIATE`（spec §12 数据安全约束）。
  */
 import { randomUUID } from "node:crypto"
@@ -28,13 +29,6 @@ export interface Participant {
   readonly role: ParticipantRole
   readonly joinedAt: number
   readonly invitedBy: string | undefined
-}
-
-export interface ReadState {
-  readonly conversationId: string
-  readonly agentId: string
-  readonly lastReadSeq: number
-  readonly updatedAt: number
 }
 
 interface ConversationRow {
@@ -229,45 +223,46 @@ export function isParticipant(db: Db, conversationId: string, agentId: string): 
   return row !== undefined
 }
 
-export interface MarkReadInput {
-  readonly conversationId: string
-  readonly agentId: string
-  readonly lastReadSeq: number
+/** 喊话广播会话（决议 3）：全库唯一，`key='shout'`、kind=group、**无 participants 行**。 */
+export const SHOUT_KEY = "shout"
+export const SHOUT_NAME = "全员喊话"
+
+/** 取或建喊话广播会话（幂等；conversation 单行写入，语句自身原子）。 */
+export function ensureShoutConversation(db: Db, createdBy: string): Conversation {
+  const tx = db.transaction((creator: string): Conversation => {
+    const existing = getConversationByKey(db, SHOUT_KEY)
+    if (existing !== undefined) return existing
+    const conversation: Conversation = {
+      id: randomUUID(),
+      kind: "group",
+      key: SHOUT_KEY,
+      name: SHOUT_NAME,
+      createdBy: creator,
+      createdAt: Date.now(),
+    }
+    insertConversation(db, conversation)
+    return conversation
+  })
+  return tx.immediate(createdBy)
 }
 
 /**
- * 已读位点 upsert（spec §5.4）：单语句原子写入；
- * 位点只前进不回退（旧 ack 不得把已读拉回）。
+ * 各 agent 的直达未读（决议 3/5）：其**参与会话 + 喊话广播会话**中、未过自身
+ * `read_states` 位点、且非自己发出的消息数（缺行按位点 0）。喊话会话无成员行，
+ * 对全节点可见，故不能复用 `store/agents.unreadCounts`（只算参与者）。
  */
-export function markRead(db: Db, input: MarkReadInput): void {
-  const params: MarkReadInput & { updatedAt: number } = {
-    conversationId: input.conversationId,
-    agentId: input.agentId,
-    lastReadSeq: input.lastReadSeq,
-    updatedAt: Date.now(),
-  }
-  db.prepare<MarkReadInput & { updatedAt: number }, void>(
-    `INSERT INTO read_states (conversation_id, agent_id, last_read_seq, updated_at)
-     VALUES ($conversationId, $agentId, $lastReadSeq, $updatedAt)
-     ON CONFLICT (conversation_id, agent_id) DO UPDATE SET
-       last_read_seq = MAX(read_states.last_read_seq, excluded.last_read_seq),
-       updated_at = excluded.updated_at`,
-  ).run(params)
-}
-
-export function getReadState(db: Db, conversationId: string, agentId: string): ReadState | undefined {
-  const row = db
-    .prepare<
-      [string, string],
-      { conversation_id: string; agent_id: string; last_read_seq: number; updated_at: number }
-    >("SELECT * FROM read_states WHERE conversation_id = ? AND agent_id = ?")
-    .get(conversationId, agentId)
-  return row === undefined
-    ? undefined
-    : {
-        conversationId: row.conversation_id,
-        agentId: row.agent_id,
-        lastReadSeq: row.last_read_seq,
-        updatedAt: row.updated_at,
-      }
+export function directUnreadCounts(db: Db, shoutConversationId: string): ReadonlyMap<string, number> {
+  const rows = db
+    .prepare<{ shoutId: string }, { agent_id: string; unread: number }>(
+      `SELECT a.id AS agent_id, COUNT(m.seq) AS unread
+         FROM agents a
+         JOIN messages m ON m.from_agent_id <> a.id
+        WHERE (m.conversation_id = $shoutId
+               OR m.conversation_id IN (SELECT conversation_id FROM participants WHERE agent_id = a.id))
+          AND m.seq > COALESCE((SELECT last_read_seq FROM read_states r
+                                 WHERE r.conversation_id = m.conversation_id AND r.agent_id = a.id), 0)
+        GROUP BY a.id`,
+    )
+    .all({ shoutId: shoutConversationId })
+  return new Map(rows.map((row) => [row.agent_id, row.unread]))
 }

@@ -20,12 +20,11 @@ import {
   createGroup,
   dmKey,
   getConversationByKey,
-  getReadState,
   isParticipant,
   listConversations,
   listParticipants,
-  markRead,
 } from "../../server/store/conversations"
+import { getReadState, markRead } from "../../server/store/read_states"
 import { getById, history, messagesAfter, send } from "../../server/store/messages"
 
 let home = ""
