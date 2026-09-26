@@ -10,10 +10,13 @@ import { serve } from "@hono/node-server"
 import type { AddressInfo } from "node:net"
 import { Hono } from "hono"
 import { config } from "./config"
+import type { Db } from "./db"
+import { uiRoutes } from "./routes/ui"
 
-export function createApp(): Hono {
+export function createApp(db?: Db): Hono {
   const app = new Hono()
   app.get("/api/health", (c) => c.json({ status: "ok" }))
+  app.route("/", uiRoutes(db))
   return app
 }
 
@@ -26,11 +29,13 @@ export interface RunningServer {
 export interface StartOptions {
   /** 监听端口；缺省取 `config.port`（env `AGENTCHAT_PORT`）。传 0 = OS 分配临时端口 */
   readonly port?: number
+  /** UI 路由的数据库连接；缺省时按 `config.dbPath` 惰性打开（首个 roster 请求） */
+  readonly db?: Db
 }
 
 export async function start(options: StartOptions = {}): Promise<RunningServer> {
   const port = options.port ?? config.port
-  const server: ServerType = serve({ fetch: createApp().fetch, port })
+  const server: ServerType = serve({ fetch: createApp(options.db).fetch, port })
 
   const info = await new Promise<AddressInfo>((resolve, reject) => {
     server.once("listening", () => {

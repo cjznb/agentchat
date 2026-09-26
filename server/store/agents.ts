@@ -181,6 +181,76 @@ export function getAgentByTaskRef(db: Db, taskRef: string): Agent | undefined {
   return row === undefined ? undefined : toAgent(row)
 }
 
+/** join_token 指纹落 `agent_keys`（spec §5.3；token 明文只在 `$AGENTCHAT_HOME/tokens/<id>` 文件）。 */
+export function insertAgentKey(db: Db, joinTokenHash: string, agentId: string): void {
+  db.prepare<{ joinTokenHash: string; agentId: string; createdAt: number }, void>(
+    "INSERT INTO agent_keys (join_token_hash, agent_id, created_at) VALUES ($joinTokenHash, $agentId, $createdAt)",
+  ).run({ joinTokenHash, agentId, createdAt: Date.now() })
+}
+
+export function getAgentByTokenHash(db: Db, joinTokenHash: string): Agent | undefined {
+  const row = db
+    .prepare<[string], AgentRow>(
+      "SELECT a.* FROM agent_keys k JOIN agents a ON a.id = k.agent_id WHERE k.join_token_hash = ?",
+    )
+    .get(joinTokenHash)
+  return row === undefined ? undefined : toAgent(row)
+}
+
+/** store 层按 id 查找失败（行不存在）。 */
+export class AgentNotFoundError extends Error {
+  constructor(readonly agentId: string) {
+    super(`agent not found: ${agentId}`)
+    this.name = "AgentNotFoundError"
+  }
+}
+
+interface TouchParams {
+  readonly id: string
+  readonly now: number
+  readonly status: AgentStatus | null
+}
+
+/**
+ * 触碰更新：`last_seen` 置为当前时刻；给了 `status` 就一并迁移
+ * （`retired` 同时落 `retired_at`）。迁移白名单由 core 层判定，本层只执行。
+ */
+export function touchAgent(db: Db, id: string, status?: AgentStatus): Agent {
+  const params: TouchParams = { id, now: Date.now(), status: status ?? null }
+  const row = db
+    .prepare<TouchParams, AgentRow>(
+      `UPDATE agents
+          SET last_seen = $now,
+              status = COALESCE($status, status),
+              retired_at = CASE WHEN $status = 'retired' THEN $now ELSE retired_at END
+        WHERE id = $id
+        RETURNING *`,
+    )
+    .get(params)
+  if (row === undefined) throw new AgentNotFoundError(id)
+  return toAgent(row)
+}
+
+/**
+ * 各 agent 的直达未读数：其参与会话中、未过自身 `read_states` 位点、
+ * 且非自己发出的消息条数（聚合规则是 Task 4 的事，这里只算单层）。
+ */
+export function unreadCounts(db: Db): ReadonlyMap<string, number> {
+  const rows = db
+    .prepare<[], { agent_id: string; unread: number }>(
+      `SELECT p.agent_id, COUNT(*) AS unread
+         FROM messages m
+         JOIN participants p ON p.conversation_id = m.conversation_id
+         LEFT JOIN read_states r
+                ON r.conversation_id = m.conversation_id AND r.agent_id = p.agent_id
+        WHERE m.from_agent_id <> p.agent_id
+          AND m.seq > COALESCE(r.last_read_seq, 0)
+        GROUP BY p.agent_id`,
+    )
+    .all()
+  return new Map(rows.map((row) => [row.agent_id, row.unread]))
+}
+
 export function listAgents(db: Db): Agent[] {
   const rows = db
     .prepare<[], AgentRow>("SELECT * FROM agents ORDER BY created_at ASC, name ASC")
