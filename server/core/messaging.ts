@@ -9,7 +9,6 @@
  * - `unreadFor` 双层聚合（决议 5）：自身全部会话（含喊话）+ 全部后代递归求和
  * - 权限闸门不在本层（决议 6）：建群/拉人/喊话的审批由 Task 7 在这些入口外包裹
  */
-import { z } from "zod"
 import type { ReceiptStage } from "../../shared/contracts"
 import type { Db } from "../db"
 import {
@@ -39,7 +38,17 @@ import {
   send,
   type Message,
 } from "../store/messages"
-import { getReadState, markRead } from "../store/read_states"
+import { markRead } from "../store/read_states"
+import { publishMessage, publishReceipt, receiptState } from "./publish"
+import {
+  INBOX_WAIT_CONVERSATION,
+  messagesSince,
+  waitFor,
+  type WaitOptions,
+  type WaitResult,
+} from "./wait"
+
+export { receiptState }
 
 // 群原语（决议 6：本任务不带闸门）。Task 7 在此入口外包裹审批闸门。
 export { addParticipant, createGroup } from "../store/conversations"
@@ -114,6 +123,8 @@ export interface SendMessageInput {
   readonly to: string
   readonly body: string
   readonly idempotencyKey?: string
+  /** 阻塞等待（spec §6.2）；给出则 `sendMessage` 返回 Promise 并带 `reply`。 */
+  readonly wait?: WaitOptions
 }
 
 /** 单收件方回执（四级锁枚举来自 shared/contracts，禁止另立）。 */
@@ -130,8 +141,44 @@ export interface SendMessageResult {
 /**
  * 发送一条消息并返回入库消息与各收件方的当前回执（决议 4：回执是派生读取，
  * 发送时无 wake_jobs 行 → 恒为 `queued`，即 DoD「发送即生成 queued 回执记录」）。
+ *
+ * 带 `wait`（spec §6.2 三模式）时返回 Promise：投递结果附 `reply`
+ * `{timedOut, messages, receipts}`——超时也带回等待期间已收部分（非空手）。
  */
-export function sendMessage(db: Db, input: SendMessageInput): SendMessageResult {
+export function sendMessage(
+  db: Db,
+  input: SendMessageInput & { readonly wait: WaitOptions },
+): Promise<SendMessageResult & { readonly reply: WaitResult<Receipt> }>
+export function sendMessage(db: Db, input: SendMessageInput): SendMessageResult
+export function sendMessage(
+  db: Db,
+  input: SendMessageInput,
+): SendMessageResult | Promise<SendMessageResult & { readonly reply: WaitResult<Receipt> }> {
+  const result = deliver(db, input)
+  if (input.wait === undefined) return result
+  const { message, receipts } = result
+  const baseline = new Map(receipts.map((r) => [r.agentId, r.stage] as const))
+  return waitFor<Receipt>(
+    {
+      conversationId: message.conversationId,
+      waiterId: input.from,
+      checkMessages: () =>
+        messagesSince(db, {
+          conversationId: message.conversationId,
+          waiterId: input.from,
+          afterSeq: message.seq,
+        }),
+      checkReceipts: () =>
+        receipts
+          .map((r) => ({ agentId: r.agentId, stage: receiptState(db, message, r.agentId) }))
+          .filter((r) => baseline.get(r.agentId) !== r.stage),
+    },
+    input.wait,
+  ).then((reply) => ({ ...result, reply }))
+}
+
+/** 同步投递核心（无 `wait` 路径与 `wait` 路径共用）：入库后发布消息事件（决议 5 发布点 1）。 */
+function deliver(db: Db, input: SendMessageInput): SendMessageResult {
   const sender = getAgent(db, input.from)
   if (sender === undefined) throw new AgentNotFoundError(input.from)
   const conversation = resolveConversation(db, sender, input.to)
@@ -141,6 +188,7 @@ export function sendMessage(db: Db, input: SendMessageInput): SendMessageResult 
     body: input.body,
     ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
   })
+  publishMessage(conversation.id)
   const receipts = recipientsOf(db, conversation, input.from).map((agentId) => ({
     agentId,
     stage: receiptState(db, message, agentId),
@@ -157,16 +205,43 @@ export interface InboxOptions {
   /** 游标（seq，不含）；缺省 0 = 从头。 */
   readonly after?: number
   readonly limit?: number
+  /** 阻塞等待（spec §9 `inbox.timeout` = §6.2 语义）；给出则返回 Promise 的等待结果。 */
+  readonly wait?: WaitOptions
 }
 
-/** 收件箱：可见会话（参与 + 喊话）中游标之后的消息，全局 seq 升序。 */
-export function inbox(db: Db, agentId: string, options: InboxOptions = {}): Message[] {
-  return inboxMessages(db, {
-    agentId,
-    shoutConversationId: shoutConversationId(db),
-    after: options.after ?? 0,
-    limit: options.limit ?? DEFAULT_INBOX_LIMIT,
-  })
+/**
+ * 收件箱：可见会话（参与 + 喊话）中游标之后的消息，全局 seq 升序。
+ * 带 `wait` 时挂起至新消息先到（`received` 模式无回执事件可言 → 恒超时），返回
+ * `{timedOut, messages, receipts}`（决议 6：inbox 委托 wait.ts；receipts 恒为 []）。
+ */
+export function inbox(
+  db: Db,
+  agentId: string,
+  options: InboxOptions & { readonly wait: WaitOptions },
+): Promise<WaitResult<never>>
+export function inbox(db: Db, agentId: string, options?: InboxOptions): Message[]
+export function inbox(
+  db: Db,
+  agentId: string,
+  options: InboxOptions = {},
+): Message[] | Promise<WaitResult<never>> {
+  const page = (): Message[] =>
+    inboxMessages(db, {
+      agentId,
+      shoutConversationId: shoutConversationId(db),
+      after: options.after ?? 0,
+      limit: options.limit ?? DEFAULT_INBOX_LIMIT,
+    })
+  if (options.wait === undefined) return page()
+  return waitFor<never>(
+    {
+      conversationId: INBOX_WAIT_CONVERSATION,
+      waiterId: agentId,
+      checkMessages: () => page().filter((m) => m.fromAgentId !== agentId),
+      checkReceipts: () => [],
+    },
+    options.wait,
+  )
 }
 
 /**
@@ -189,6 +264,8 @@ export function ack(db: Db, agentId: string, ids: readonly string[]): number {
       markRead(db, { conversationId, agentId, lastReadSeq })
     }
   }).immediate()
+  // 回执事件发布（决议 5 发布点 2：ack 之后，事务提交、复查可见）。
+  for (const conversationId of latestByConversation.keys()) publishReceipt(conversationId)
   return confirmed
 }
 
@@ -225,37 +302,5 @@ export function history(
   })
 }
 
-// wake_jobs 状态镜像 schema.sql 的 CHECK（Task 6 落 store 后收敛到 store/wake）。
-const wakeStateSchema = z.enum([
-  "pending",
-  "sending",
-  "accepted",
-  "refused",
-  "expired",
-  "cancelled",
-])
-
-/** wake_jobs 状态 → 四级回执（决议 4：失败态回 `queued`，不新增阶段）。 */
-const WAKE_STATE_STAGE: Record<z.infer<typeof wakeStateSchema>, ReceiptStage> = {
-  pending: "queued",
-  sending: "sending",
-  accepted: "delivered",
-  refused: "queued",
-  expired: "queued",
-  cancelled: "queued",
-}
-
-/**
- * 四级回执派生（决议 4）：`read_states.last_read_seq ≥ seq` → `read`（仅 ack 触发）；
- * 否则看该收件方的 wake_jobs 行（T6 前恒无行 → `queued`）。每收件方独立、互不串扰。
- */
-export function receiptState(db: Db, message: Message, recipient: string): ReceiptStage {
-  const read = getReadState(db, message.conversationId, recipient)
-  if (read !== undefined && read.lastReadSeq >= message.seq) return "read"
-  const job = db
-    .prepare<[number, string], { state: string }>(
-      "SELECT state FROM wake_jobs WHERE message_id = ? AND agent_id = ?",
-    )
-    .get(message.seq, recipient)
-  return job === undefined ? "queued" : WAKE_STATE_STAGE[wakeStateSchema.parse(job.state)]
-}
+// 四级回执派生 `receiptState` 与 wake 状态映射在 publish.ts（回执事件源），
+// 本模块顶部 `export { receiptState }` 保持既有导入路径不变。
