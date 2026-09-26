@@ -38,6 +38,7 @@ import {
 import {
   createDm,
   getConversationByKey,
+  isParticipant,
   listConversations,
   listParticipants,
 } from "../../server/store/conversations"
@@ -267,7 +268,8 @@ describe("unreadFor", () => {
 
     expect(unreadFor(db, child.id)).toBe(3) // 自身：root 的三条
     expect(unreadFor(db, root.id)).toBe(6) // 自身 3（h1,h2,c1）+ 子 3
-    expect(unreadFor(db, human.id)).toBe(0) // 只发不收
+    // 超级观察者（复审 Important #1）：human 计入全部会话未读 = 未参与的 root↔child 4 条
+    expect(unreadFor(db, human.id)).toBe(4)
   })
 
   it("recurses through grandchildren", () => {
@@ -294,6 +296,30 @@ describe("unreadFor", () => {
     for (const node of others) {
       expect(unreadFor(db, node.id)).toBe(1)
     }
+  })
+})
+
+describe("human super-observer (read side, 复审 Important #1)", () => {
+  it("receives and reads group messages without any participants row", () => {
+    const a = makeAgent("so-a")
+    const b = makeAgent("so-b")
+    const group = createGroup(db, { name: "观察组", createdBy: a.id, memberIds: [b.id] })
+    const human = ensureHuman(db)
+    expect(isParticipant(db, group.id, human.id)).toBe(false)
+
+    const { message } = sendMessage(db, { from: b.id, to: group.id, body: "组内回复" })
+
+    // human 非成员仍收到群消息（隐含成员：读取不依赖 participants 行）
+    expect(inbox(db, human.id, { after: 0 }).map((m) => m.id)).toContain(message.id)
+    expect(unreadFor(db, human.id)).toBe(1)
+    // 未读位点记入 read_states（spec §5.4），ack 后归零
+    expect(ack(db, human.id, [message.id])).toBe(1)
+    expect(unreadFor(db, human.id)).toBe(0)
+
+    // 回归保护：非 human 节点可见性口径不变（旁观者看不到、未读为 0）
+    const stranger = makeAgent("so-stranger")
+    expect(inbox(db, stranger.id, { after: 0 })).toHaveLength(0)
+    expect(unreadFor(db, stranger.id)).toBe(0)
   })
 })
 

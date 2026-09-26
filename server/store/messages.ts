@@ -169,7 +169,9 @@ export const DEFAULT_INBOX_LIMIT = 50
 
 /**
  * 收件箱：agent 可见会话（其参与的会话 + 喊话广播会话，决议 3）中游标之后的消息，
- * 全局 seq 升序。可见性只由成员表与广播会话决定，不过滤己方消息（DoD：喊话对每个节点各得一条）。
+ * 全局 seq 升序。human = 隐含成员 + 超级观察者（复审 Important #1）：`vendor='human'`
+ * 跳过成员过滤、可见**全部会话**（shout 规则对其他节点照旧）。可见性只由成员表、
+ * 广播会话与 human 身份决定，不过滤己方消息（DoD：喊话对每个节点各得一条）。
  */
 export function inboxMessages(db: Db, query: InboxQuery): Message[] {
   const rows = db
@@ -177,6 +179,7 @@ export function inboxMessages(db: Db, query: InboxQuery): Message[] {
       `SELECT * FROM messages
         WHERE seq > $after
           AND (conversation_id = $shoutConversationId
+               OR EXISTS (SELECT 1 FROM agents WHERE id = $agentId AND vendor = 'human')
                OR conversation_id IN (SELECT conversation_id FROM participants WHERE agent_id = $agentId))
         ORDER BY seq ASC
         LIMIT $limit`,

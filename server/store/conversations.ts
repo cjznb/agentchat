@@ -250,6 +250,8 @@ export function ensureShoutConversation(db: Db, createdBy: string): Conversation
  * 各 agent 的直达未读（决议 3/5）：其**参与会话 + 喊话广播会话**中、未过自身
  * `read_states` 位点、且非自己发出的消息数（缺行按位点 0）。喊话会话无成员行，
  * 对全节点可见，故不能复用 `store/agents.unreadCounts`（只算参与者）。
+ * human = 隐含成员 + 超级观察者（复审 Important #1）：`a.vendor='human'` 计入
+ * **全部会话**的未读；其他节点谓词与修复前逐字相同。
  */
 export function directUnreadCounts(db: Db, shoutConversationId: string): ReadonlyMap<string, number> {
   const rows = db
@@ -258,6 +260,7 @@ export function directUnreadCounts(db: Db, shoutConversationId: string): Readonl
          FROM agents a
          JOIN messages m ON m.from_agent_id <> a.id
         WHERE (m.conversation_id = $shoutId
+               OR a.vendor = 'human'
                OR m.conversation_id IN (SELECT conversation_id FROM participants WHERE agent_id = a.id))
           AND m.seq > COALESCE((SELECT last_read_seq FROM read_states r
                                  WHERE r.conversation_id = m.conversation_id AND r.agent_id = a.id), 0)
