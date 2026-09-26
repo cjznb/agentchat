@@ -31,6 +31,9 @@ import {
   type Agent,
   type InsertAgentInput,
 } from "../store/agents"
+import { makeJobsDue } from "../store/wake"
+import { publishMessage, publishReceipt } from "./publish"
+import { retireWakeJobs } from "./dispatcher"
 
 /** 展示态离线阈值（brief：`last_seen` 超过 600000ms → roster 报 offline）。 */
 export const OFFLINE_AFTER_MS = 600_000
@@ -155,7 +158,10 @@ export function registerRoot(
     if (existing.status === "retired") {
       throw new RegistrationError("retired", `agent ${existing.id} retired, claim rejected`)
     }
-    return { agent: touchAgent(db, existing.id, "online"), joinToken: input.joinToken }
+    const agent = touchAgent(db, existing.id, "online")
+    // 重连补投（spec §7）：pending 积压（含 pending(offline)）立即到期，由 dispatcher 补投。
+    makeJobsDue(db, { agentId: agent.id, now: Date.now() })
+    return { agent, joinToken: input.joinToken }
   }
 
   const joinToken = randomBytes(32).toString("base64url")
@@ -212,7 +218,13 @@ export function retire(db: Db, id: string): Agent {
   if (current === undefined) throw new AgentNotFoundError(id)
   if (current.status === "retired") return current
   // 任意→retired 恒在白名单内（canTransition 矩阵测试锁定）。
-  return touchAgent(db, id, "retired")
+  const retired = touchAgent(db, id, "retired")
+  // 退役取消（spec §7）：未投递 job 全 cancelled + 发送方收 system 消息「对方已离场」。
+  for (const conversationId of retireWakeJobs(db, id)) {
+    publishMessage(conversationId)
+    publishReceipt(conversationId)
+  }
+  return retired
 }
 
 /** roster 节点卡（spec §9 `roster` 返回；线格式字段名对齐 spec 的 snake_case）。 */

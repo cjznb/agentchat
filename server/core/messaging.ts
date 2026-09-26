@@ -39,6 +39,7 @@ import {
   type Message,
 } from "../store/messages"
 import { markRead } from "../store/read_states"
+import { enqueueWakeJobs } from "../store/wake"
 import { publishMessage, publishReceipt, receiptState } from "./publish"
 import {
   INBOX_WAIT_CONVERSATION,
@@ -189,7 +190,10 @@ function deliver(db: Db, input: SendMessageInput): SendMessageResult {
     ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
   })
   publishMessage(conversation.id)
-  const receipts = recipientsOf(db, conversation, input.from).map((agentId) => ({
+  const recipientIds = recipientsOf(db, conversation, input.from)
+  // 发送即生成唤醒任务（Task 6；资格与适配器门控见 store/wake.enqueueWakeJobs）。
+  enqueueWakeJobs(db, { messageId: message.seq, recipientIds })
+  const receipts = recipientIds.map((agentId) => ({
     agentId,
     stage: receiptState(db, message, agentId),
   }))

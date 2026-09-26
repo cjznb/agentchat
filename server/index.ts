@@ -11,12 +11,14 @@ import type { AddressInfo } from "node:net"
 import { Hono } from "hono"
 import { config } from "./config"
 import type { Db } from "./db"
+import { internalRoutes, type InternalRoutesOptions } from "./routes/internal"
 import { uiRoutes } from "./routes/ui"
 
-export function createApp(db?: Db): Hono {
+export function createApp(db?: Db, options?: InternalRoutesOptions): Hono {
   const app = new Hono()
   app.get("/api/health", (c) => c.json({ status: "ok" }))
   app.route("/", uiRoutes(db))
+  app.route("/", internalRoutes(db, options))
   return app
 }
 
