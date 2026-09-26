@@ -253,12 +253,6 @@ export function acceptWakeJob(
 
 // ── 投递结果与失败处理 ────────────────────────────────────────────
 
-export interface ApplyResultOutcome {
-  readonly state: WakeState
-  readonly stateChanged: boolean
-  readonly conversationId: string | undefined
-}
-
 /**
  * 落投递结果（dispatcher 推送路径与 `POST /internal/result` 共用）：
  * `delivered` → `accepted`（已终态则保持）；`refused` → 连续第 N 次拒收，
@@ -274,7 +268,7 @@ export function applyDeliveryResult(
     readonly result: DeliveryResult
     readonly now: number
   },
-): ApplyResultOutcome {
+): { readonly state: WakeState; readonly stateChanged: boolean; readonly conversationId: string | undefined } {
   const conversationId = getBySeq(db, input.messageSeq)?.conversationId
   let job = getWakeJob(db, input.messageSeq, input.agentId)
   if (job === undefined) {
@@ -299,6 +293,10 @@ export function applyDeliveryResult(
     case "refused": {
       const refusals = refusalsOf(job.detail) + 1
       const target: WakeState = refusals >= REFUSAL_LIMIT ? "refused" : "pending"
+      // 白名单守卫（与 delivered 分支对称）：终态（expired/cancelled/refused）不得被复活。
+      if (!canWakeTransition(job.state, target)) {
+        return { state: job.state, stateChanged: false, conversationId }
+      }
       const retryAt = target === "pending" ? input.now + backoffMs(job.attempts) : job.retryAt
       db.prepare<[WakeState, string, number, number, WakeState], void>(
         "UPDATE wake_jobs SET state = ?, detail = ?, retry_at = ? WHERE id = ? AND state = ?",

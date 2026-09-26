@@ -202,12 +202,15 @@ export interface DispatcherOptions {
   readonly home: string
   /** 注入时钟（缺省 `Date.now`）；测试传可控时间源。 */
   readonly now?: () => number
+  /** 单轮异常回调（缺省 `console.error`）；测试可注入收集器。 */
+  readonly onError?: (error: unknown) => void
 }
 
 export class Dispatcher {
   private readonly db: Db
   private readonly home: string
   private readonly now: () => number
+  private readonly onError: (error: unknown) => void
   private timer: NodeJS.Timeout | undefined
   private running = false
 
@@ -215,6 +218,7 @@ export class Dispatcher {
     this.db = options.db
     this.home = options.home
     this.now = options.now ?? Date.now
+    this.onError = options.onError ?? ((error) => console.error("[agentchat] dispatcher tick failed", error))
   }
 
   /** 启动 2s 循环（立即先跑一轮；`unref` 不阻塞进程退出）。 */
@@ -229,7 +233,11 @@ export class Dispatcher {
     this.timer = undefined
   }
 
-  /** 单轮调度（测试直接调用并注入 `now`；进行中重入直接返回）。 */
+  /**
+   * 单轮调度（测试直接调用并注入 `now`；进行中重入直接返回）。
+   * 轮级错误隔离：任何一步抛出（VACUUM/SQL/订阅方/通知落库）都被本层捕获记录，
+   * **永不 reject** —— 两处 `void this.tick()` 调用点因此不会触发 unhandled rejection。
+   */
   async tick(now: number = this.now()): Promise<void> {
     if (this.running) return
     this.running = true
@@ -243,6 +251,12 @@ export class Dispatcher {
         if (failed === undefined) break
         const conversationId = sendFailureNotice(this.db, failed, now)
         if (conversationId !== undefined) publishMessage(conversationId)
+      }
+    } catch (error) {
+      try {
+        this.onError(error)
+      } catch {
+        // 错误回调自身异常不再外传（tick 永不 reject 的兜底）
       }
     } finally {
       this.running = false

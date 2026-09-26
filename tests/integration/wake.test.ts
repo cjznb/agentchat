@@ -10,9 +10,11 @@
  *   wake 过滤自发消息（T4 交接）、result 复核推翻 accepted
  * - housekeeping：`backupIfDue`（时钟注入）每日单文件备份；busy 24h 过期
  * - 资格：logical/human/发送者本人不生成 job；幂等重发仍单 job
+ * - 修复回归（review）：轮内抛错不使 `tick()` reject 且下一轮照常；
+ *   `refused` 落终态 job 上不复活状态、零 UPDATE
  * 时间断言全部用注入时钟（`dispatcher.tick(now)`），无长 sleep。
  */
-import { mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -27,7 +29,7 @@ import { createApp } from "../../server/index"
 import { applyAgentState, ensureHubToken } from "../../server/routes/internal"
 import { getAgent, insertAgent, type Agent } from "../../server/store/agents"
 import type { Message } from "../../server/store/messages"
-import { backoffMs, getWakeJob, type WakeJob } from "../../server/store/wake"
+import { backoffMs, applyDeliveryResult, getWakeJob, type WakeJob } from "../../server/store/wake"
 
 let home = ""
 let db: Db
@@ -390,5 +392,61 @@ describe("housekeeping", () => {
       readdirSync(join(home, "backups")).filter((n) => n.startsWith("agentchat-daily-")),
     ).toHaveLength(1)
     dispatcher.stop()
+  })
+})
+
+describe("review fixes: round error isolation and terminal guard", () => {
+  it("keeps tick() from rejecting when a round step throws, then runs the next round normally", async () => {
+    const brokenHome = mkdtempSync(join(tmpdir(), "agentchat-dispatch-"))
+    writeFileSync(join(brokenHome, "backups"), "occupied") // backups 落在普通文件上 → mkdirSync 抛出
+    const errors: unknown[] = []
+    const broken = new Dispatcher({ db, home: brokenHome, onError: (error) => errors.push(error) })
+    try {
+      await expect(broken.tick(Date.now())).resolves.toBeUndefined() // 不 reject
+      expect(errors).toHaveLength(1)
+
+      rmSync(join(brokenHome, "backups"), { force: true }) // 故障排除
+      await broken.tick(Date.now() + 1000) // 下一轮照常执行
+      expect(
+        readdirSync(join(brokenHome, "backups")).filter((n) => n.startsWith("agentchat-daily-")),
+      ).toHaveLength(1)
+      expect(errors).toHaveLength(1) // 后续轮次无新增错误
+    } finally {
+      broken.stop()
+      rmSync(brokenHome, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps terminal jobs terminal when applyDeliveryResult receives refused (no UPDATE)", () => {
+    const sender = makeAgent("guard-sender")
+    const node = makeAgent("guard-node")
+    const cancelled = sendMessage(db, { from: sender.id, to: node.id, body: "已取消" }).message
+    const expired = sendMessage(db, { from: sender.id, to: node.id, body: "已过期" }).message
+    // 模拟 review 竞态：认领 await 注入期间 retire 合法取消 / busy 过期落终态
+    db.prepare<[string, string, number, string], void>(
+      "UPDATE wake_jobs SET state = ?, detail = ? WHERE message_id = ? AND agent_id = ?",
+    ).run("cancelled", "Recipient retired", cancelled.seq, node.id)
+    db.prepare<[string, string, number, string], void>(
+      "UPDATE wake_jobs SET state = ?, detail = ? WHERE message_id = ? AND agent_id = ?",
+    ).run("expired", "Recipient stayed busy for the whole 24h retry window", expired.seq, node.id)
+    const beforeCancelled = expectJob(cancelled.seq, node.id)
+    const beforeExpired = expectJob(expired.seq, node.id)
+
+    const now = Date.now()
+    expect(
+      applyDeliveryResult(db, {
+        agentId: node.id,
+        messageSeq: cancelled.seq,
+        result: "refused",
+        now,
+      }),
+    ).toMatchObject({ state: "cancelled", stateChanged: false })
+    expect(
+      applyDeliveryResult(db, { agentId: node.id, messageSeq: expired.seq, result: "refused", now }),
+    ).toMatchObject({ state: "expired", stateChanged: false })
+
+    // 全字段逐一相等 = 未发生任何 UPDATE（终态未被复活为 pending）
+    expect(expectJob(cancelled.seq, node.id)).toEqual(beforeCancelled)
+    expect(expectJob(expired.seq, node.id)).toEqual(beforeExpired)
   })
 })
