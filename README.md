@@ -17,6 +17,32 @@ npm start        # = tsx server/main.ts：拉起 HTTP 服务 + 2s 唤醒 dispatc
 （2s 唤醒循环、每日备份、审批 24h 过期清扫）并监听端口，SIGINT/SIGTERM 优雅关停。
 dispatcher 不在 `createApp()`/`start()` 内部启动（测试反复调用会把 interval 与备份打进临时库）。
 
+## MCP 工具面与通知端点
+
+Agent 经 `POST /mcp`（Bearer `HUB_TOKEN` 传输门）调用 MCP 工具；根首次 `register` 生成
+`join_token`（连接握手）。工具契约的单一来源是 `shared/contracts.ts` 的 `MCP_TOOLS`。
+除握手 `register` 外共十一项：
+
+| 工具 | 语义 |
+|---|---|
+| `send` | 向 agent_id / group_id / `*` 发消息；带 `wait` 时阻塞至回信，返回四级回执 |
+| `inbox` | 拉取本节点可见消息页与未读数；`timeout` 阻塞等待新消息 |
+| `ack` | 按消息 id 显式已读 |
+| `roster` | 层级树 + 各节点卡片 |
+| `conversation` | 会话历史分页（`before` / `limit`） |
+| `group` | 建群 / 拉人 / 群列表（仅根发起，经审批闸门） |
+| `shout` | 全员喊话（仅根发起，经审批闸门） |
+| `status` | 上报自定义状态文本 |
+| `message_status` | 查询指定消息的四级回执 |
+| `ask` | 请求批示：`to` 为 agent_id 或 `'human'`，带 `question`/`options`/`allow_custom`；带 `wait` 时挂起至答复，返回批示单 + `reply?{choice\|text, timedOut}` |
+| `respond_ask` | 答复请求批示：`ask_id` + `choice?` 或 `text?`（首答生效） |
+
+通知页数据面（用户侧 UI 消费）：
+
+- `GET /api/notifications?scope=actionable|all` — 通知列表（`actionable` = 待用户处理；`all` = 全部，含已决与 agent↔agent），每条带深链锚点 `cardMessageId` / `conversationId`。
+- `POST /api/asks/:id/respond` — 以用户身份答复某条批示（`{choice?|text?}`）。
+- `POST /api/notifications/:id/read` — 标记某条通知已读（幂等）。
+
 ## 安全模型（MVP 本地信任）
 
 MVP 是本机单用户模型，安全边界是「进程与本地文件系统」，**不是**网络或身份层：
