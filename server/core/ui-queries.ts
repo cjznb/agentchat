@@ -43,6 +43,8 @@ export interface ConversationSummary {
   readonly name: string | null
   readonly kind: "dm" | "group"
   readonly key: string
+  /** 会话创建时间（无消息的新会话排序依据；Plan 3 T7）。 */
+  readonly createdAt: number
   readonly lastMessage: ConversationPreview | null
   readonly unread: number
 }
@@ -97,6 +99,7 @@ export function conversationList(db: Db): ConversationListResult {
       name: conversation.name ?? null,
       kind: conversation.kind,
       key: conversation.key,
+      createdAt: conversation.createdAt,
       lastMessage: previewOf(latestInConversation(db, conversation.id)),
       unread: humanUnreadIn(db, conversation.id, human.id),
     }),

@@ -83,6 +83,8 @@ const conversationSummarySchema = z.object({
   name: z.string().nullable(),
   kind: z.string(),
   key: z.string(),
+  // Plan 3 T7：会话创建时间（无消息的新会话排序依据）必须随列表返回。
+  createdAt: z.number(),
   lastMessage: previewSchema.nullable(),
   unread: z.number(),
 })
@@ -117,6 +119,7 @@ describe("GET /api/conversations", () => {
     const dm = body.conversations.find((conversation) => conversation.id === dmId)
     expect(dm?.lastMessage?.body).toBe("pong")
     expect(dm?.unread).toBe(1) // human 未读 = root 发来的 pong（hello 为 human 自发）
+    expect(dm?.createdAt).toBeGreaterThan(0) // 会话创建时间随列表返回（Plan 3 T7）
     expect(body.unreadByRoot[rootId]).toBe(1) // root 未读 = human 发来的 hello
   })
 })

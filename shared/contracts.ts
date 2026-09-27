@@ -535,12 +535,18 @@ export const conversationPreviewSchema = z.object({
 })
 export type ConversationPreview = z.infer<typeof conversationPreviewSchema>
 
-/** 会话摘要（`GET /api/conversations` 元素）。 */
+/**
+ * 会话摘要（`GET /api/conversations` 元素）。
+ *
+ * `createdAt` 为 Plan 3 T7 追加：无消息的新建会话（`lastMessage === null`）需据会话创建时间参与
+ * 列表排序，否则活动时间恒为 0 会被排到末尾（binding DoD「新会话出现在列表顶部」）。
+ */
 export const conversationSummarySchema = z.object({
   id: z.string(),
   name: z.string().nullable(),
   kind: conversationKindSchema,
   key: z.string(),
+  createdAt: z.number().int().nonnegative(),
   lastMessage: conversationPreviewSchema.nullable(),
   unread: z.number().int().nonnegative(),
 })

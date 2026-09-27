@@ -77,8 +77,14 @@ function dmParticipants(key: string): readonly string[] {
   return parts.length === 2 && parts.every((id) => id !== "") ? parts : []
 }
 const SHOUT_KEY = "shout"
+/**
+ * 会话活动时间：末条消息时间；**无消息的会话回落到会话创建时间**——
+ * 否则新建的空会话（`createGroup` 不写消息）活动恒为 0，会被倒序排到列表末尾，
+ * 违背「新会话出现在列表顶部」的 DoD（Plan 3 T7 fix）。shout 恒单独置顶，不走此值。
+ */
 function activityOf(conversation: ConversationSummary | null): number {
-  return conversation?.lastMessage?.createdAt ?? 0
+  if (conversation === null) return 0
+  return conversation.lastMessage?.createdAt ?? conversation.createdAt
 }
 /** 最近活动倒序；同值以 id 字典序定序（稳定）。 */
 function byRecency<T extends { readonly id: string; readonly lastActivity: number }>(

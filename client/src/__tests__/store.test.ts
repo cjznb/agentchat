@@ -20,6 +20,7 @@ const humanConv: ConversationSummary = {
   name: null,
   kind: "dm",
   key: "dm:a_b",
+  createdAt: 0,
   lastMessage: { id: "old1", seq: 1, from: "agent-1", body: "old", createdAt: 1 },
   unread: 1,
 }
@@ -28,6 +29,7 @@ const otherConv: ConversationSummary = {
   name: "群",
   kind: "group",
   key: "group:c2",
+  createdAt: 0,
   lastMessage: { id: "old2", seq: 2, from: "agent-2", body: "newer", createdAt: 2 },
   unread: 0,
 }

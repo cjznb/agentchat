@@ -12,7 +12,7 @@ import { join } from "node:path"
 import { expect, test, type Locator, type Page } from "@playwright/test"
 import { loadConfig } from "../../server/config"
 import { registerChild, registerLogical, registerRoot } from "../../server/core/agents"
-import { ack, ensureHuman } from "../../server/core/messaging"
+import { ack, ensureHuman, sendMessage, shout } from "../../server/core/messaging"
 import { openDb, type Db } from "../../server/db"
 import { start } from "../../server/index"
 import { getConversationByKey, SHOUT_KEY } from "../../server/store/conversations"
@@ -36,6 +36,10 @@ function seedGroups(db: Db, home: string): GroupsSeed {
   const child1 = registerChild(db, { name: "gs-child1", parentId: root1.id, taskRef: "gs-t1" })
   const child2 = registerChild(db, { name: "gs-child2", parentId: root1.id, taskRef: "gs-t2" })
   const logical = registerLogical(db, { name: "gs-board" })
+  // 既有一条喊话（置顶）与一条有 lastMessage 的 DM：新建的空群（无消息，createdAt 最新）
+  // 必须排在**首个非 shout 行**，验证 Plan 3 T7 排序修复（否则空群活动时间为 0 落到最后）。
+  shout(db, human.id, "gs-seed-shout")
+  sendMessage(db, { from: human.id, to: root2.id, body: "gs-seed-dm" })
   return {
     humanId: human.id,
     root1: root1.id,
@@ -85,6 +89,11 @@ test("builds a group from a multi-select tree, adds members, and summarizes a sh
     await expect(
       page.getByTestId("conversation-item").filter({ hasText: "gs-group" }),
     ).toBeVisible()
+    // DoD「新会话出现在列表顶部」：shout 仍置顶，新建空群为**首个非 shout 行**（压过有消息的 DM）。
+    const items = page.getByTestId("conversation-item")
+    await expect(items.first()).toHaveAttribute("data-kind", "shout")
+    await expect(items.nth(1)).toHaveAttribute("data-kind", "group")
+    await expect(items.nth(1)).toContainText("gs-group")
 
     // ── 群资料：成员树状归属（含所属根）+ 加成员即时更新 ──────────────
     await page.getByTestId("group-info-toggle").click()
@@ -106,7 +115,7 @@ test("builds a group from a multi-select tree, adds members, and summarizes a sh
     await expect(page.getByTestId("group-member-count")).toHaveText("成员 3")
 
     // ── 喊话频道：发送 + 逐节点投递汇总 ──────────────────────────────
-    await page.getByRole("button", { name: "喊话" }).click()
+    await page.getByRole("button", { name: "喊话", exact: true }).click()
     await expect(page.getByTestId("shout-view")).toBeVisible()
     await expect(page.getByRole("heading", { name: "全员喊话", level: 1 })).toBeVisible()
 

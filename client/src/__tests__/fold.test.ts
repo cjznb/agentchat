@@ -49,6 +49,8 @@ function conv(
     readonly at?: number
     readonly unread?: number
     readonly name?: string | null
+    /** 会话创建时间（无 `lastMessage` 时的排序依据）。 */
+    readonly createdAt?: number
   } = {},
 ): ConversationSummary {
   return {
@@ -56,6 +58,7 @@ function conv(
     name: opts.name ?? null,
     kind: opts.kind ?? "dm",
     key,
+    createdAt: opts.createdAt ?? 0,
     lastMessage:
       opts.at === undefined
         ? null
@@ -118,6 +121,38 @@ describe("foldConversations", () => {
     const rest = rows.slice(1).map((row) => row.id)
     // logi(at 70) → group(60) → root1(max: child1 40) → root2(child3 5)
     expect(rest).toEqual(["c-logi", "c-group", "root1", "root2"])
+  })
+
+  it("无 lastMessage 的新会话按 createdAt 排在非 shout 行首位（Plan 3 T7 fix）", () => {
+    const conversations = [
+      conv("c-shout", "shout", { kind: "group", at: 50, name: "全员喊话" }),
+      conv("c-newgroup", "group:c-newgroup", { kind: "group", createdAt: 999, name: "新群" }),
+      conv("c-root1", "dm:human_root1", { at: 10 }),
+    ]
+    const rows = foldConversations(conversations, {}, roster)
+    expect(rows[0]?.kind).toBe("shout")
+    // 空群 createdAt=999 高于 root1 的 lastMessage(10) → 非 shout 首位。
+    expect(rows[1]?.id).toBe("c-newgroup")
+    expect(rows[1]?.kind).toBe("group")
+  })
+
+  it("有 lastMessage 的会话仍按 lastMessage 排序（createdAt 不抢占）", () => {
+    const conversations = [
+      conv("c-old-msg-new-conv", "group:gA", { kind: "group", createdAt: 999, at: 10 }),
+      conv("c-new-msg-old-conv", "group:gB", { kind: "group", createdAt: 1, at: 50 }),
+    ]
+    const rows = foldConversations(conversations, {}, roster)
+    expect(rows.map((row) => row.id)).toEqual(["c-new-msg-old-conv", "c-old-msg-new-conv"])
+  })
+
+  it("shout 恒置顶，新群（createdAt 更大）不得压过 shout", () => {
+    const conversations = [
+      conv("c-shout", "shout", { kind: "group", createdAt: 1, name: "全员喊话" }),
+      conv("c-brandnew", "group:c-brandnew", { kind: "group", createdAt: 999 }),
+    ]
+    const rows = foldConversations(conversations, {}, roster)
+    expect(rows[0]?.kind).toBe("shout")
+    expect(rows[1]?.id).toBe("c-brandnew")
   })
 
   it("human 节点与 human 会话完全过滤：human 根不成容器、不出现在子行", () => {
