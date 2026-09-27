@@ -157,12 +157,17 @@ export function uiRoutes(db?: Db): Hono {
       if (getConversation(database, id) === undefined) {
         return c.json({ ok: false, error: "conversation_not_found" }, 404)
       }
-      const raw = c.req.query("before")
-      const before = raw === undefined || raw === "" ? undefined : Number(raw)
+      const rawBefore = c.req.query("before")
+      const before = rawBefore === undefined || rawBefore === "" ? undefined : Number(rawBefore)
       if (before !== undefined && (!Number.isInteger(before) || before < 0)) {
         return c.json({ ok: false, error: "invalid_before" }, 400)
       }
-      return c.json({ messages: history(database, id, before) })
+      const rawLimit = c.req.query("limit")
+      const limit = rawLimit === undefined || rawLimit === "" ? undefined : Number(rawLimit)
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 200)) {
+        return c.json({ ok: false, error: "invalid_limit" }, 400)
+      }
+      return c.json({ messages: history(database, id, before, limit) })
     })
     // Task 1：human 会话读位点推进到该会话**最新 seq**（幂等，只前进不回退）；未知会话 404。
     .post("/api/conversations/:id/read", (c) => {

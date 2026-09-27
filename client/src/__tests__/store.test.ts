@@ -161,6 +161,8 @@ describe("reducer: 游标去重与 resync", () => {
       true,
       true,
     ])
+    // resync 清空消息缓存后必须补回「当前打开会话」，否则已打开会话消息永不恢复。
+    expect(plan.messages).toEqual(["c1"])
   })
 })
 

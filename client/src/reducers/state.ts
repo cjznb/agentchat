@@ -1,8 +1,7 @@
 /**
- * 纯 reducer 与重拉计划（Plan 3 T3）——`store.tsx` 的状态机核心，无副作用、可单测。
+ * store 状态与纯 reducer（Plan 3 T3）——副作用意图在 `planner.ts`，聚合出口在 `index.ts`。
  *
  * - `reducer` 消费 WS 帧（四类事件 + `resync`）与 hydrate/连接/打开会话等动作
- * - `planReload` 从同一帧推导副作用意图（重拉哪个数据面），由 store 执行
  * - 游标 `appliedSeq`：`seq <= appliedSeq` 的帧**幂等忽略**（同 seq 不重复应用）
  * - payload 解析失败：`console.warn` 并忽略该帧数据（前向兼容），仅推进游标
  */
@@ -21,9 +20,9 @@ import {
   type NotificationEntry,
   type RosterNode,
   type WsServerFrame,
-} from "../../shared/contracts"
-import type { ReloadPlan, ReloadResult } from "./api"
-import type { ConnectionStatus } from "./ws"
+} from "../../../shared/contracts"
+import type { ReloadResult } from "../api"
+import type { ConnectionStatus } from "../ws"
 
 /** 前端应用状态（所有 UI 组件订阅的单一来源）。 */
 export interface AppState {
@@ -74,10 +73,6 @@ export type StoreAction =
   | { readonly type: "connection"; readonly status: ConnectionStatus }
   | { readonly type: "open"; readonly conversationId: string | null }
   | { readonly type: "hydrate"; readonly patch: ReloadResult }
-
-function emptyPlan(): ReloadPlan {
-  return { roster: false, conversations: false, notifications: false, approvals: false, messages: [] }
-}
 
 function warnIgnore(state: AppState, frame: WsServerFrame): AppState {
   console.warn("ignoring ws frame with unparsable payload", frame)
@@ -259,52 +254,5 @@ export function reducer(state: AppState, action: StoreAction): AppState {
       return { ...state, openConversationId: action.conversationId }
     case "hydrate":
       return hydrate(state, action.patch)
-  }
-}
-
-/**
- * 副作用意图（纯函数）：给定当前状态与帧，产出需重拉的数据面。
- * - `resync` → 整页重拉（roster + conversations + notifications + approvals）
- * - `message` → 会话列表对账；所属会话**正打开**时重拉该会话消息
- * - `receipt` → 已加载/打开的会话重拉消息（以重拉结果为准）
- * - `agent` → 重拉 roster
- * - `approval` → 重拉通知列表（两 scope）与审批列
- */
-export function planReload(state: AppState, frame: WsServerFrame): ReloadPlan {
-  if (frame.type === "resync") {
-    return { roster: true, conversations: true, notifications: true, approvals: true, messages: [] }
-  }
-  switch (frame.type) {
-    case "message": {
-      const parsed = wsMessagePayloadSchema.safeParse(frame.payload)
-      if (!parsed.success) return emptyPlan()
-      const conversationId = parsed.data.conversationId
-      return {
-        roster: false,
-        conversations: true,
-        notifications: false,
-        approvals: false,
-        messages: state.openConversationId === conversationId ? [conversationId] : [],
-      }
-    }
-    case "receipt": {
-      const parsed = wsReceiptPayloadSchema.safeParse(frame.payload)
-      if (!parsed.success) return emptyPlan()
-      const conversationId = parsed.data.conversationId
-      const active = state.openConversationId === conversationId || state.messages.has(conversationId)
-      return {
-        roster: false,
-        conversations: false,
-        notifications: false,
-        approvals: false,
-        messages: active ? [conversationId] : [],
-      }
-    }
-    case "agent":
-      return { roster: true, conversations: false, notifications: false, approvals: false, messages: [] }
-    case "approval":
-      return { roster: false, conversations: false, notifications: true, approvals: true, messages: [] }
-    default:
-      return emptyPlan()
   }
 }

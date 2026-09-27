@@ -13,7 +13,7 @@ import { join } from "node:path"
 import type { Hono } from "hono"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { z } from "zod"
-import { notificationListSchema } from "../../shared/contracts"
+import { messageHistorySchema, notificationListSchema } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
 import { registerRoot } from "../../server/core/agents"
 import { ensureHuman, sendMessage, shout } from "../../server/core/messaging"
@@ -394,5 +394,38 @@ describe("POST /api/approvals/:id（ask 守卫，Fix 1）", () => {
     const missing = await post("/api/approvals/nope", { decision: "approve" })
     expect(missing.status).toBe(404)
     expect(errorBodySchema.parse(await missing.json()).error).toBe("approval_not_found")
+  })
+})
+
+// ── Plan 3 T3：会话历史分页路由（GET /api/conversations/:id/messages） ──
+
+describe("GET /api/conversations/:id/messages（Plan 3 T3）", () => {
+  it("returns the latest page ascending, pages backwards with before, and honours limit", async () => {
+    const third = sendMessage(db, { from: humanId, to: rootId, body: "third" })
+
+    const latest = messageHistorySchema.parse(
+      await (await app.request(`/api/conversations/${dmId}/messages`)).json(),
+    )
+    expect(latest.messages.map((message) => message.body)).toEqual(["hello", "pong", "third"])
+    expect(latest.messages.map((message) => message.fromAgentId)).toEqual([humanId, rootId, humanId])
+
+    const earlier = messageHistorySchema.parse(
+      await (await app.request(`/api/conversations/${dmId}/messages?before=${third.message.seq}`)).json(),
+    )
+    expect(earlier.messages.map((message) => message.body)).toEqual(["hello", "pong"])
+
+    const limited = messageHistorySchema.parse(
+      await (await app.request(`/api/conversations/${dmId}/messages?limit=1`)).json(),
+    )
+    expect(limited.messages.map((message) => message.body)).toEqual(["third"])
+  })
+
+  it("maps an unknown conversation to 404 and invalid before/limit to 400", async () => {
+    expect((await app.request("/api/conversations/nope/messages")).status).toBe(404)
+    expect((await app.request(`/api/conversations/${dmId}/messages?before=-1`)).status).toBe(400)
+    expect((await app.request(`/api/conversations/${dmId}/messages?before=abc`)).status).toBe(400)
+    expect((await app.request(`/api/conversations/${dmId}/messages?limit=0`)).status).toBe(400)
+    expect((await app.request(`/api/conversations/${dmId}/messages?limit=201`)).status).toBe(400)
+    expect((await app.request(`/api/conversations/${dmId}/messages?limit=abc`)).status).toBe(400)
   })
 })
