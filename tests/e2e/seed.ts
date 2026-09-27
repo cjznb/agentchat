@@ -9,7 +9,7 @@
  *   `seedGroups`（建群+喊话）/ `seedApproval` + `cardRef`（审批卡深链）。
  * - 独立运行：`npx tsx tests/e2e/seed.ts`（临时 home，或 `AGENTCHAT_HOME` 指定）→ 打印摘要 JSON。
  */
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -356,12 +356,17 @@ export function seedExperience(db: Db, home: string): ExperienceSummary {
 export function runSeedCli(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): ExperienceSummary & { readonly home: string } {
-  const home = env["AGENTCHAT_HOME"] ?? mkdtempSync(join(tmpdir(), "agentchat-seed-"))
+  const configured = env["AGENTCHAT_HOME"]
+  // 无显式 home 时落一次性临时目录；用后清理，避免 `agentchat-seed-*` 目录泄漏。
+  // 摘要中的 `home` 仍报告本次所用路径（即便临时目录已在 finally 清除）。
+  const ephemeral = configured === undefined
+  const home = configured ?? mkdtempSync(join(tmpdir(), "agentchat-seed-"))
   const db = openDb(loadConfig({ AGENTCHAT_HOME: home }).dbPath)
   try {
     return { home, ...seedExperience(db, home) }
   } finally {
     db.close()
+    if (ephemeral) rmSync(home, { recursive: true, force: true })
   }
 }
 

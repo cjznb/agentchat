@@ -34,14 +34,32 @@ const connectionLabel = {
   connected: "已连接",
   reconnecting: "重连中",
   resync: "同步中",
+  error: "连接失败",
 } as const satisfies Record<ConnectionStatus, string>
 
-function StatePanel({ state, title, hint }: { readonly state: ContentState; readonly title: string; readonly hint: string }) {
+function StatePanel({
+  state,
+  title,
+  hint,
+  onRetry,
+}: {
+  readonly state: ContentState
+  readonly title: string
+  readonly hint: string
+  readonly onRetry: () => void
+}) {
   if (state === "loading") {
     return <section className="state-panel" role="status"><span className="state-mark is-loading" /><h2>正在载入</h2><p>正在同步 AgentChat 数据。</p></section>
   }
   if (state === "error") {
-    return <section className="state-panel is-error" role="alert"><span className="state-mark">!</span><h2>暂时无法连接</h2><p>请确认 Hub 已启动后重试。</p></section>
+    return (
+      <section className="state-panel is-error" role="alert" data-testid="state-panel-error">
+        <span className="state-mark">!</span>
+        <h2>暂时无法连接</h2>
+        <p>请确认 Hub 已启动后重试。</p>
+        <button type="button" className="state-retry" data-testid="state-retry" onClick={onRetry}>重试</button>
+      </section>
+    )
   }
   return <section className="state-panel"><span className="state-mark">+</span><h2>{title}</h2><p>{hint}</p></section>
 }
@@ -57,7 +75,7 @@ function findRosterNode(nodes: readonly RosterNode[], id: string): RosterNode | 
 }
 
 export function App() {
-  const { state, openConversation, openAndRead, openDm, reload } = useStore()
+  const { state, openConversation, openAndRead, openDm, reload, retry } = useStore()
   const [activeMode, setActiveMode] = useState<ModeId>("chat")
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null)
   const [composeGroup, setComposeGroup] = useState(false)
@@ -81,6 +99,9 @@ export function App() {
   const notificationBadge = unreadCount(state.notifications)
   // 首屏/重连期间数据未就绪：空态面板显示加载态（真实可达路径，替代 T2 不可达骨架）。
   const initialSync = state.connection !== "connected"
+  // 错误态真实可达：REST 重拉失败（`loadError`）或 WS 重连超限（`connection === "error"`）。
+  const contentState: ContentState =
+    state.loadError || state.connection === "error" ? "error" : initialSync ? "loading" : "empty"
 
   // 深链入口（spec §11.5）：挂载时带 `?conversation=` 则自动承载该会话（消息由其内部重拉）。
   useEffect(() => {
@@ -201,7 +222,7 @@ export function App() {
                   onOpenConversation={handleOpenConversation}
                 />
               ) : (
-                <StatePanel state={initialSync ? "loading" : "empty"} title={active.title} hint={active.hint} />
+                <StatePanel state={contentState} title={active.title} hint={active.hint} onRetry={retry} />
               )}
             </div>
           </>

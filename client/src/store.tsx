@@ -58,6 +58,8 @@ export interface StoreValue {
   respondAsk(askId: string, answer: RespondAskInput): Promise<ApprovalEntry>
   /** 通知标记已读（幂等，乐观清未读点）：不阻塞跳转。 */
   markNotificationRead(id: string): Promise<void>
+  /** 错误态重试：重跑全量重拉并（若 WS 已终态）重启连接；成功后自动清除错误位。 */
+  retry(): void
 }
 
 const StoreContext = createContext<StoreValue | undefined>(undefined)
@@ -76,15 +78,24 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState)
   const stateRef = useRef(state)
   stateRef.current = state
+  const wsRef = useRef<WsClient | undefined>(undefined)
 
   const reload = useCallback((plan: ReloadPlan): void => {
     if (!planNeedsFetch(plan)) return
     void loadReload(plan)
       .then((patch) => dispatch({ type: "hydrate", patch }))
       .catch((error: unknown) => {
+        // 真实错误信号：失败置错误位（成功 hydrate 清除），驱动可达的错误态 + 重试。
+        dispatch({ type: "loadFailed" })
         console.warn("reload failed; keeping local state", error)
       })
   }, [dispatch])
+
+  /** 错误态重试：全量重拉；若 WS 已进入 error 终态则一并重启连接。 */
+  const retry = useCallback((): void => {
+    if (stateRef.current.connection === "error") wsRef.current?.start()
+    reload(INITIAL_RELOAD_PLAN)
+  }, [reload])
 
   useEffect(() => {
     reload(INITIAL_RELOAD_PLAN)
@@ -101,8 +112,12 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
       },
       onStatus: (status: ConnectionStatus) => dispatch({ type: "connection", status }),
     })
+    wsRef.current = client
     client.start()
-    return () => client.stop()
+    return () => {
+      client.stop()
+      wsRef.current = undefined
+    }
   }, [dispatch, reload])
 
   const openConversation = useCallback(
@@ -267,6 +282,7 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
       decideApproval,
       respondAsk,
       markNotificationRead,
+      retry,
     }),
     [
       state,
@@ -281,6 +297,7 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
       decideApproval,
       respondAsk,
       markNotificationRead,
+      retry,
     ],
   )
 

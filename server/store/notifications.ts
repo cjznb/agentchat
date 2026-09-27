@@ -12,7 +12,9 @@ export type NotificationScope = "actionable" | "all"
  * 通知列表（spec §11.5）：
  * - `actionable`（需我处理）= `target='human' AND status='pending'`（含审批单与批示单）；
  * - `all`（全部）= 所有单据（含已决与 agent↔agent —— 用户超级观察者可读）。
- * 最新在前（`created_at DESC`，并列以 id 定序）。
+ * 最新在前（`created_at DESC`）；**同毫秒并列以 `rowid` 定序**（插入顺序，后插入在前）——
+ * `id` 是 `randomUUID()`，以其定序在同 `created_at` 时次序随机（E2E 实证 7.3% 反转），
+ * 故以确定性的 `rowid`（单调自增，语义即插入序）替代。
  */
 export function listNotifications(db: Db, scope: NotificationScope): Approval[] {
   const rows =
@@ -20,11 +22,11 @@ export function listNotifications(db: Db, scope: NotificationScope): Approval[] 
       ? db
           .prepare<[], ApprovalRow>(
             `SELECT * FROM approvals WHERE target = 'human' AND status = 'pending'
-             ORDER BY created_at DESC, id DESC`,
+             ORDER BY created_at DESC, rowid DESC`,
           )
           .all()
       : db
-          .prepare<[], ApprovalRow>("SELECT * FROM approvals ORDER BY created_at DESC, id DESC")
+          .prepare<[], ApprovalRow>("SELECT * FROM approvals ORDER BY created_at DESC, rowid DESC")
           .all()
   return rows.map(toApproval)
 }

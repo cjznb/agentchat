@@ -99,6 +99,7 @@ test("chat, tree and notifications stay overflow-free with intact CJK at 375/768
       // ── 组织树 ──
       await page.getByRole("button", { name: "通讯录" }).click()
       await expect(page.getByTestId("org-tree")).toBeVisible()
+      await expectTextNotClipped(page.getByRole("heading", { name: "Agent 树", level: 1 }))
       await expectNoHorizontalOverflow(page)
       await page.screenshot({ path: join(SHOT_DIR, `tree-${width}.png`) })
 

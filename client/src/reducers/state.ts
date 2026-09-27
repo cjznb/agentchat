@@ -39,6 +39,8 @@ export interface AppState {
   /** 待处理审批单（`kind === 'action'`）。 */
   readonly approvals: readonly ApprovalEntry[]
   readonly connection: ConnectionStatus
+  /** 最近一次重拉是否失败（真实错误信号；成功 hydrate 后清零，驱动 UI 错误态）。 */
+  readonly loadError: boolean
   readonly appliedSeq: number
   readonly openConversationId: string | null
 }
@@ -52,6 +54,7 @@ export const initialState: AppState = {
   notificationsAll: [],
   approvals: [],
   connection: "connecting",
+  loadError: false,
   appliedSeq: 0,
   openConversationId: null,
 }
@@ -79,6 +82,8 @@ export type StoreAction =
       readonly messages: readonly ChatMessage[]
     }
   | { readonly type: "connection"; readonly status: ConnectionStatus }
+  /** 重拉失败（REST 首屏/对账）；置错误位，待下一次成功 `hydrate` 清除。 */
+  | { readonly type: "loadFailed" }
   | { readonly type: "open"; readonly conversationId: string | null }
   /** 卡提交成功：已决单据并入全部列表，并从「需我处理」列表移除（乐观对账）。 */
   | { readonly type: "notifDecided"; readonly approval: ApprovalEntry }
@@ -183,7 +188,8 @@ function mergeApproval(
 }
 
 function hydrate(state: AppState, patch: ReloadResult): AppState {
-  let next = state
+  // 任一次成功重拉即清除错误位（重试成功 → 错误态消失）。
+  let next: AppState = { ...state, loadError: false }
   if (patch.roster !== undefined) next = { ...next, roster: patch.roster }
   if (patch.conversations !== undefined) {
     next = {
@@ -295,6 +301,8 @@ export function reducer(state: AppState, action: StoreAction): AppState {
       }
     case "connection":
       return { ...state, connection: action.status }
+    case "loadFailed":
+      return { ...state, loadError: true }
     case "open":
       return { ...state, openConversationId: action.conversationId }
     case "notifDecided":

@@ -46,6 +46,9 @@ function NotificationItem({
       data-kind={entry.kind}
       data-status={entry.status}
       data-unread={unread}
+      data-notification-id={entry.id}
+      data-card-message-id={entry.cardMessageId ?? ""}
+      data-conversation-id={entry.conversationId ?? ""}
     >
       <button
         type="button"

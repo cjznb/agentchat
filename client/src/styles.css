@@ -228,6 +228,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .state-panel.is-error { border-color: var(--color-error); }
 .state-mark { display: grid; place-items: center; width: var(--target-size); height: var(--target-size); color: var(--color-rail); background: var(--color-jade); border-radius: 50%; font: 700 var(--text-heading)/1 var(--font-utility); }
 .state-mark.is-loading { animation: breathe 1.4s var(--ease-standard) infinite; }
+.state-retry { margin-top: var(--space-5); min-height: var(--target-size); padding: 0 var(--space-5); color: var(--color-rail); background: var(--color-jade); border: none; border-radius: var(--radius-pill); font: 700 var(--text-label)/1 var(--font-utility); cursor: pointer; }
 
 @keyframes breathe { 50% { opacity: 0.45; transform: scale(0.92); } }
 

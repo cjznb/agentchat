@@ -13,7 +13,7 @@ import type {
   WsServerFrame,
 } from "../../../shared/contracts"
 import { initialState, planReload, reducer, reduceFrame, type AppState } from "../reducers"
-import { backoffDelay, WsClient, type WsSocketLike } from "../ws"
+import { backoffDelay, WsClient, type ConnectionStatus, type WsSocketLike } from "../ws"
 
 const humanConv: ConversationSummary = {
   id: "c1",
@@ -207,6 +207,19 @@ describe("reducer: 上翻分页与 refetch 对账（复审 I2）", () => {
   })
 })
 
+describe("reducer: 错误位（loadError，评审 C）", () => {
+  it("loadFailed 置位、成功 hydrate 清除", () => {
+    expect(initialState.loadError).toBe(false)
+
+    const failed = reducer(initialState, { type: "loadFailed" })
+    expect(failed.loadError).toBe(true)
+
+    // 任一成功重拉（hydrate，含空 patch）即清除错误位。
+    const recovered = reducer(failed, { type: "hydrate", patch: {} })
+    expect(recovered.loadError).toBe(false)
+  })
+})
+
 describe("reducer: 前向兼容（解析失败忽略）", () => {
   afterEach(() => vi.restoreAllMocks())
 
@@ -294,6 +307,40 @@ describe("WsClient", () => {
     sockets[0]!.onmessage?.({ data: JSON.stringify({ type: "resync", seq: 42, payload: {} }) })
     expect(client.since).toBe(42)
     expect(frames[0]).toMatchObject({ type: "resync" })
+    client.stop()
+  })
+
+  it("重连超过上限后进入 error 终态并停止（不再新建 socket）", () => {
+    vi.useFakeTimers()
+    const statuses: ConnectionStatus[] = []
+    const urls: string[] = []
+    const sockets: FakeSocket[] = []
+    const client = new WsClient({
+      url: "/api/ws",
+      socketFactory: (url) => {
+        const socket = new FakeSocket()
+        urls.push(url)
+        sockets.push(socket)
+        return socket
+      },
+      onFrame: () => {},
+      onStatus: (status) => statuses.push(status),
+      random: () => 0,
+      warn: () => {},
+      maxReconnectAttempts: 2,
+    })
+    client.start()
+    sockets[0]!.onclose?.()
+    vi.advanceTimersByTime(1000)
+    sockets[1]!.onclose?.()
+    vi.advanceTimersByTime(2000)
+    sockets[2]!.onclose?.()
+
+    expect(statuses[statuses.length - 1]).toBe("error")
+    expect(urls).toHaveLength(3)
+    // 终态后不再重连。
+    vi.advanceTimersByTime(60_000)
+    expect(urls).toHaveLength(3)
     client.stop()
   })
 

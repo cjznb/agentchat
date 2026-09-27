@@ -15,8 +15,11 @@ import {
   type WsResync,
 } from "../../shared/contracts"
 
-/** 连接状态（store 的 `connection` 字段直接复用）。 */
-export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "resync"
+/**
+ * 连接状态（store 的 `connection` 字段直接复用）。
+ * `error` = 重连次数超限后的终态（真实错误信号，驱动 UI 错误态与重试）。
+ */
+export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "resync" | "error"
 
 /** 浏览器 WebSocket 的最小结构（测试可注入假实现）。 */
 export interface WsSocketLike {
@@ -29,6 +32,8 @@ export interface WsSocketLike {
 
 export const WS_RECONNECT_BASE_MS = 1_000
 export const WS_RECONNECT_MAX_MS = 30_000
+/** 默认最大重连次数：超过即进入 `error` 终态（不再无限重试）。 */
+export const WS_RECONNECT_MAX_ATTEMPTS = 8
 
 /**
  * 退避时长：`base * 2^attempt` 封顶 `max`，再叠加 `[0, base)` jitter（并按 `max` 封顶）。
@@ -47,6 +52,8 @@ export interface WsClientOptions {
   readonly onStatus?: (status: ConnectionStatus) => void
   readonly random?: () => number
   readonly warn?: (message: string, detail?: unknown) => void
+  /** 重连次数上限；达上限后 `onStatus("error")` 并停止（默认 `WS_RECONNECT_MAX_ATTEMPTS`）。 */
+  readonly maxReconnectAttempts?: number
 }
 
 export class WsClient {
@@ -57,10 +64,12 @@ export class WsClient {
   private stopped = true
   private readonly random: () => number
   private readonly warn: (message: string, detail?: unknown) => void
+  private readonly maxAttempts: number
 
   constructor(private readonly options: WsClientOptions) {
     this.random = options.random ?? Math.random
     this.warn = options.warn ?? ((message, detail) => console.warn(message, detail))
+    this.maxAttempts = options.maxReconnectAttempts ?? WS_RECONNECT_MAX_ATTEMPTS
   }
 
   /** 最近已应用（或 resync 对齐）的事件 seq；重连时作为 `?since`。 */
@@ -70,6 +79,7 @@ export class WsClient {
 
   start(): void {
     this.stopped = false
+    this.attempt = 0
     this.options.onStatus?.("connecting")
     this.connect()
   }
@@ -132,6 +142,12 @@ export class WsClient {
   private scheduleReconnect(): void {
     if (this.stopped) return
     this.socket = undefined
+    // 重连超限：进入 `error` 终态并停止（真实错误信号，UI 据此显示错误态 + 重试）。
+    if (this.attempt >= this.maxAttempts) {
+      this.stopped = true
+      this.options.onStatus?.("error")
+      return
+    }
     this.options.onStatus?.("reconnecting")
     const delay = backoffDelay(this.attempt, this.random)
     this.attempt += 1

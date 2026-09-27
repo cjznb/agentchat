@@ -196,22 +196,32 @@ test("notification center: tabs, unread dots, badge, jump highlight, and WS cons
     await expect(page.getByTestId("notification-item")).toHaveCount(2)
     await page.getByTestId("notif-tab-actionable").click()
 
-    // 点击最新条目（ask2）→ 已读 + 跳转卡并高亮；徽标 2 → 1。
-    await page.getByTestId("notification-item").first().getByTestId("notification-open").click()
+    // 点击 ask2 条目 → 已读 + 跳转卡并高亮；徽标 2 → 1。
+    // 不假设「后创建者必在首条」（同 created_at 并列时旧实现次序随机）：按可见主题文本定位，
+    // 再读取该条目自身的 `data-card-message-id`/`data-notification-id` 作为断言锚点。
+    const secondItem = page.getByTestId("notification-item").filter({ hasText: "第二件" })
+    const clickedMessageId = await secondItem.getAttribute("data-card-message-id")
+    const clickedNotificationId = await secondItem.getAttribute("data-notification-id")
+    // 条目深链锚点即服务端 cardRef 的卡消息（而非靠列表位置推断）。
+    expect(clickedMessageId).toBe(card2.messageId)
+    expect(clickedNotificationId).toBe(ask2.id)
+
+    await secondItem.getByTestId("notification-open").click()
     await expect(page.getByTestId("chat-view")).toBeVisible()
-    await expect(page.locator(`[data-message-id="${card2.messageId}"]`)).toHaveAttribute("data-highlight", "true")
-    expect(page.url()).toContain(`msg=${card2.messageId}`)
+    await expect(page.locator(`[data-message-id="${clickedMessageId}"]`)).toHaveAttribute("data-highlight", "true")
+    expect(page.url()).toContain(`msg=${clickedMessageId}`)
     await expect(page.getByTestId("notification-badge")).toHaveText("1")
 
     // WS 一致性：外部答复 ask2 → `approval` 事件 → 通知页刷新（actionable 仅剩 ask1）。
     respondAsk(base.db, ask2.id, base.humanId, { choice: "是" })
     await openNotifications(page)
     await expect(page.getByTestId("notification-item")).toHaveCount(1)
-    await expect(page.getByTestId("notification-item").first()).toHaveAttribute("data-status", "pending")
+    const remaining = page.getByTestId("notification-item").filter({ hasText: "第一件" })
+    await expect(remaining).toHaveAttribute("data-status", "pending")
     await expect(page.getByTestId("notification-badge")).toHaveText("1")
 
     // 点击余下条目 → 已读 → 徽标隐藏、未读归零。
-    await page.getByTestId("notification-item").first().getByTestId("notification-open").click()
+    await remaining.getByTestId("notification-open").click()
     await expect(page.getByTestId("notification-badge")).toHaveCount(0)
     await openNotifications(page)
     await expect(page.locator('[data-testid="notification-unread"][data-unread="true"]')).toHaveCount(0)

@@ -265,6 +265,40 @@ describe("listNotifications", () => {
     const all = listNotifications(db, "all")
     expect(all.map((a) => a.id)).toEqual([action.id, agentAsk.id, humanAsk.id])
   })
+
+  it("breaks same created_at ties by insertion order (rowid), newest insert first", () => {
+    // 同一 created_at（同毫秒）三条：id 为 randomUUID，旧实现按 id 定序会随机反转；
+    // `rowid` 是插入序，确定性地令后插入者在前。
+    const agent = makeAgent("notif-tie")
+    const first = insertAsk(db, {
+      requesterAgentId: agent.id,
+      target: "human",
+      question: "t1",
+      options: [],
+      now: 7,
+    })
+    const second = insertAsk(db, {
+      requesterAgentId: agent.id,
+      target: "human",
+      question: "t2",
+      options: [],
+      now: 7,
+    })
+    const third = insertAsk(db, {
+      requesterAgentId: agent.id,
+      target: "human",
+      question: "t3",
+      options: [],
+      now: 7,
+    })
+
+    expect(listNotifications(db, "all").map((a) => a.id)).toEqual([third.id, second.id, first.id])
+    expect(listNotifications(db, "actionable").map((a) => a.id)).toEqual([
+      third.id,
+      second.id,
+      first.id,
+    ])
+  })
 })
 
 describe("markRead", () => {
