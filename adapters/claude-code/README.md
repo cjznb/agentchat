@@ -34,9 +34,9 @@ hook 由 Claude Code 进程派生，故这些变量需出现在启动 `claude` �
 | Claude Code 事件 | 脚本 | 动作 |
 |---|---|---|
 | `SessionStart`（`startup\|resume\|clear\|compact\|fork`） | `session-start.mjs` | 有 token → `register{join_token}` 认领重连；无 token → `register` 根并把 `join_token` 写 `<home>/agents/claude-code.token`(0600)；落盘节点 id 与「根回合窗口」；`/internal/state {online}`；兜底 `wake` 拉取并以 `additionalContext` 注入 |
-| `SubagentStart` | `subagent-start.mjs` | `register{parent_ref, task_ref}`（父关联兜底见下）；记录子映射；子节点 `state {busy}` |
+| `SubagentStart` | `subagent-start.mjs` | `register{parent_ref, task_ref}`：仅当根窗口 `sessionId` 与载荷 `session_id` **一致**时关联（否则跳过）；`task_ref` = 载荷 `agent_id`，缺失时用该会话内单调序号 `sub-<n>`；记录子映射；子节点 `state {busy}` |
 | `PreToolUse` / `PostToolUse` | `busy.mjs` | `/internal/state {busy}`（子代理内事件按 `agent_id` 映射到子节点，否则回落根） |
-| `Stop` | `idle.mjs` | `/internal/state {idle}` → `wake` → 有消息则输出 `decision:"block"` + `additionalContext` 续跑 → `/internal/result` 回执 |
+| `Stop` | `idle.mjs` | `/internal/state {idle}` → `wake` → 有消息则输出 `decision:"block"`（正文**同时镜像进 `reason`** 与 `additionalContext`）续跑 → `/internal/result` 回执；`stop_hook_active` 时放行；每会话连续 block ≤3 |
 | `Notification`（matcher `idle_prompt`） | `idle.mjs` | `/internal/state {idle}`；注入交由 Stop（见「注入路线」） |
 
 ## 注入路线选择依据（官方文档核实）
@@ -80,8 +80,10 @@ Claude Code 官方文档的 Common input fields 说明：子代理内触发的 h
 |---|---|
 | `claude-code.token` | 根节点 `join_token`（0600 尽力而为；陈旧时自动清除重建） |
 | `claude-code.id` | 根节点 Hub agent id（busy/idle 上报与取件归属） |
-| `claude-code.root.json` | 当前根回合窗口 `{agentId, sessionId, at}`（SubagentStart 父关联兜底） |
+| `claude-code.root.json` | 当前根回合窗口 `{agentId, sessionId, at}`（SubagentStart 父关联兜底；**须 session 匹配**） |
 | `claude-code.subs.json` | 子代理映射 `agent_id → {agentId, agentType, sessionId, at}`（PreToolUse/PostToolUse 归属） |
+| `claude-code.subseq.json` | 无 `agent_id` 子代理的会话内单调序号 `{sessionId: n}`（生成 `sub-<n>` task_ref） |
+| `claude-code.stop.json` | 每会话连续 block 计数 `{sessionId, count, at}`（超上限放行，无消息归零） |
 | `logs/claude-code-adapter.log` | 追加式带时间戳日志 |
 
 ## 健壮性
@@ -92,6 +94,12 @@ Claude Code 官方文档的 Common input fields 说明：子代理内触发的 h
   重新注册为根并写回新 token（此路径不产生重复根）。
 - token/id 写失败仅记录、不中断（尽力而为）。
 - 防注入死循环：`Stop` 仅在 `wake` 确有消息时 block；`delivered` 后下次 `wake` 为空，自然终止。
+- `stop_hook_active === true` → 立即放行（不 wake、不 block）；每会话连续 block 计数上限 3，超限放行且**不再 wake**
+  （避免认领后无法投递），无消息时计数归零。
+- **双通道注入保底**：消息正文同时写入 `reason`（Stop block 必被采纳字段）与 `additionalContext`；
+  `delivered` 仅在确实产出注入载荷后上报，绝不「未注入却回执已送达」。
+- 子节点父关联严格按会话匹配，多终端共享 `AGENTCHAT_HOME` 时不会错挂；无 `agent_id` 的子代理用会话内单调
+  序号 `sub-<n>` 保证 `task_ref` 唯一。
 
 ## 文件
 

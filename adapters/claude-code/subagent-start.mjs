@@ -2,15 +2,19 @@
 /**
  * SubagentStart hook：把 Claude Code 派生的子代理注册为 Hub 子节点。
  *
- * 语义（控制器裁决 ②）：`register{vendor, purpose, parent_ref, task_ref}`。
- * - `task_ref` = 载荷 `agent_id`（子代理唯一 id；缺失时退回 `session_id`）。
- * - `parent_ref` **兜底②「父回合窗口」**：Claude Code 的 SubagentStart 载荷**不含父引用字段**
- *   （官方文档 Common input fields 仅新增 `agent_id`/`agent_type`，见报告 §4），故按
- *   `<home>/agents/claude-code.root.json` 记录的「当前活跃根回合」关联；无则跳过（绝不误挂）。
- * - 记录 `<home>/agents/claude-code.subs.json` 的 `agent_id → Hub 节点 id` 映射，供 busy 上报归属。
+ * 语义（控制器裁决 ② + review Important #3）：
+ * - `register{vendor, purpose, parent_ref, task_ref}`。
+ * - `parent_ref` **父回合窗口兜底**：Claude Code 的 SubagentStart 载荷**不含父引用字段**
+ *   （官方文档 Common input fields 仅新增 `agent_id`/`agent_type`，见报告 §3），故按
+ *   `<home>/agents/claude-code.root.json` 的「当前活跃根回合」关联。
+ *   **必须 `root.sessionId === input.session_id`** 才使用，否则跳过并 warn——避免多终端共享
+ *   `AGENTCHAT_HOME` 时后写覆盖导致子节点错挂到别家根。
+ * - `task_ref`：优先载荷 `agent_id`（子代理唯一 id）；缺失时用**该会话内的单调序号**
+ *   `<home>/agents/claude-code.subseq.json`（`sub-<n>`），保证同会话内唯一，避免退化为
+ *   裸 `session_id` 导致多个无 `agent_id` 子代理撞键。
+ * - 记录 `<home>/agents/claude-code.subs.json` 的 `agent_id → Hub 节点 id` 映射，供 busy 归属。
  * - 上报该子节点 `busy`（新派生即开工）。
  *
- * TODO(待真机核实)：SubagentStart 载荷是否加入父/会话关联字段；若加入，应优先使用并保留本兜底。
  * 任何失败只记日志、退出码 0。
  */
 import {
@@ -25,6 +29,15 @@ import {
 } from "./common.mjs"
 import { errorMessage, readJson, writeJson } from "./token.mjs"
 
+function nextSessionSeq(paths, sessionId) {
+  const seqs = readJson(paths.subseq) ?? {}
+  const current = typeof seqs[sessionId] === "number" ? seqs[sessionId] : 0
+  const next = current + 1
+  seqs[sessionId] = next
+  writeJson(paths.subseq, seqs)
+  return `sub-${next}`
+}
+
 async function main() {
   const home = resolveHome(process.env)
   const paths = adapterPaths(home)
@@ -35,22 +48,26 @@ async function main() {
     return
   }
 
+  const sessionId = typeof input["session_id"] === "string" ? input["session_id"] : undefined
   const root = readJson(paths.root)
-  const parentRef = root !== undefined && typeof root["agentId"] === "string" ? root["agentId"] : undefined
-  if (parentRef === undefined) {
-    appendLog(home, "SubagentStart: no active root turn window; skip child registration")
+  const rootAgentId = root !== undefined && typeof root["agentId"] === "string" ? root["agentId"] : undefined
+  const rootSessionId = root !== undefined && typeof root["sessionId"] === "string" ? root["sessionId"] : undefined
+  if (rootAgentId === undefined || rootSessionId === undefined || rootSessionId !== sessionId) {
+    appendLog(
+      home,
+      `SubagentStart: no matching root turn window for session ${sessionId ?? "<none>"}; skip child registration`,
+    )
     return
   }
 
   const claudeAgentId = typeof input["agent_id"] === "string" ? input["agent_id"] : undefined
-  const sessionId = typeof input["session_id"] === "string" ? input["session_id"] : undefined
   const agentType = typeof input["agent_type"] === "string" ? input["agent_type"] : undefined
-  const taskRef = claudeAgentId ?? sessionId ?? `sub-${Date.now()}`
+  const taskRef = claudeAgentId ?? nextSessionSeq(paths, sessionId)
 
   const registered = await mcpRegister(config, {
     vendor: "claude-code",
     purpose: agentType ?? "subagent",
-    parent_ref: parentRef,
+    parent_ref: rootAgentId,
     task_ref: taskRef,
   })
 
@@ -59,7 +76,7 @@ async function main() {
     subs[claudeAgentId] = {
       agentId: registered.agentId,
       agentType: agentType ?? null,
-      sessionId: sessionId ?? null,
+      sessionId,
       at: Date.now(),
     }
     writeJson(paths.subs, subs)
