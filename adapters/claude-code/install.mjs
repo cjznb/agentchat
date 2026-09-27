@@ -1,30 +1,33 @@
 /**
- * AgentChat Claude Code 安装器：把 **hooks 事件条目** 与 **MCP server 条目** 并入用户
- * Claude Code `settings.json`。
+ * AgentChat Claude Code 安装器：把 **hooks 事件条目** 并入用户 `settings.json`，
+ * 把 **MCP server 条目** 并入 MCP 配置（默认用户级 `~/.claude.json`）。
  *
  * 用法：
- *   node adapters/claude-code/install.mjs [--config <path>] [--dry-run] [--uninstall] [--help]
+ *   node adapters/claude-code/install.mjs [--config <path>] [--mcp-config <path>]
+ *        [--dry-run] [--uninstall] [--help]
  *
- * 目标 settings 解析顺序（本文件实际支持，见 docs/adapters-claude-code.md）：
- *   1. `--config <path>`（显式；父目录缺失/文件不存在 → 明确错误，退出码 1）
- *   2. `$CLAUDE_SETTINGS`（AgentChat 约定覆盖；同上校验）
- *   3. `$CLAUDE_CONFIG_DIR/settings.json`（Claude Code 官方配置目录重定位），否则
- *      `~/.claude/settings.json`；文件不存在 → 报错并提示 `--config`（不自动创建）
+ * 落点（官方事实：Claude Code settings schema **无根级 `mcpServers`**，写在 settings.json 会被
+ * 静默忽略；官方 MCP JSON 位置为 `~/.claude.json` / `.mcp.json` / `claude mcp add-json`）：
+ *   - hooks : `settings.json` —— `--config` → `$CLAUDE_SETTINGS` → `$CLAUDE_CONFIG_DIR/settings.json`
+ *             → `~/.claude/settings.json`；不存在 → 报错并提示 `--config`（不自动创建）
+ *   - MCP   : `--mcp-config <path>`（如项目 `.mcp.json`）→ 否则用户级 `~/.claude.json`（不存在则创建）
+ *   `settings.json` 与 MCP 目标不得为同一文件。
  *
- * 合并语义（关键）：`hooks` 各事件下**用户既有条目一律保留**，仅追加本适配器条目并按脚本
- * 路径去重（重复安装不产生重复、内容等价）；`mcpServers` 仅增/改 `agentchat` 键，不动他人。
- * `--uninstall` 精确移除本适配器 hooks 条目（数组空则删该键）与 `mcpServers.agentchat`。
+ * 合并语义：`hooks` 各事件下**用户既有条目一律保留**，仅追加/去重本适配器条目——按
+ * `command === "node"` 且 `args[0]` 的**规范化绝对路径**命中本适配器脚本（不做 basename 兜底，
+ * 以免误删用户自有的同名脚本）；`mcpServers` 仅增/改 `agentchat` 键。改动前备份 `<file>.bak`、
+ * tmp+rename 原子写；`--dry-run` 只打印；`--uninstall` 精确移除两处本适配器条目（空数组键清空即删）。
  *
- * 安全：改动前备份 `<config>.bak`，再以临时文件 + rename 原子替换；`--dry-run` 只打印不落盘。
  * 纯 JS（不参与 `tsc`）；无第三方依赖。
  */
 import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { basename, dirname, join, sep } from "node:path"
+import { dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const MCP_KEY = "agentchat"
 const ADAPTER_DIR = dirname(fileURLToPath(import.meta.url))
+const ADAPTER_POSIX = ADAPTER_DIR.split(sep).join("/")
 
 /** 事件 → 脚本 + 可选 matcher；与 `settings.snippet.json` 及 A4 脚本逐一对应。 */
 const HOOK_EVENTS = [
@@ -35,12 +38,18 @@ const HOOK_EVENTS = [
   { event: "Stop", script: "idle.mjs", matcher: undefined },
   { event: "Notification", script: "idle.mjs", matcher: "idle_prompt" },
 ]
-/** 本适配器脚本 basename 集合；hooks 条目按 `args[0]` 的 basename 识别归属（可跨目录搬移）。 */
-const OUR_SCRIPTS = new Set(HOOK_EVENTS.map((e) => e.script))
+/** 本适配器 hooks 的规范化绝对路径集合；归属识别严格按此匹配（用户同名脚本不受影响）。 */
+const OUR_HOOK_PATHS = new Set(HOOK_EVENTS.map((e) => `${ADAPTER_POSIX}/${e.script}`))
 
-// ── 目标 settings 解析 ──────────────────────────────────────────────
+// ── 目标文件解析 ────────────────────────────────────────────────────
 
-function defaultConfigPath(env) {
+function normalizePath(p) {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "")
+}
+
+function resolveSettingsPath(explicit, env) {
+  if (explicit !== undefined && explicit !== "") return explicit
+  if (env.CLAUDE_SETTINGS !== undefined && env.CLAUDE_SETTINGS !== "") return env.CLAUDE_SETTINGS
   const dir =
     env.CLAUDE_CONFIG_DIR !== undefined && env.CLAUDE_CONFIG_DIR !== ""
       ? env.CLAUDE_CONFIG_DIR
@@ -48,23 +57,21 @@ function defaultConfigPath(env) {
   return join(dir, "settings.json")
 }
 
-function resolveConfigPath(explicit, env) {
-  if (explicit !== undefined && explicit !== "") return explicit
-  if (env.CLAUDE_SETTINGS !== undefined && env.CLAUDE_SETTINGS !== "") return env.CLAUDE_SETTINGS
-  return defaultConfigPath(env)
+function resolveMcpPath(explicit) {
+  return explicit !== undefined && explicit !== "" ? explicit : join(homedir(), ".claude.json")
 }
 
-function assertConfigExists(path) {
+function assertParentExists(path, label) {
   const dir = dirname(path)
-  if (!existsSync(dir)) throw new Error(`settings 父目录不存在：${dir}`)
+  if (!existsSync(dir)) throw new Error(`${label} 父目录不存在：${dir}`)
+}
+
+function assertSettingsExists(path) {
+  assertParentExists(path, "settings")
   if (!existsSync(path)) throw new Error(`settings 文件不存在：${path}（用 --config <path> 指定，或先创建）`)
 }
 
 // ── 将写内容 ────────────────────────────────────────────────────────
-
-function posix(p) {
-  return p.split(sep).join("/")
-}
 
 function hubUrl(env) {
   const base =
@@ -74,26 +81,25 @@ function hubUrl(env) {
   return `${base.replace(/\/+$/, "")}/mcp`
 }
 
-/** 与 snippet 一致的 hooks 目标结构（`node` + 绝对路径，exec form 跨平台）。 */
+/** 与 `settings.snippet.json` 一致的 hooks 目标结构（`node` + 绝对路径，exec form 跨平台）。 */
 function desiredHooks() {
-  const dir = posix(ADAPTER_DIR)
   const out = {}
   for (const { event, script, matcher } of HOOK_EVENTS) {
-    const hook = { type: "command", command: "node", args: [`${dir}/${script}`] }
+    const hook = { type: "command", command: "node", args: [`${ADAPTER_POSIX}/${script}`] }
     out[event] = [matcher === undefined ? { hooks: [hook] } : { matcher, hooks: [hook] }]
   }
   return out
 }
 
-/** 与 snippet 一致的 MCP 条目；`${…}` 由 Claude Code 在连接时展开（文件引用不支持，故用环境变量）。 */
+/**
+ * 与 `mcp.snippet.json` 一致：**配置里不含 token**，改用 `headersHelper` 在连接时由
+ * `mcp-headers.mjs` 从 `<AGENTCHAT_HOME>/hub_token` 等读取并输出头（规避凭据变量被读空）。
+ */
 function desiredMcp(env) {
   return {
     type: "http",
     url: hubUrl(env),
-    headers: {
-      Authorization: "Bearer ${HUB_TOKEN}",
-      "x-agent-id": "${AGENTCHAT_AGENT_ID}",
-    },
+    headersHelper: `node "${ADAPTER_POSIX}/mcp-headers.mjs"`,
   }
 }
 
@@ -107,10 +113,11 @@ function isOurHook(hook) {
   return (
     isRecord(hook) &&
     hook.type === "command" &&
+    hook.command === "node" &&
     Array.isArray(hook.args) &&
     hook.args.length > 0 &&
     typeof hook.args[0] === "string" &&
-    OUR_SCRIPTS.has(basename(hook.args[0]))
+    OUR_HOOK_PATHS.has(normalizePath(hook.args[0]))
   )
 }
 
@@ -139,61 +146,91 @@ function mergeHooks(config, desired) {
   return changed
 }
 
+function uninstallHooks(config) {
+  if (!isRecord(config.hooks)) return false
+  let changed = false
+  for (const event of Object.keys(config.hooks)) {
+    const existing = config.hooks[event]
+    if (!Array.isArray(existing)) continue
+    const kept = existing.filter((entry) => !isOurEntry(entry))
+    if (kept.length === existing.length) continue
+    changed = true
+    if (kept.length === 0) delete config.hooks[event]
+    else config.hooks[event] = kept
+  }
+  if (changed && Object.keys(config.hooks).length === 0) delete config.hooks
+  return changed
+}
+
 function mergeMcp(config, desired) {
   if (config.mcpServers === undefined) config.mcpServers = {}
-  else if (!isRecord(config.mcpServers)) throw new Error("目标 settings 的 mcpServers 字段不是对象，拒绝改写")
+  else if (!isRecord(config.mcpServers)) throw new Error("目标 MCP 配置的 mcpServers 字段不是对象，拒绝改写")
   if (JSON.stringify(config.mcpServers[MCP_KEY]) === JSON.stringify(desired)) return false
   config.mcpServers[MCP_KEY] = desired
   return true
 }
 
-function install(config, env) {
-  let changed = mergeHooks(config, desiredHooks())
-  if (mergeMcp(config, desiredMcp(env))) changed = true
-  return changed
+function uninstallMcp(config) {
+  if (!isRecord(config.mcpServers) || !Object.prototype.hasOwnProperty.call(config.mcpServers, MCP_KEY)) {
+    return false
+  }
+  delete config.mcpServers[MCP_KEY]
+  if (Object.keys(config.mcpServers).length === 0) delete config.mcpServers
+  return true
 }
 
-function uninstall(config) {
-  let changed = false
-  if (isRecord(config.hooks)) {
-    for (const event of Object.keys(config.hooks)) {
-      const existing = config.hooks[event]
-      if (!Array.isArray(existing)) continue
-      const kept = existing.filter((entry) => !isOurEntry(entry))
-      if (kept.length === existing.length) continue
-      changed = true
-      if (kept.length === 0) delete config.hooks[event]
-      else config.hooks[event] = kept
-    }
-    if (changed && Object.keys(config.hooks).length === 0) delete config.hooks
+// ── JSON 读写（备份 + tmp+rename 原子写）─────────────────────────────
+
+function parseJson(text, label) {
+  let value
+  try {
+    value = JSON.parse(text)
+  } catch (error) {
+    throw new Error(`${label} 不是合法 JSON：${error instanceof Error ? error.message : String(error)}`)
   }
-  if (isRecord(config.mcpServers) && Object.prototype.hasOwnProperty.call(config.mcpServers, MCP_KEY)) {
-    delete config.mcpServers[MCP_KEY]
-    if (Object.keys(config.mcpServers).length === 0) delete config.mcpServers
-    changed = true
-  }
-  return changed
+  if (!isRecord(value)) throw new Error(`${label} 顶层不是对象，拒绝改写`)
+  return value
+}
+
+function readJson(path, label) {
+  return parseJson(readFileSync(path, "utf8"), label)
+}
+
+function readJsonIfExists(path, label) {
+  return existsSync(path) ? readJson(path, label) : undefined
+}
+
+function serialize(config) {
+  return `${JSON.stringify(config, null, 2)}\n`
+}
+
+function commit(path, text) {
+  if (existsSync(path)) copyFileSync(path, `${path}.bak`)
+  const tmp = `${path}.tmp-${process.pid}`
+  writeFileSync(tmp, text)
+  renameSync(tmp, path)
 }
 
 // ── 参数与主流程 ────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const args = { config: undefined, dryRun: false, uninstall: false, help: false, error: undefined }
+  const args = { config: undefined, mcpConfig: undefined, dryRun: false, uninstall: false, help: false, error: undefined }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === "--dry-run") args.dryRun = true
     else if (arg === "--uninstall") args.uninstall = true
     else if (arg === "--help" || arg === "-h") args.help = true
-    else if (arg === "--config") {
+    else if (arg === "--config" || arg === "--mcp-config") {
       const value = argv[i + 1]
       if (value === undefined || value.startsWith("--")) {
-        args.error = "--config 需要一个路径参数"
+        args.error = `${arg} 需要一个路径参数`
         return args
       }
-      args.config = value
+      if (arg === "--config") args.config = value
+      else args.mcpConfig = value
       i += 1
     } else {
-      args.error = `未知参数：${arg}（支持 --config <path>、--dry-run、--uninstall、--help）`
+      args.error = `未知参数：${arg}（支持 --config <path>、--mcp-config <path>、--dry-run、--uninstall、--help）`
       return args
     }
   }
@@ -203,18 +240,11 @@ function parseArgs(argv) {
 const HELP =
   [
     "AgentChat Claude Code 安装器",
-    "用法：node adapters/claude-code/install.mjs [--config <path>] [--dry-run] [--uninstall]",
-    "  --config <path>   目标 settings.json（默认：$CLAUDE_SETTINGS 或 $CLAUDE_CONFIG_DIR/settings.json 或 ~/.claude/settings.json）",
-    "  --dry-run 只打印不落盘；--uninstall 精确移除本适配器条目；--help 显示本帮助",
+    "用法：node adapters/claude-code/install.mjs [--config <path>] [--mcp-config <path>] [--dry-run] [--uninstall]",
+    "  --config <path>      hooks 目标 settings.json（默认：$CLAUDE_SETTINGS 或 $CLAUDE_CONFIG_DIR/settings.json 或 ~/.claude/settings.json）",
+    "  --mcp-config <path>  MCP 目标（默认：~/.claude.json；项目级可用 <repo>/.mcp.json）",
+    "  --dry-run 只打印不落盘；--uninstall 精确移除两处本适配器条目；--help 显示本帮助",
   ].join("\n") + "\n"
-
-function parseConfig(text) {
-  try {
-    return JSON.parse(text)
-  } catch (error) {
-    throw new Error(`目标 settings 不是合法 JSON：${error instanceof Error ? error.message : String(error)}`)
-  }
-}
 
 function main() {
   const args = parseArgs(process.argv.slice(2))
@@ -228,31 +258,40 @@ function main() {
   }
   try {
     const env = process.env
-    const configPath = resolveConfigPath(args.config, env)
-    assertConfigExists(configPath)
-    const config = parseConfig(readFileSync(configPath, "utf8"))
-    if (!isRecord(config)) throw new Error("目标 settings 顶层不是对象，拒绝改写")
+    const settingsPath = resolveSettingsPath(args.config, env)
+    const mcpPath = resolveMcpPath(args.mcpConfig)
+    if (normalizePath(settingsPath) === normalizePath(mcpPath)) {
+      throw new Error("settings 与 MCP 目标不能是同一文件（settings.json 的 mcpServers 会被静默忽略）")
+    }
+    assertSettingsExists(settingsPath)
+    const settings = readJson(settingsPath, "settings")
+    const existingMcp = readJsonIfExists(mcpPath, "MCP 配置")
+    if (!args.uninstall && existingMcp === undefined) assertParentExists(mcpPath, "MCP 配置")
+
+    const hooksChanged = args.uninstall ? uninstallHooks(settings) : mergeHooks(settings, desiredHooks())
+    const mcp = existingMcp ?? {}
+    const mcpChanged = args.uninstall
+      ? existingMcp !== undefined && uninstallMcp(mcp)
+      : mergeMcp(mcp, desiredMcp(env))
     const action = args.uninstall ? "卸载" : "安装"
-    const changed = args.uninstall ? uninstall(config) : install(config, env)
-    const text = `${JSON.stringify(config, null, 2)}\n`
 
     if (args.dryRun) {
-      process.stdout.write(text)
-      console.error(`[agentchat] --dry-run：未写入 ${configPath}（${changed ? "将有改动" : "无改动"}）`)
+      process.stdout.write(`# hooks → ${settingsPath}\n${serialize(settings)}`)
+      if (!args.uninstall || existingMcp !== undefined) {
+        process.stdout.write(`# MCP → ${mcpPath}\n${serialize(mcp)}`)
+      }
+      console.error(`[agentchat] --dry-run：未写入（${hooksChanged || mcpChanged ? "将有改动" : "无改动"}）`)
       return 0
     }
-    if (!changed) {
-      console.log(`[agentchat] 目标 settings 已是最新（${action}无改动）：${configPath}`)
+    if (!hooksChanged && !mcpChanged) {
+      console.log(`[agentchat] 目标已是最新（${action}无改动）`)
       return 0
     }
-    copyFileSync(configPath, `${configPath}.bak`)
-    const tmp = `${configPath}.tmp-${process.pid}`
-    writeFileSync(tmp, text)
-    renameSync(tmp, configPath)
-    console.log(`[agentchat] ${action}完成：${configPath}`)
-    console.log(`[agentchat] 原文件已备份：${configPath}.bak`)
-    console.log(`[agentchat] hooks 条目：${posix(ADAPTER_DIR)}/{session-start,subagent-start,busy,idle}.mjs`)
-    console.log(`[agentchat] MCP 条目：${MCP_KEY} → ${desiredMcp(env).url}`)
+    if (hooksChanged) commit(settingsPath, serialize(settings))
+    if (mcpChanged) commit(mcpPath, serialize(mcp))
+    console.log(`[agentchat] ${action}完成`)
+    console.log(`[agentchat] hooks → ${settingsPath}${hooksChanged ? `（备份：${settingsPath}.bak）` : "（无改动）"}`)
+    console.log(`[agentchat] MCP   → ${mcpPath}${mcpChanged ? `（备份：${mcpPath}.bak）` : "（无改动）"}`)
     return 0
   } catch (error) {
     console.error(`[agentchat] 错误：${error instanceof Error ? error.message : String(error)}`)

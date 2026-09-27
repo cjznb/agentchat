@@ -1,12 +1,25 @@
 # AgentChat — Claude Code 适配器安装与冒烟
 
 把本机 [Claude Code](https://code.claude.com/docs/en/hooks) 接入 AgentChat Hub。安装器
-（`adapters/claude-code/install.mjs`）把 **hooks 事件条目** 与 **MCP server 条目** 并入用户
-`settings.json`，一条命令完成；本文档同时给出**手动冒烟清单**（需真实 Claude Code）与**排障表**。
+（`adapters/claude-code/install.mjs`）一条命令写入**两个文件**：**hooks** 并入
+`settings.json`，**MCP server 条目**并入 MCP 配置（默认用户级 `~/.claude.json`）。本文档同时给出
+**手动冒烟清单**（需真实 Claude Code）与**排障表**。
 
 > 适配器组件（`*.mjs`）的事件映射、注入路线与健壮性见 `adapters/claude-code/README.md`。
 > 冒烟步骤中标注「**需真实 Claude Code**」的必须真机执行；`install.mjs` 的配置写入由单测覆盖
 > （`adapters/claude-code/__tests__/install.test.ts`，真子进程）。
+
+## 两个落点（务必区分；官方事实）
+
+Claude Code 的 **settings schema 没有根级 `mcpServers`**（写在 `settings.json` 会被**静默忽略**、不报错）。
+MCP server 的官方 JSON 位置是 `~/.claude.json`、项目 `.mcp.json`、或 `claude mcp add-json`。故：
+
+| 内容 | 落点 | 片段文件 |
+|---|---|---|
+| **hooks** | `settings.json`（用户级 `~/.claude/settings.json`，或项目 `.claude/settings.json`） | `adapters/claude-code/settings.snippet.json` |
+| **MCP server** | MCP 配置：默认 `~/.claude.json`；项目级用 `--mcp-config .mcp.json` | `adapters/claude-code/mcp.snippet.json` |
+
+> 安装器**拒绝**把两处写成同一文件（同一文件 → 报错），从机制上避免 MCP 落在被忽略的位置。
 
 ## 前置
 
@@ -18,33 +31,37 @@
 
 | 变量 | 必填 | 默认值 | 说明 |
 |---|---|---|---|
-| `HUB_TOKEN` | **是** | — | Hub 传输门 token，取 `<AGENTCHAT_HOME>/hub_token` 的内容。hooks 脚本与 MCP 头都用它 |
-| `AGENTCHAT_AGENT_ID` | 是（MCP 用） | — | 本节点 agent id，取 `<AGENTCHAT_HOME>/agents/claude-code.id` 的内容（**首次 SessionStart 后生成**，见下） |
+| `HUB_TOKEN` | **是** | — | Hub 传输门 token，取 `<AGENTCHAT_HOME>/hub_token` 的内容。**hooks 脚本读它**（MCP 头由下面脚本从文件读） |
+| `AGENTCHAT_AGENT_ID` | 否 | — | 本节点 agent id；**一般无需设置**——`mcp-headers.mjs` 默认读 `<AGENTCHAT_HOME>/agents/claude-code.id`，此变量仅作环境变量覆盖 |
 | `AGENTCHAT_HOME` | 否 | `~/.agentchat` | 数据目录；token/id/日志的落盘根（与 Hub 一致） |
 | `AGENTCHAT_URL` | 否 | `http://127.0.0.1:<AGENTCHAT_PORT 或 4646>` | Hub 地址；安装器用它推导 MCP `url` |
 | `AGENTCHAT_PORT` | 否 | `4646` | 仅用于推导默认 `AGENTCHAT_URL` |
 | `AGENTCHAT_HOOK_TIMEOUT_MS` | 否 | `3000` | hook HTTP 超时覆盖（仅测试用途；生产恒 3s） |
 
-hook 由 Claude Code 进程派生，故这些变量需出现在**启动 `claude` 的环境**里（`export HUB_TOKEN=…`）。
+hook 由 Claude Code 进程派生，故 `HUB_TOKEN` 需出现在**启动 `claude` 的环境**里（`export HUB_TOKEN=…`）。
 
-> **为何用 `AGENTCHAT_AGENT_ID` 而不是文件引用**：OpenCode 的 MCP 配置支持 `{file:…}` 直接引用 id 文件；
-> Claude Code 的 `settings.json` **不支持文件引用**，只支持 `${VAR}` 环境变量展开（官方文档 *Environment
-> variable expansion in `.mcp.json`*）。故 `x-agent-id` 用 `${AGENTCHAT_AGENT_ID}` 变量承载，值即 id 文件内容。
+> **MCP 头为何不写 token、也不用 `${HUB_TOKEN}`**：Claude Code 的 MCP 文档有
+> *Credential variables that read as empty* 一节——某些凭据变量会被**静默替换为空**，失败态是难查的 401。
+> 故 MCP 条目改用 `headersHelper`（官方支持的「连接时动态产出头」机制）指向 `mcp-headers.mjs`，
+> 由该脚本在连接时从 `<AGENTCHAT_HOME>/hub_token` 与 `agents/claude-code.id` 读取并输出头，
+> **配置里不出现任何 token**。详见 `mcp.snippet.json`。
 
 ## 安装
 
-安装器支持的目标 settings 解析顺序（依次）：
+安装器支持的目标解析（依次）：
 
-1. `--config <path>`（显式；父目录缺失/文件不存在 → 明确报错，退出码 1）
-2. `$CLAUDE_SETTINGS`（AgentChat 约定覆盖；同上校验）
-3. `$CLAUDE_CONFIG_DIR/settings.json`（Claude Code 官方配置目录重定位），否则 `~/.claude/settings.json`
+- **hooks 目标 `settings.json`**：① `--config <path>` → ② `$CLAUDE_SETTINGS`（AgentChat 约定覆盖）→
+  ③ `$CLAUDE_CONFIG_DIR/settings.json`（官方配置目录重定位），否则 `~/.claude/settings.json`。
+  默认路径不存在 → **报错并提示用 `--config`**（不自动创建；Claude Code settings 为**严格 JSON**）。
+- **MCP 目标**：① `--mcp-config <path>`（如项目 `<repo>/.mcp.json`）→ ② 默认 `~/.claude.json`
+  （不存在则创建，父目录需存在）。
 
-若第 3 步默认路径不存在，安装器**报错并提示用 `--config`**（不自动创建 settings——避免写出未知 schema 的文件）。
-Claude Code 的 settings 为**严格 JSON**（无注释/尾逗号）。
+选默认 `~/.claude.json` 的理由：用户级、跨项目生效、**无需项目工作区信任审批**（项目 `.mcp.json`
+在交互会话里要用户逐项目批准）；需要团队共享/版本控制时改用 `--mcp-config <repo>/.mcp.json`。
 
-写入策略：改动前先备份 `<config>.bak`，再以**临时文件 + rename 原子替换**；`--dry-run` 只打印不落盘。
-合并语义：`hooks` 下**用户既有条目一律保留**，只追加本适配器条目并按脚本路径去重（幂等）；`mcpServers`
-只增/改 `agentchat` 键。`--uninstall` 精确移除本适配器条目（事件数组清空后删该键）。
+写入策略：改动前备份 `<file>.bak`，再以**临时文件 + rename 原子替换**；`--dry-run` 只打印两处目标、不落盘。
+合并语义：`hooks` 下**用户既有条目一律保留**，只追加本适配器条目并按**规范化绝对路径**去重（幂等）；
+`mcpServers` 只增/改 `agentchat` 键。`--uninstall` 精确移除两处本适配器条目（事件数组清空后删该键）。
 
 ### PowerShell（Windows）
 
@@ -57,9 +74,10 @@ $env:AGENTCHAT_HOME = "$HOME\.agentchat"
 $env:HUB_TOKEN = (Get-Content "$HOME\.agentchat\hub_token" -Raw).Trim()
 $env:AGENTCHAT_URL = "http://127.0.0.1:4646"   # 可选，默认即此
 
-# 3) 预演（只打印将写入的内容），确认无误后去掉 --dry-run
+# 3) 预演（打印两处将写入内容），确认无误后去掉 --dry-run
 node adapters/claude-code/install.mjs --config "$HOME\.claude\settings.json" --dry-run
 node adapters/claude-code/install.mjs --config "$HOME\.claude\settings.json"
+# 项目级 MCP 落 .mcp.json（可选）：加 --mcp-config "$PWD\.mcp.json"
 ```
 
 ### POSIX（macOS / Linux）
@@ -71,18 +89,21 @@ export AGENTCHAT_URL="http://127.0.0.1:4646"   # 可选
 
 node adapters/claude-code/install.mjs --config ~/.claude/settings.json --dry-run
 node adapters/claude-code/install.mjs --config ~/.claude/settings.json
+# 项目级 MCP（可选）： --mcp-config "$PWD/.mcp.json"
 ```
 
 ### 默认查找 / 卸载
 
 ```bash
-node adapters/claude-code/install.mjs            # 自动查 $CLAUDE_SETTINGS 或 $CLAUDE_CONFIG_DIR/settings.json 或 ~/.claude/settings.json
-node adapters/claude-code/install.mjs --dry-run
+node adapters/claude-code/install.mjs            # hooks→$CLAUDE_SETTINGS|$CLAUDE_CONFIG_DIR/settings.json|~/.claude/settings.json；MCP→~/.claude.json
+node adapters/claude-code/install.mjs --dry-run  # 打印两处目标与将写内容
 node adapters/claude-code/install.mjs --uninstall
 node adapters/claude-code/install.mjs --help
 ```
 
-安装后 settings 里新增两处（`settings.snippet.json` 与写入结构一致）：
+安装后新增两处（两个片段文件分别与写入结构一致）：
+
+`settings.json`（hooks；见 `settings.snippet.json`）：
 
 ```jsonc
 {
@@ -98,51 +119,53 @@ node adapters/claude-code/install.mjs --help
     "PostToolUse":   [{ "hooks": [{ "type": "command", "command": "node", "args": ["<…>/busy.mjs"] }] }],
     "Stop":          [{ "hooks": [{ "type": "command", "command": "node", "args": ["<…>/idle.mjs"] }] }],
     "Notification":  [{ "matcher": "idle_prompt", "hooks": [{ "type": "command", "command": "node", "args": ["<…>/idle.mjs"] }] }]
-  },
+  }
+}
+```
+
+MCP 配置（`~/.claude.json` 顶层；见 `mcp.snippet.json`）：
+
+```jsonc
+{
   "mcpServers": {
     "agentchat": {
       "type": "http",
       "url": "http://127.0.0.1:4646/mcp",
-      "headers": {
-        "Authorization": "Bearer ${HUB_TOKEN}",
-        "x-agent-id": "${AGENTCHAT_AGENT_ID}"
-      }
+      "headersHelper": "node \"<仓库绝对路径>/adapters/claude-code/mcp-headers.mjs\""
     }
   }
 }
 ```
 
-> 片段使用 exec form（`"command": "node", "args": ["<abs>.mjs"]`）：Claude Code 在 `args` 存在时
-> **不经 shell**、把每个 `args` 元素原样作为参数，跨平台一致（官方文档 *Exec form and shell form*）。
-> 请确保 `node` 在 `PATH` 上（`node >= 22`）。
+> hooks 片段用 exec form（`"command": "node", "args": ["<abs>.mjs"]`）：Claude Code 在 `args` 存在时
+> **不经 shell**、把每个元素原样作为参数，跨平台一致（官方 *Exec form and shell form*）。
+> `headersHelper` 的命令则经 shell 执行，故用绝对路径（含空格时已被引号包裹）。请确保 `node` 在 `PATH` 上。
 
 ## token / 节点 id 位置与陈旧自愈
 
 | 文件 | 位置 | 作用 |
 |---|---|---|
+| `hub_token` | `<AGENTCHAT_HOME>/hub_token` | 传输门 token；hooks 读环境变量 `HUB_TOKEN`，`mcp-headers.mjs` 读此文件（环境变量优先） |
 | `join_token` | `<AGENTCHAT_HOME>/agents/claude-code.token`（0600 尽力而为） | `SessionStart` 重连认领根节点 |
-| 节点 agent id | `<AGENTCHAT_HOME>/agents/claude-code.id` | busy/idle 上报与取件归属；**MCP 头 `x-agent-id` 的取值来源**（经 `AGENTCHAT_AGENT_ID`） |
+| 节点 agent id | `<AGENTCHAT_HOME>/agents/claude-code.id` | busy/idle 上报与取件归属；**MCP 头 `x-agent-id` 的取值来源**（由 `mcp-headers.mjs` 读取） |
 
 **陈旧自愈（已实现，无需人工）**：Hub DB 重置/切换后，`register` 返回 `invalid_join_token` →
 `session-start.mjs` 清空本地 `claude-code.token` → 按「无 token 首次注册」重新注册为新根 → 写回新 token/id。
 
 **手工兜底**（自愈仍失败时）：删除 `<AGENTCHAT_HOME>/agents/claude-code.token`（可视情况连同 `claude-code.id`）
-后重启 `claude`。
-
-**首次启动的 id 滞后**：`AGENTCHAT_AGENT_ID` 需要 `claude-code.id` 的内容，而该文件在**首次 `SessionStart`
-注册后**才生成。故首次流程为：① 启动 `claude`（hook 注册并写 id）→ ② 读取 id 设为 `AGENTCHAT_AGENT_ID`
-→ ③ 重启 `claude`，MCP 即带身份连接。这与 OpenCode 适配器首次 `agent_not_found` 后「重启一次」是同一模式。
+后重启 `claude`；若 id 变化，`mcp-headers.mjs` 会在下次连接重读，无需改配置。
 
 ## 手动冒烟清单（**需真实 Claude Code**）
 
 > 以下 ①–⑤ 均须在**安装了真实 Claude Code 的真机**上执行；括号内为观察点。安装器本身的配置写入由单测覆盖。
 
-1. **[ ] 安装并启动**：完成上一节安装（`settings.json` 已含 hooks + `mcpServers.agentchat`）后，在设置了
-   `HUB_TOKEN`/`AGENTCHAT_AGENT_ID` 的终端启动 `claude`。观察 `claude` 无报错、可正常进入会话。
+1. **[ ] 安装并启动**：完成上一节安装（`settings.json` 含 hooks、MCP 配置含 `mcpServers.agentchat`）后，
+   在设置了 `HUB_TOKEN` 的终端启动 `claude`。观察 `claude` 无报错、可正常进入会话。
 2. **[ ] 节点现身**：`GET /api/roster`（UI 数据面，无需 Bearer）应出现 `vendor` 为 `claude-code` 的节点。
    ```bash
    curl http://127.0.0.1:4646/api/roster
    ```
+   首次启动若 MCP 工具报 `identity_required`（`claude-code.id` 当时尚未生成），**重启一次 `claude`** 即可。
 3. **[ ] 发消息/ask**：从 Hub Web UI 选中该节点发送，或用另一节点的 MCP `send`/`ask` 指向它。
 4. **[ ] 目标空闲时被注入**：目标回合结束时（`Stop` hook），适配器取件并以 `Stop` 的
    `{"decision":"block","reason":…}` + `hookSpecificOutput.additionalContext` 注入续跑；**正文同时写入
@@ -158,32 +181,33 @@ node adapters/claude-code/install.mjs --help
 
 - `Stop` 输出 `{"decision":"block","reason":…,"hookSpecificOutput":{…}}` 组合字段的实际接受情况与
   `additionalContext` 生效时机；本适配器以 `reason` 同文镜像保底。
+- `headersHelper` 在真实连接中的调用时机/工作目录，以及它输出的 `Authorization`/`x-agent-id` 是否被完整采纳
+  （含 401/403 后重跑 helper 的行为）。
 - `stop_hook_active` 的精确置位时机（本适配器仅在确有消息时 block，未额外依赖该字段）。
 - `SubagentStart` 载荷是否含父/会话关联字段（当前文档只列 `agent_id`/`agent_type`；适配器按「根回合窗口」兜底）。
 - `Notification` 的 matcher / `notification_type` 字段命名（按 `idle_prompt` 匹配）。
 - `SessionStart` 的 `additionalContext` 真实渲染（仅用 `additionalContext`）。
-- Claude Code 对 `${HUB_TOKEN}`/`${AGENTCHAT_AGENT_ID}` 在 `headers` 中的展开（含 `HUB_TOKEN` 是否被
-  当作「凭据变量读作空」；见排障表对应行）。
 - Windows 上 `chmod 0600` 权限位实际生效情况（尽力而为）。
 
 ## 排障表
 
 | 症状 | 可能原因 | 处理 |
 |---|---|---|
-| hook 完全未触发（日志无新行） | `node` 不在 `PATH`；settings 未被加载；SessionStart matcher 未命中 | 确认 `node -v ≥ 22`；确认写入的是 `claude` 实际读取的 settings（用户级/项目级）；重启 `claude`；手工以空 stdin 跑 `node <abs>/session-start.mjs` 看是否报错；查 `<AGENTCHAT_HOME>/logs/claude-code-adapter.log` |
-| `additionalContext` 未生效 | 该 Claude Code 版本不接受 `Stop` 的 `hookSpecificOutput` 组合 | 注入正文已**同文写入 `reason`**（Stop block 必被采纳字段），通常仍可见；否则用 `SessionStart` 兜底拉取路径（下次启动时注入）；升级 Claude Code 复核 |
+| hook 完全未触发（日志无新行） | `node` 不在 `PATH`；settings 未被加载；SessionStart matcher 未命中 | 确认 `node -v ≥ 22`；确认写入的是 `claude` 实际读取的 settings；重启 `claude`；手工以空 stdin 跑 `node <abs>/session-start.mjs` 看是否报错；查 `<AGENTCHAT_HOME>/logs/claude-code-adapter.log` |
+| MCP 在 `/mcp` 里不存在 / 连接失败 | `mcpServers` 被误写进 `settings.json`（会被静默忽略） | 确认 MCP 条目在 `~/.claude.json` 顶层（或 `--mcp-config` 指定文件）；用 `claude mcp get agentchat` 检查；重跑安装器会拒绝同一文件 |
+| `additionalContext` 未生效 | 该 Claude Code 版本不接受 `Stop` 的 `hookSpecificOutput` 组合 | 注入正文已**同文写入 `reason`**（Stop block 必被采纳字段），通常仍可见；否则用 `SessionStart` 兜底拉取（下次启动注入）；升级 Claude Code 复核 |
 | 出现权限提示阻断 hook | 组织策略/权限模式禁止 hook 命令执行 | 在受信任目录运行 `claude`；确认未自定义收紧 hook 权限；hook 本身不产出 `permissionDecision`，不会主动拒绝工具 |
-| MCP `401 unauthorized` | `HUB_TOKEN` 未对 `claude` 进程可见，或 `headers` 里 `${HUB_TOKEN}` 被当作「凭据变量读作空」 | 在启动 `claude` 的终端 `export HUB_TOKEN=…` 后重启；若确认被读空，把 token 复制到一个**不以 TOKEN/SECRET/KEY/AUTH 命名**的变量（如 `AGENTCHAT_TT`）并改用 `${AGENTCHAT_TT}` |
-| MCP `400 agent_not_found` | `AGENTCHAT_AGENT_ID` 未设/陈旧：`claude-code.id` 尚未生成或已变 | 启动一次让 `SessionStart` 写 id，读取后设为 `AGENTCHAT_AGENT_ID`（或删 token+id 重注册拿新 id），**重启 `claude`** |
-| MCP 工具报 `identity_required` | MCP 会话无 `x-agent-id`（`AGENTCHAT_AGENT_ID` 为空/未展开） | 同上，确保 `AGENTCHAT_AGENT_ID` 已设置为 id 文件内容并重启 |
+| MCP `401 unauthorized` | `mcp-headers.mjs` 未产出 `Authorization`（`hub_token` 缺失/为空，且 `HUB_TOKEN` 未设） | 确认 Hub 已启动并生成 `<AGENTCHAT_HOME>/hub_token`；在启动 `claude` 的环境设 `HUB_TOKEN`；`/mcp` 面板可 Reconnect 触发 helper 重跑 |
+| MCP `400 agent_not_found` / 工具报 `identity_required` | `mcp-headers.mjs` 未产出 `x-agent-id`：`claude-code.id` 尚未生成（首次启动）或已变 | 启动一次让 `SessionStart` 写 id，然后**重启 `claude`**（连接时 helper 会重读）；若仍缺，删 token+id 重注册 |
+| MCP 头在配置里看不到 token | 设计如此：头由 `headersHelper` 连接时动态产出 | 需要手工核对时直接运行 `node adapters/claude-code/mcp-headers.mjs`，应输出 `{"Authorization":"Bearer …","x-agent-id":"…"}` |
 | 回合未在空闲时注入（`Stop` 未 wake） | `stop_hook_active===true` 时放行；或每会话连续 block 已达上限 3 | 预期防死循环行为：放行、不 wake；下个正常回合或重启后再试。`delivered` 后下次 `wake` 为空亦自然终止 |
-| `Notification(idle_prompt)` 未注入 | 设计如此：`Notification` 无注入通道，仅上报 `idle`（避免认领后无法投递而丢消息） | 注入统一由 `Stop` 承担；核对 `Stop` 是否触发（见上） |
-| 节点不在 `GET /api/roster` | hooks 未安装/未生效，或 `HUB_TOKEN` 缺失致注册跳过 | 重跑 `install.mjs` 确认两处已写入；导出 `HUB_TOKEN` 后重启；查适配器日志 |
+| `Notification(idle_prompt)` 未注入 | 设计如此：`Notification` 无注入通道，仅上报 `idle`（避免认领后无法投递而丢消息） | 注入统一由 `Stop` 承担；核对 `Stop` 是否触发 |
+| 搬移适配器目录后重复安装留下旧条目 | 归属按**绝对路径**匹配（**不做 basename 兜底**，以免误删用户同名脚本）；旧路径不再被识别 | 搬移前先 `--uninstall`；或手工删除指向旧路径的 hooks 条目后再安装 |
+| 重复安装产生重复 hook 条目 | `args[0]` 路径被手工改动致不再命中本适配器绝对路径 | 归属按规范化绝对路径匹配；勿改动 `args` 里的脚本路径；`--uninstall` 后重装 |
 | Windows 权限位无效（`claude-code.token` 非 0600） | Windows 上 `chmod` 调用成功但权限位可能不生效 | 非 bug；与 Hub/OpenCode 同策略（尽力而为），依赖本机文件系统 ACL |
-| 重复安装产生重复 hook 条目 | 手工编辑过 `args` 路径致脚本 basename 无法识别 | 条目按 `args[0]` 的 **basename** 识别归属；避免改动 `args` 里的脚本名；`--uninstall` 后再重装 |
 
 ## 约束
 
 - 安装器不改动用户无关配置键；重复安装内容等价；`--uninstall` 精确移除本适配器条目。
 - 适配器只经 HTTP 契约与 Hub 通信，不 import Hub 的 server 代码；无新增运行时依赖。
-- `settings.snippet.json` 与 `install.mjs` 的写入结构保持**一致**（hooks 事件集合、exec form、MCP 条目）。
+- `settings.snippet.json`（hooks）与 `mcp.snippet.json`（MCP）分别与 `install.mjs` 的对应写入结构**一致**。

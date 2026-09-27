@@ -68,15 +68,5 @@
         ]
       }
     ]
-  },
-  "mcpServers": {
-    "agentchat": {
-      "type": "http",
-      "url": "http://127.0.0.1:4646/mcp",
-      "headers": {
-        "Authorization": "Bearer ${HUB_TOKEN}",
-        "x-agent-id": "${AGENTCHAT_AGENT_ID}"
-      }
-    }
   }
 }

@@ -1,22 +1,24 @@
 /**
- * Task 5 单测：以真实子进程运行 `install.mjs`，在临时 settings 上验证
- * ① 含用户自定义 hooks/mcpServers 的 settings 安装后用户条目完好 + 本适配器条目已加、
- * ② 安装两次内容等价（幂等，hooks 数组不重复）、③ `--uninstall` 精确移除且空数组键被清理、
- * ④ `--dry-run` 不落盘且打印 hooks 与 mcpServers 两处内容、
- * ⑤ 缺父目录/找不到配置 → 清晰错误 + 非 0 退出码。
+ * Task 5 单测（含 review 修正）：以真实子进程运行 `install.mjs`，验证
+ * ① hooks 落 settings.json、MCP 落 MCP 配置（默认 ~/.claude.json，测试用 --mcp-config），用户条目完好；
+ * ② 安装两次两文件均字节等价（幂等，hooks 数组不重复）；
+ * ③ `--uninstall` 精确移除两处本适配器条目、空数组键清理、**用户自有同名脚本（不同路径）不受影响**；
+ * ④ `--dry-run` 不落盘且打印两处目标；⑤ 缺父目录/文件/同一文件 → 清晰错误 + 非 0 退出码；
+ * ⑥ `mcp-headers.mjs` 从环境/`<home>` 文件产出头（配置不含 token）；
+ * ⑦ snippet 与安装器写入结构逐字节一致。
  */
 import { spawnSync, type SpawnSyncReturns } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, dirname, join } from "node:path"
+import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url))
 const ADAPTER_DIR = join(TEST_DIR, "..")
 const INSTALL = join(ADAPTER_DIR, "install.mjs")
+const HEADERS = join(ADAPTER_DIR, "mcp-headers.mjs")
 const ADAPTER_POSIX = ADAPTER_DIR.split(/[\\/]/).join("/")
-const OUR_SCRIPTS = ["session-start.mjs", "subagent-start.mjs", "busy.mjs", "idle.mjs"]
 const EVENTS: ReadonlyArray<readonly [string, string]> = [
   ["SessionStart", "session-start.mjs"],
   ["SubagentStart", "subagent-start.mjs"],
@@ -25,6 +27,7 @@ const EVENTS: ReadonlyArray<readonly [string, string]> = [
   ["Stop", "idle.mjs"],
   ["Notification", "idle.mjs"],
 ]
+const FOREIGN_BUSY = { hooks: [{ type: "command", command: "node", args: ["/user/own/busy.mjs"] }] }
 const OTHER_MCP = { type: "http", url: "https://example.com/mcp" }
 const USER_SESSION_START = {
   matcher: "startup",
@@ -51,8 +54,7 @@ function seedSettings(path: string): void {
       {
         $schema: "https://json.schemastore.org/claude-code-settings.json",
         model: "sonnet",
-        hooks: { SessionStart: [USER_SESSION_START], Stop: [USER_STOP] },
-        mcpServers: { other: OTHER_MCP },
+        hooks: { SessionStart: [USER_SESSION_START], PreToolUse: [FOREIGN_BUSY], Stop: [USER_STOP] },
       },
       null,
       2,
@@ -60,10 +62,14 @@ function seedSettings(path: string): void {
   )
 }
 
+function seedMcp(path: string): void {
+  writeFileSync(path, `${JSON.stringify({ mcpServers: { other: OTHER_MCP }, topLevelState: "keep" }, null, 2)}\n`)
+}
+
 function run(args: readonly string[], env: Record<string, string> = {}): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, [INSTALL, ...args], {
     encoding: "utf8",
-    env: { ...process.env, CLAUDE_SETTINGS: "", ...env },
+    env: { ...process.env, CLAUDE_SETTINGS: "", AGENTCHAT_URL: "", ...env },
   })
 }
 
@@ -75,7 +81,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readConfig(path: string): Record<string, unknown> {
   const value: unknown = JSON.parse(readFileSync(path, "utf8"))
-  if (!isRecord(value)) throw new Error("settings root is not an object")
+  if (!isRecord(value)) throw new Error("root is not an object")
   return value
 }
 
@@ -85,9 +91,16 @@ function nested(record: Record<string, unknown>, key: string): Record<string, un
   return value
 }
 
-function arrayAt(record: Record<string, unknown>, key: string): unknown[] {
+function maybeArray(record: Record<string, unknown>, key: string): unknown[] | undefined {
   const value = record[key]
+  if (value === undefined) return undefined
   if (!Array.isArray(value)) throw new Error(`${key} is not an array`)
+  return value
+}
+
+function arrayAt(record: Record<string, unknown>, key: string): unknown[] {
+  const value = maybeArray(record, key)
+  if (value === undefined) throw new Error(`${key} is not an array`)
   return value
 }
 
@@ -96,8 +109,16 @@ function str(value: unknown): string {
   return value
 }
 
-/** 某 hooks 条目引用的脚本 basename 列表（`args[0]`）。 */
-function entryScripts(entry: unknown): string[] {
+function normalize(p: string): string {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "")
+}
+
+function ourPath(script: string): string {
+  return `${ADAPTER_POSIX}/${script}`
+}
+
+/** 某 hooks 条目引用的命令路径列表。 */
+function entryPaths(entry: unknown): string[] {
   if (!isRecord(entry)) return []
   const hooks = entry["hooks"]
   if (!Array.isArray(hooks)) return []
@@ -105,19 +126,18 @@ function entryScripts(entry: unknown): string[] {
     if (!isRecord(hook)) return []
     const args = hook["args"]
     const first = Array.isArray(args) ? args[0] : undefined
-    return typeof first === "string" ? [basename(first)] : []
+    return typeof first === "string" ? [normalize(first)] : []
   })
 }
 
-function ourCount(entries: unknown[]): number {
-  return entries.filter((entry) => entryScripts(entry).some((name) => OUR_SCRIPTS.includes(name))).length
+function ourCount(entries: unknown[], script: string): number {
+  return entries.filter((entry) => entryPaths(entry).includes(ourPath(script))).length
 }
 
 function hasOurEntry(entries: unknown[], script: string): boolean {
-  return entries.some((entry) => entryScripts(entry).includes(script))
+  return entries.some((entry) => entryPaths(entry).includes(ourPath(script)))
 }
 
-/** 定位本适配器的 command 条目，核对 exec form 的 `node` + 绝对路径。 */
 function ourCommand(entries: unknown[], script: string): { command: string; path: string } | undefined {
   for (const entry of entries) {
     if (!isRecord(entry)) continue
@@ -127,7 +147,7 @@ function ourCommand(entries: unknown[], script: string): { command: string; path
       if (!isRecord(hook)) continue
       const args = hook["args"]
       const first = Array.isArray(args) ? args[0] : undefined
-      if (typeof first === "string" && basename(first) === script) {
+      if (typeof first === "string" && normalize(first) === ourPath(script)) {
         return { command: str(hook["command"]), path: first }
       }
     }
@@ -144,97 +164,128 @@ function mcpEntry(config: Record<string, unknown>, key: string): Record<string, 
   return entry
 }
 
-describe("install.mjs 幂等安装", () => {
-  it("merges hooks + MCP entries while keeping user entries", () => {
-    const cfg = join(tempDir(), "settings.json")
+function installPair(): { settings: string; mcp: string } {
+  const dir = tempDir()
+  const settings = join(dir, "settings.json")
+  const mcp = join(dir, "claude.json")
+  seedSettings(settings)
+  seedMcp(mcp)
+  expect(run(["--config", settings, "--mcp-config", mcp]).status).toBe(0)
+  return { settings, mcp }
+}
+
+describe("install.mjs 幂等安装（hooks→settings，MCP→独立文件）", () => {
+  it("merges hooks into settings and MCP into the MCP file, keeping user entries", () => {
+    const dir = tempDir()
+    const cfg = join(dir, "settings.json")
+    const mcpFile = join(dir, "claude.json")
     seedSettings(cfg)
+    seedMcp(mcpFile)
 
-    const result = run(["--config", cfg])
-    expect(result.status).toBe(0)
-    const parsed = readConfig(cfg)
-    expect(parsed["model"]).toBe("sonnet")
+    expect(run(["--config", cfg, "--mcp-config", mcpFile]).status).toBe(0)
 
-    const hooks = nested(parsed, "hooks")
-    const session = arrayAt(hooks, "SessionStart")
-    expect(session).toContainEqual(USER_SESSION_START)
-    expect(hasOurEntry(session, "session-start.mjs")).toBe(true)
-    expect(ourCommand(session, "session-start.mjs")).toEqual({
+    const settings = readConfig(cfg)
+    expect(settings["model"]).toBe("sonnet")
+    expect(settings["mcpServers"]).toBeUndefined() // MCP 不得写进 settings.json
+    const hooks = nested(settings, "hooks")
+    expect(arrayAt(hooks, "SessionStart")).toContainEqual(USER_SESSION_START)
+    expect(arrayAt(hooks, "Stop")).toContainEqual(USER_STOP)
+    expect(arrayAt(hooks, "PreToolUse")).toContainEqual(FOREIGN_BUSY) // 用户自有 busy.mjs 保留
+    for (const [event, script] of EVENTS) expect(hasOurEntry(arrayAt(hooks, event), script)).toBe(true)
+    expect(ourCommand(arrayAt(hooks, "SessionStart"), "session-start.mjs")).toEqual({
       command: "node",
       path: `${ADAPTER_POSIX}/session-start.mjs`,
     })
-    const stop = arrayAt(hooks, "Stop")
-    expect(stop).toContainEqual(USER_STOP)
-    expect(hasOurEntry(stop, "idle.mjs")).toBe(true)
-    for (const [event, script] of EVENTS) expect(hasOurEntry(arrayAt(hooks, event), script)).toBe(true)
 
-    expect(mcpEntry(parsed, "other")).toEqual(OTHER_MCP)
-    const agentchat = mcpEntry(parsed, "agentchat")
+    const mcp = readConfig(mcpFile)
+    expect(mcp["topLevelState"]).toBe("keep")
+    expect(mcpEntry(mcp, "other")).toEqual(OTHER_MCP)
+    const agentchat = mcpEntry(mcp, "agentchat")
     if (agentchat === undefined) throw new Error("mcpServers.agentchat missing")
     expect(agentchat["type"]).toBe("http")
     expect(agentchat["url"]).toBe("http://127.0.0.1:4646/mcp")
-    const headers = nested(agentchat, "headers")
-    expect(headers["Authorization"]).toBe("Bearer ${HUB_TOKEN}")
-    expect(str(headers["x-agent-id"])).toBe("${AGENTCHAT_AGENT_ID}")
+    const helper = str(agentchat["headersHelper"])
+    expect(helper).toContain(`${ADAPTER_POSIX}/mcp-headers.mjs`)
+    expect(JSON.stringify(agentchat)).not.toContain("Bearer") // 配置里不得出现 token
     expect(existsSync(`${cfg}.bak`)).toBe(true)
+    expect(existsSync(`${mcpFile}.bak`)).toBe(true)
   })
 
-  it("is idempotent: installing twice is byte-identical with no duplicate hooks", () => {
-    const cfg = join(tempDir(), "settings.json")
+  it("is idempotent: two installs are byte-identical in both files, no duplicate hooks", () => {
+    const dir = tempDir()
+    const cfg = join(dir, "settings.json")
+    const mcpFile = join(dir, "claude.json")
     seedSettings(cfg)
-    expect(run(["--config", cfg]).status).toBe(0)
-    const afterFirst = readFileSync(cfg, "utf8")
+    seedMcp(mcpFile)
 
-    expect(run(["--config", cfg]).status).toBe(0)
-    expect(readFileSync(cfg, "utf8")).toBe(afterFirst)
+    expect(run(["--config", cfg, "--mcp-config", mcpFile]).status).toBe(0)
+    const settingsAfter = readFileSync(cfg, "utf8")
+    const mcpAfter = readFileSync(mcpFile, "utf8")
+
+    expect(run(["--config", cfg, "--mcp-config", mcpFile]).status).toBe(0)
+    expect(readFileSync(cfg, "utf8")).toBe(settingsAfter)
+    expect(readFileSync(mcpFile, "utf8")).toBe(mcpAfter)
 
     const hooks = nested(readConfig(cfg), "hooks")
-    for (const [event] of EVENTS) expect(ourCount(arrayAt(hooks, event))).toBe(1)
+    for (const [event, script] of EVENTS) expect(ourCount(arrayAt(hooks, event), script)).toBe(1)
   })
 
-  it("--uninstall removes only this adapter's entries and clears emptied event keys", () => {
-    const cfg = join(tempDir(), "settings.json")
-    seedSettings(cfg)
-    expect(run(["--config", cfg]).status).toBe(0)
+  it("--uninstall removes only this adapter's entries from both files, leaving user keys/scripts", () => {
+    const { settings: cfg, mcp: mcpFile } = installPair()
 
-    const installed = readConfig(cfg)
-    arrayAt(nested(installed, "hooks"), "Stop").push({ hooks: [{ type: "command", command: "echo", args: ["keep-stop"] }] })
-    nested(installed, "mcpServers")["keep"] = { type: "http", url: "https://keep.example/mcp" }
-    writeFileSync(cfg, `${JSON.stringify(installed, null, 2)}\n`)
+    const installedSettings = readConfig(cfg)
+    arrayAt(nested(installedSettings, "hooks"), "Stop").push({ hooks: [{ type: "command", command: "echo", args: ["keep-stop"] }] })
+    writeFileSync(cfg, `${JSON.stringify(installedSettings, null, 2)}\n`)
+    const installedMcp = readConfig(mcpFile)
+    nested(installedMcp, "mcpServers")["keep"] = { type: "http", url: "https://keep.example/mcp" }
+    writeFileSync(mcpFile, `${JSON.stringify(installedMcp, null, 2)}\n`)
 
-    expect(run(["--config", cfg, "--uninstall"]).status).toBe(0)
-    const parsed = readConfig(cfg)
-    const hooks = nested(parsed, "hooks")
+    expect(run(["--config", cfg, "--mcp-config", mcpFile, "--uninstall"]).status).toBe(0)
+
+    const settings = readConfig(cfg)
+    expect(settings["model"]).toBe("sonnet")
+    const hooks = nested(settings, "hooks")
     expect(arrayAt(hooks, "SessionStart")).toContainEqual(USER_SESSION_START)
     expect(hasOurEntry(arrayAt(hooks, "SessionStart"), "session-start.mjs")).toBe(false)
+    expect(arrayAt(hooks, "PreToolUse")).toContainEqual(FOREIGN_BUSY) // 用户同名脚本仍在
+    expect(hasOurEntry(arrayAt(hooks, "PreToolUse"), "busy.mjs")).toBe(false)
     expect(arrayAt(hooks, "Stop")).toContainEqual(USER_STOP)
     expect(arrayAt(hooks, "Stop")).toContainEqual({ hooks: [{ type: "command", command: "echo", args: ["keep-stop"] }] })
-    expect(hasOurEntry(arrayAt(hooks, "Stop"), "idle.mjs")).toBe(false)
-    expect(hooks["SubagentStart"]).toBeUndefined()
-    expect(hooks["PreToolUse"]).toBeUndefined()
-    expect(parsed["model"]).toBe("sonnet")
+    expect(hooks["SubagentStart"]).toBeUndefined() // 空数组键被清理
+    expect(hooks["PostToolUse"]).toBeUndefined()
+    expect(hooks["Notification"]).toBeUndefined()
 
-    expect(mcpEntry(parsed, "agentchat")).toBeUndefined()
-    expect(mcpEntry(parsed, "other")).toEqual(OTHER_MCP)
-    expect(mcpEntry(parsed, "keep")).toEqual({ type: "http", url: "https://keep.example/mcp" })
+    const mcp = readConfig(mcpFile)
+    expect(mcp["topLevelState"]).toBe("keep")
+    expect(mcpEntry(mcp, "agentchat")).toBeUndefined()
+    expect(mcpEntry(mcp, "other")).toEqual(OTHER_MCP)
+    expect(mcpEntry(mcp, "keep")).toEqual({ type: "http", url: "https://keep.example/mcp" })
   })
 
-  it("--dry-run prints both sections without writing or backing up", () => {
-    const cfg = join(tempDir(), "settings.json")
+  it("--dry-run prints both targets without writing or backing up", () => {
+    const dir = tempDir()
+    const cfg = join(dir, "settings.json")
+    const mcpFile = join(dir, "claude.json")
     seedSettings(cfg)
-    const before = readFileSync(cfg, "utf8")
+    seedMcp(mcpFile)
+    const settingsBefore = readFileSync(cfg, "utf8")
+    const mcpBefore = readFileSync(mcpFile, "utf8")
 
-    const result = run(["--config", cfg, "--dry-run"])
+    const result = run(["--config", cfg, "--mcp-config", mcpFile, "--dry-run"])
     expect(result.status).toBe(0)
-    expect(readFileSync(cfg, "utf8")).toBe(before)
+    expect(readFileSync(cfg, "utf8")).toBe(settingsBefore)
+    expect(readFileSync(mcpFile, "utf8")).toBe(mcpBefore)
     expect(existsSync(`${cfg}.bak`)).toBe(false)
+    expect(existsSync(`${mcpFile}.bak`)).toBe(false)
     const out = result.stdout ?? ""
+    expect(out).toContain(`# hooks → ${cfg}`)
+    expect(out).toContain(`# MCP → ${mcpFile}`)
     expect(out).toContain("session-start.mjs")
-    expect(out).toContain("mcpServers")
     expect(out).toContain('"agentchat"')
-    expect(out).toContain("${HUB_TOKEN}")
+    expect(out).toContain("headersHelper")
   })
 
-  it("fails with a clear message and non-zero exit when the target is missing", () => {
+  it("fails with a clear message and non-zero exit on missing paths or a same-file target", () => {
     const dir = tempDir()
 
     const missingParent = run(["--config", join(dir, "nope", "settings.json")])
@@ -248,5 +299,81 @@ describe("install.mjs 幂等安装", () => {
     const defaultMissing = run([], { CLAUDE_CONFIG_DIR: tempDir() })
     expect(defaultMissing.status).not.toBe(0)
     expect(defaultMissing.stderr).toContain("--config")
+
+    const cfg = join(dir, "settings.json")
+    seedSettings(cfg)
+    const same = run(["--config", cfg, "--mcp-config", cfg])
+    expect(same.status).not.toBe(0)
+    expect(same.stderr).toContain("同一文件")
+  })
+})
+
+// ── Important #3：headersHelper 脚本产出头（配置不含 token）──────────
+
+function envWithout(keys: readonly string[], extra: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined || keys.includes(k)) continue
+    env[k] = v
+  }
+  return { ...env, ...extra }
+}
+
+function runHeaders(env: Record<string, string>): Record<string, unknown> {
+  const result = spawnSync(process.execPath, [HEADERS], { encoding: "utf8", env })
+  expect(result.status).toBe(0)
+  const parsed: unknown = JSON.parse(result.stdout ?? "")
+  if (!isRecord(parsed)) throw new Error("headers output is not an object")
+  return parsed
+}
+
+describe("mcp-headers.mjs", () => {
+  it("reads token + agent id from <home> files when env is absent", () => {
+    const home = tempDir()
+    mkdirSync(join(home, "agents"), { recursive: true })
+    writeFileSync(join(home, "hub_token"), "tok-123\n")
+    writeFileSync(join(home, "agents", "claude-code.id"), "agent-9\n")
+
+    const headers = runHeaders(envWithout(["HUB_TOKEN", "AGENTCHAT_AGENT_ID"], { AGENTCHAT_HOME: home }))
+    expect(headers["Authorization"]).toBe("Bearer tok-123")
+    expect(headers["x-agent-id"]).toBe("agent-9")
+  })
+
+  it("prefers environment variables and omits absent headers instead of emitting empties", () => {
+    const overridden = runHeaders(
+      envWithout([], { AGENTCHAT_HOME: tempDir(), HUB_TOKEN: "envtok", AGENTCHAT_AGENT_ID: "envid" }),
+    )
+    expect(overridden).toEqual({ Authorization: "Bearer envtok", "x-agent-id": "envid" })
+
+    const empty = runHeaders(envWithout(["HUB_TOKEN", "AGENTCHAT_AGENT_ID"], { AGENTCHAT_HOME: tempDir() }))
+    expect(empty).toEqual({})
+  })
+})
+
+// ── snippet 与安装器写入结构一致 ────────────────────────────────────
+
+describe("snippet 一致性", () => {
+  it("settings/mcp snippets match the installer output byte-for-byte", () => {
+    const dir = tempDir()
+    const cfg = join(dir, "settings.json")
+    const mcpFile = join(dir, "claude.json")
+    writeFileSync(cfg, "{}\n")
+    writeFileSync(mcpFile, "{}\n")
+    expect(run(["--config", cfg, "--mcp-config", mcpFile]).status).toBe(0)
+
+    function replaceSnippet(snippet: Record<string, unknown>): Record<string, unknown> {
+      const value: unknown = JSON.parse(
+        JSON.stringify(snippet).split("__AGENTCHAT_ADAPTER_DIR__").join(ADAPTER_POSIX),
+      )
+      if (!isRecord(value)) throw new Error("snippet is not an object")
+      return value
+    }
+
+    const settingsSnippet = replaceSnippet(readConfig(join(ADAPTER_DIR, "settings.snippet.json")))
+    const mcpSnippet = replaceSnippet(readConfig(join(ADAPTER_DIR, "mcp.snippet.json")))
+    expect(JSON.stringify(readConfig(cfg)["hooks"])).toBe(JSON.stringify(settingsSnippet["hooks"]))
+    expect(JSON.stringify(mcpEntry(readConfig(mcpFile), "agentchat"))).toBe(
+      JSON.stringify(mcpEntry(mcpSnippet, "agentchat")),
+    )
   })
 })

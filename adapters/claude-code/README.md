@@ -10,7 +10,8 @@
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `HUB_TOKEN` | 是 | Hub 传输门 token，取 `<AGENTCHAT_HOME>/hub_token` 内容 |
+| `HUB_TOKEN` | 是 | Hub 传输门 token，取 `<AGENTCHAT_HOME>/hub_token` 内容（**hooks 脚本读它**；MCP 头由 `mcp-headers.mjs` 从文件读，环境变量优先） |
+| `AGENTCHAT_AGENT_ID` | 否 | 本节点 agent id 覆盖；一般无需设置——`mcp-headers.mjs` 默认读 `<AGENTCHAT_HOME>/agents/claude-code.id` |
 | `AGENTCHAT_HOME` | 否 | 数据目录，默认 `~/.agentchat`（与 Hub 一致） |
 | `AGENTCHAT_URL` | 否 | Hub 地址，默认 `http://127.0.0.1:<AGENTCHAT_PORT 或 4646>` |
 | `AGENTCHAT_PORT` | 否 | 仅用于推导默认 `AGENTCHAT_URL` |
@@ -18,16 +19,26 @@
 
 hook 由 Claude Code 进程派生，故这些变量需出现在启动 `claude` 的环境里（`export HUB_TOKEN=…`）。
 
-## 安装
+## 安装（两个落点，务必区分）
 
-1. 复制 `settings.snippet.json` 的内容，把其中 `__AGENTCHAT_ADAPTER_DIR__` 全部替换为
-   `adapters/claude-code/` 的**绝对路径**（用正斜杠，Windows 亦可）。
-2. 把替换后的 `hooks` 对象并入用户级 `~/.claude/settings.json`（或项目级 `.claude/settings.json`）。
-   已存在其它 `hooks` 事件时，按事件名把数组项追加进去，不要整体覆盖。
-3. 确保 `HUB_TOKEN`（等环境变量）对 `claude` 进程可见。
+> **官方事实**：Claude Code settings schema **无根级 `mcpServers`**，写进 `settings.json` 会被**静默忽略**；
+> MCP server 的 JSON 位置为 `~/.claude.json` / 项目 `.mcp.json` / `claude mcp add-json`。故 hooks 与 MCP **分文件**。
 
-> 片段使用 `"command": "node", "args": ["<abs>/x.mjs"]` 形式，避免任何 shell 引用/平台差异；
-> 请确保 `node` 在 `PATH` 上（`node >= 22`，与 Hub 一致）。
+一条命令（`adapters/claude-code/install.mjs`）同时写两处：
+
+1. **hooks → `settings.json`**：复制 `settings.snippet.json` 的内容，把其中 `__AGENTCHAT_ADAPTER_DIR__`
+   全部替换为 `adapters/claude-code/` 的**绝对路径**（用正斜杠，Windows 亦可），把 `hooks` 对象并入用户级
+   `~/.claude/settings.json`（或项目级 `.claude/settings.json`）；已存在其它 `hooks` 事件时按事件名追加，不要覆盖。
+2. **MCP → MCP 配置**：复制 `mcp.snippet.json` 的内容，替换 `__AGENTCHAT_ADAPTER_DIR__` 后并入用户级
+   `~/.claude.json` 的顶层 `mcpServers`（项目级用 `--mcp-config <repo>/.mcp.json`）。条目用 `headersHelper`
+   指向 `mcp-headers.mjs`——**配置里不含 token**（规避凭据变量被读空）。
+3. 确保 `HUB_TOKEN` 对 `claude` 进程可见（hooks 需要）。
+
+安装器用法：`node adapters/claude-code/install.mjs [--config <path>] [--mcp-config <path>] [--dry-run] [--uninstall]`。
+完整步骤与排障见 `docs/adapters-claude-code.md`。
+
+> hooks 片段使用 exec form（`"command": "node", "args": ["<abs>/x.mjs"]`），不经 shell、跨平台一致；
+> `headersHelper` 经 shell 执行、用绝对路径。请确保 `node` 在 `PATH` 上（`node >= 22`，与 Hub 一致）。
 
 ## 事件映射
 
@@ -111,7 +122,10 @@ Claude Code 官方文档的 Common input fields 说明：子代理内触发的 h
 | `subagent-start.mjs` | 子节点注册（父回合窗口兜底）+ 映射 + busy |
 | `busy.mjs` | PreToolUse/PostToolUse → busy |
 | `idle.mjs` | Stop/Notification → idle；Stop 取件并注入续跑 |
-| `settings.snippet.json` | 可直接并入用户 settings 的 hooks 片段 |
+| `settings.snippet.json` | **hooks 片段**（落 `settings.json`） |
+| `mcp-headers.mjs` | MCP `headersHelper`：从 `<home>/hub_token` + `agents/claude-code.id` 产出请求头（配置不含 token） |
+| `mcp.snippet.json` | **MCP 片段**（落 `~/.claude.json` 顶层 `mcpServers`） |
+| `install.mjs` | 安装器：hooks→settings、MCP→MCP 配置，幂等/`--dry-run`/`--uninstall`/备份+原子写 |
 | `__tests__/` | 真子进程 + 假 stdin JSON + mock HTTP 服务端的单测 |
 
 ## 测试

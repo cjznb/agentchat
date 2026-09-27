@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agentchat": {
+      "type": "http",
+      "url": "http://127.0.0.1:4646/mcp",
+      "headersHelper": "node \"__AGENTCHAT_ADAPTER_DIR__/mcp-headers.mjs\""
+    }
+  }
+}
