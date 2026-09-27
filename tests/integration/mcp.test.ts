@@ -1,6 +1,6 @@
 /**
  * Task 8 —— MCP 端点集成测试（brief DoD）：真实 MCP SDK 客户端连 `POST /mcp`（Bearer）。
- * ① `tools/list` 恰为锁定十一名 + 金样例过 `MCP_TOOL_INPUTS`
+ * ① `tools/list` 恰为锁定十二名 + 金样例过 `MCP_TOOL_INPUTS`
  * ② `send{wait}` 端到端：对方 core 回信 → 调用方在 wait 内解锁拿到 reply
  * ③ 错误契约：未知收件人 RecipientNotFound / 子 shout Forbidden / `to:'*'` use_shout_tool
  *    / 缺身份 identity_required / 无 Bearer 401
@@ -31,7 +31,7 @@ import { applyAgentState, ensureHubToken } from "../../server/routes/internal"
 import { getAgent, insertAgent, type Agent } from "../../server/store/agents"
 import { listApprovals } from "../../server/store/approvals"
 
-/** 十一工具金样例（运行时注入真实 peer id 与可答复 ask id；键集合即「接线错误」检测基准）。 */
+/** 十二工具金样例（运行时注入真实 peer id 与可答复 ask id；键集合即「接线错误」检测基准）。 */
 function goldenInputs(
   peerId: string,
   answerableAskId: string,
@@ -171,8 +171,8 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<vo
   throw new Error("condition not met in time")
 }
 
-describe("tools/list 与十一工具金样例端到端（DoD ①，Important #1）", () => {
-  it("advertises the contract schemas and executes every one of the eleven tools with its golden input", async () => {
+describe("tools/list 与十二工具金样例端到端（DoD ①，Important #1）", () => {
+  it("advertises the contract schemas and executes every one of the twelve tools with its golden input", async () => {
     const actor = makeAgent("mcp-golden-actor")
     const peer = makeAgent("mcp-golden-peer")
     // 预置一条可答复 ask（peer → actor：actor 为 target），令 respond_ask 金样例有落点。

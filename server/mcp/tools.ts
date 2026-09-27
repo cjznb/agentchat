@@ -211,7 +211,7 @@ function runTool(name: McpToolName, args: unknown, ctx: ToolContext): Promise<un
   }
 }
 
-/** 按 `MCP_TOOLS` 顺序注册十一工具；入参 schema 一律取 `MCP_TOOL_INPUTS[name]`。 */
+/** 按 `MCP_TOOLS` 顺序注册十二工具；入参 schema 一律取 `MCP_TOOL_INPUTS[name]`。 */
 export function registerTools(server: McpServer, ctx: ToolContext): void {
   for (const name of MCP_TOOLS) {
     server.registerTool(

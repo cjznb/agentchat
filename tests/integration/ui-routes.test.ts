@@ -17,7 +17,7 @@ import { notificationListSchema } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
 import { registerRoot } from "../../server/core/agents"
 import { ensureHuman, sendMessage, shout } from "../../server/core/messaging"
-import { ask } from "../../server/core/permissions"
+import { ask, respondAsk } from "../../server/core/permissions"
 import { openDb, type Db } from "../../server/db"
 import { createApp } from "../../server/index"
 import { insertAgent } from "../../server/store/agents"
@@ -300,5 +300,47 @@ describe("POST /api/notifications/:id/read", () => {
 
     // 未知单 → 404。
     expect((await post("/api/notifications/nope/read", {})).status).toBe(404)
+  })
+})
+
+// ── Fix 1：ask 守卫（审批端点先拒，绝不 decide 改写 ask） ─────────────
+
+describe("POST /api/approvals/:id（ask 守卫，Fix 1）", () => {
+  it("rejects an ask id before decide: 404 ask_not_found, status stays pending and still answerable", async () => {
+    const { ask: stored } = ask(db, rootId, { to: "human", question: "选哪个", options: ["a", "b"] })
+
+    const res = await post(`/api/approvals/${stored.id}`, { decision: "approve" })
+    expect(res.status).toBe(404)
+    expect(errorBodySchema.parse(await res.json()).error).toBe("ask_not_found")
+    // 关键：守卫在任何状态写入之前生效 —— 该 ask 未被 decide 改写，仍为 pending。
+    expect(getApproval(db, stored.id)?.status).toBe("pending")
+
+    // 仍可经 ask 通道答复（respondAsk 未被 AskForbiddenError 锁死）。
+    const answered = respondAsk(db, stored.id, humanId, { choice: "a" })
+    expect(answered.status).toBe("answered")
+    expect(getApproval(db, stored.id)?.status).toBe("answered")
+  })
+
+  it("still decides an action approval through the existing path (no regression)", async () => {
+    const outcome = shout(db, rootId, "全员注意")
+    if (!("approval" in outcome)) throw new Error("expected a pending action approval")
+
+    const res = await post(`/api/approvals/${outcome.approval.id}`, { decision: "reject" })
+    expect(res.status).toBe(200)
+    const body = z
+      .object({
+        ok: z.boolean(),
+        approval: z.object({ id: z.string(), kind: z.string(), status: z.string() }),
+      })
+      .parse(await res.json())
+    expect(body.ok).toBe(true)
+    expect(body.approval.kind).toBe("action")
+    expect(body.approval.status).toBe("rejected")
+    expect(getApproval(db, outcome.approval.id)?.status).toBe("rejected")
+
+    // 单不存在仍为 404 `approval_not_found`（既有契约不回归）。
+    const missing = await post("/api/approvals/nope", { decision: "approve" })
+    expect(missing.status).toBe(404)
+    expect(errorBodySchema.parse(await missing.json()).error).toBe("approval_not_found")
   })
 })

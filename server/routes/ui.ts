@@ -31,7 +31,7 @@ import {
 import { agentCard, conversationList, groupList } from "../core/ui-queries"
 import { config } from "../config"
 import { openDb, type Db } from "../db"
-import { listApprovals, type Approval } from "../store/approvals"
+import { getApproval, listApprovals, type Approval } from "../store/approvals"
 import { addParticipant, createGroup } from "../store/conversations"
 
 // 生产缺省连接：首个 roster 请求时按 `config.dbPath` 打开并复用（进程单例）。
@@ -108,6 +108,14 @@ export function uiRoutes(db?: Db): Hono {
       const database = resolveDb(db)
       const parsed = decisionBodySchema.safeParse(await c.req.json().catch(() => undefined))
       if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
+      // Fix 1：先按 id 取单再决定 —— asks（kind='ask'）不认审批端点，必须在 `decide` **之前**拒绝，
+      // 否则 `claimDecision` 会先把 pending ask 误改为 approved，令其永久无法答复（respondAsk→AskForbiddenError）。
+      // 语义：asks 经 `/api/asks/:id/respond` 答复，审批端点 404 `ask_not_found`。
+      const existing = getApproval(database, c.req.param("id"))
+      if (existing === undefined) {
+        return c.json({ ok: false, error: new ApprovalNotFoundError(c.req.param("id")).code }, 404)
+      }
+      if (existing.kind === "ask") return c.json({ ok: false, error: "ask_not_found" }, 404)
       let approval: DecidedApproval
       try {
         approval = decide(database, c.req.param("id"), parsed.data.decision, Date.now())
