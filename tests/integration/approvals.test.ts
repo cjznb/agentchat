@@ -8,12 +8,14 @@
  * - `pending` 满 24h → `expired`（dispatcher 注入时钟清扫，不 `sleep(24h)`）
  * - `decide` 幂等：已决单再决 → `approval_already_decided`（路由 409），第一次落库为准
  * - `GET /api/approvals` 待处理列表、`POST /api/approvals/:id {decision}`（400/404/409）
+ * - Important #1 修复：非法 payload 在 gate 拒绝（无单）；批准执行抛错仍发如实失败回执
+ *   （500 + approved + 再决 409）；sweep 单条回执失败不中断其余
  * 每个用例使用独立临时 $AGENTCHAT_HOME。
  */
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { loadConfig } from "../../server/config"
 import { openDb, type Db } from "../../server/db"
 import { registerChild, registerLogical, registerRoot } from "../../server/core/agents"
@@ -30,12 +32,14 @@ import {
   ApprovalAlreadyDecidedError,
   decide,
   Forbidden,
+  InvalidApprovalPayloadError,
   sweepExpired,
 } from "../../server/core/permissions"
 import { createApp } from "../../server/index"
 import { getApproval, listApprovals, type Approval } from "../../server/store/approvals"
 import { insertAgent, type Agent } from "../../server/store/agents"
 import {
+  dmKey,
   getConversationByKey,
   isParticipant,
   listConversations,
@@ -321,5 +325,102 @@ describe("GET/POST /api/approvals", () => {
     const missing = await post("/api/approvals/no-such-id", { decision: "approve" })
     expect(missing.status).toBe(404)
     expect(await missing.json()).toEqual({ ok: false, error: "approval_not_found" })
+  })
+})
+
+describe("失败语义（Important #1 修复）", () => {
+  it("rejects an invalid payload at the gate without creating any approval", () => {
+    const root = makeRoot("gate-invalid-root")
+    ensureHuman(db)
+
+    try {
+      createGroup(db, { name: "", createdBy: root.id })
+      throw new Error("gate should have rejected the invalid payload")
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidApprovalPayloadError)
+      if (error instanceof InvalidApprovalPayloadError) {
+        expect(error.code).toBe("invalid_approval_payload")
+      }
+    }
+
+    expect(listApprovals(db)).toHaveLength(0)
+    expect(listConversations(db).filter((c) => c.kind === "group")).toHaveLength(0)
+  })
+
+  it("sends an honest failure receipt when the approved execution throws, keeps approved, 409s re-decide", async () => {
+    const root = makeRoot("gate-execfail-root")
+    ensureHuman(db)
+    // gate 放行（memberIds 是合法字符串数组），批准执行时 store FK 抛 —— 执行必抛场景
+    const approval = approvalOf(
+      createGroup(db, { name: "幽灵群", createdBy: root.id, memberIds: ["ghost-agent"] }),
+    )
+
+    const res = await post(`/api/approvals/${approval.id}`, { decision: "approve" })
+
+    expect(res.status).toBe(500)
+    expect(await res.json()).toMatchObject({ ok: false, error: "approval_execution_failed" })
+    expect(getApproval(db, approval.id)?.status).toBe("approved")
+    // 回执不变式：恰一条回执（按 meta.result 区分回执与审批卡）、meta 带失败信息、
+    // 正文如实报执行失败（不谎称已执行）
+    const receipts = inbox(db, root.id).filter(
+      (m) => m.meta?.["approvalId"] === approval.id && m.meta?.["result"] !== undefined,
+    )
+    expect(receipts).toHaveLength(1)
+    expect(receipts[0]?.meta).toMatchObject({ result: "approved", error: expect.any(String) })
+    expect(receipts[0]?.body).toContain("执行失败")
+    expect(receipts[0]?.body).not.toContain("已执行。")
+    // 群未创建（store 事务回滚），单已 approved → 再决 409
+    expect(listConversations(db).filter((c) => c.kind === "group")).toHaveLength(0)
+    const again = await post(`/api/approvals/${approval.id}`, { decision: "reject" })
+    expect(again.status).toBe(409)
+  })
+
+  it("isolates a failing expiry receipt so the other expired approval still receives theirs", () => {
+    const rootA = makeRoot("gate-exp-a")
+    const rootB = makeRoot("gate-exp-b")
+    const human = ensureHuman(db)
+    const first = approvalOf(shout(db, rootA.id, "第一条"))
+    const second = approvalOf(shout(db, rootB.id, "第二条"))
+    // 确定处理顺序：first 严格早于 second（同毫秒创建时按 id 定序不可依赖）
+    db.prepare<[string], void>("UPDATE approvals SET created_at = created_at - 10 WHERE id = ?").run(
+      first.id,
+    )
+
+    // 注入失败：first 的回执 DM 禁止写入 → 其 postDecision 抛错
+    const dmA = getConversationByKey(db, dmKey(rootA.id, human.id))
+    expect(dmA).toBeDefined()
+    db.exec(
+      `CREATE TRIGGER block_first_receipt BEFORE INSERT ON messages
+         WHEN NEW.conversation_id = '${dmA?.id ?? ""}'
+         BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END`,
+    )
+
+    const logged: unknown[][] = []
+    const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logged.push(args)
+    })
+    let swept = -1
+    try {
+      swept = sweepExpired(db, Date.now() + APPROVAL_TTL_MS + 1)
+    } finally {
+      spy.mockRestore()
+    }
+
+    // 两条都被 claim 为 expired（失败不回滚状态），循环未被第一条中断
+    expect(swept).toBe(2)
+    expect(getApproval(db, first.id)?.status).toBe("expired")
+    expect(getApproval(db, second.id)?.status).toBe("expired")
+    expect(logged).toHaveLength(1)
+    expect(logged[0]?.[1]).toBe(first.id)
+    // 第一条无回执（已记录失败），第二条仍收到拒绝语义回执（meta.result 区分回执与审批卡）
+    const firstReceipts = inbox(db, rootA.id).filter(
+      (m) => m.meta?.["approvalId"] === first.id && m.meta?.["result"] !== undefined,
+    )
+    expect(firstReceipts).toHaveLength(0)
+    const secondReceipts = inbox(db, rootB.id).filter(
+      (m) => m.meta?.["approvalId"] === second.id && m.meta?.["result"] !== undefined,
+    )
+    expect(secondReceipts).toHaveLength(1)
+    expect(secondReceipts[0]?.meta).toMatchObject({ result: "expired" })
   })
 })

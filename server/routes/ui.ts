@@ -15,7 +15,10 @@ import {
   ApprovalNotFoundError,
   decide,
   ensureHuman,
+  groupAddPayloadSchema,
+  groupCreatePayloadSchema,
   postDecision,
+  shoutPayloadSchema,
   type DecidedApproval,
 } from "../core/permissions"
 import { config } from "../config"
@@ -33,21 +36,12 @@ function resolveDb(db: Db | undefined): Db {
 }
 
 const decisionBodySchema = z.object({ decision: z.enum(["approve", "reject"]) })
-const shoutPayloadSchema = z.object({ body: z.string() })
-const groupCreatePayloadSchema = z.object({
-  name: z.string().min(1),
-  memberIds: z.array(z.string()).optional(),
-})
-const groupAddPayloadSchema = z.object({
-  conversationId: z.string().min(1),
-  agentId: z.string().min(1),
-  role: z.enum(["owner", "member"]).optional(),
-})
 
 /**
  * 批准后的实际执行（决议 1：执行在路由层 —— 本层同时 import permissions 与
  * messaging/store 原语；绕开闸门的是"已批准"路径而非执法点本身）。
- * payload 在 DB 读取边界经 zod 解析（parse-don't-validate）。
+ * payload schema 单源在 `core/permissions`（与 `gate` 前置校验同一份，
+ * Important #1）；此处解析取类型化字段（parse-don't-validate）。
  */
 function executeApproved(db: Db, approval: Approval): void {
   switch (approval.action) {
@@ -103,7 +97,20 @@ export function uiRoutes(db?: Db): Hono {
         }
         throw error
       }
-      if (approval.status === "approved") executeApproved(database, approval)
+      if (approval.status === "approved") {
+        // 回执不变式（Important #1）：执行失败也必须发出回执（meta/正文如实报失败），
+        // HTTP 如实反映失败；单保持 approved，再决仍由条件 UPDATE 409 锁死。
+        try {
+          executeApproved(database, approval)
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          postDecision(database, approval, detail)
+          return c.json(
+            { ok: false, error: "approval_execution_failed", detail, approval },
+            500,
+          )
+        }
+      }
       postDecision(database, approval)
       return c.json({ ok: true, approval })
     })

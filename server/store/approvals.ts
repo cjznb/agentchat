@@ -139,6 +139,8 @@ export interface ClaimExpiryInput {
 /**
  * 过期认领：`pending` 且 `created_at + ttl <= now` → `expired`。
  * 单语句批量 UPDATE + RETURNING，命中行即本次认领结果（并发下不重复认领）。
+ * `UPDATE...RETURNING` 无便携 ORDER BY → claim 后按 `created_at/id` 定序
+ * （先到先处理，供 sweep 的单条隔离循环拿到确定顺序）。
  */
 export function claimExpired(db: Db, input: ClaimExpiryInput): Approval[] {
   const rows = db
@@ -147,5 +149,9 @@ export function claimExpired(db: Db, input: ClaimExpiryInput): Approval[] {
         WHERE status = 'pending' AND created_at <= $now - $ttlMs RETURNING *`,
     )
     .all(input)
-  return rows.map(toApproval)
+  return rows
+    .map(toApproval)
+    .sort((a, b) =>
+      a.createdAt !== b.createdAt ? a.createdAt - b.createdAt : a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+    )
 }
