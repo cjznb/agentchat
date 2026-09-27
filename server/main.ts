@@ -11,6 +11,7 @@
  */
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
+import { registerConfiguredAdapters } from "./adapters/types"
 import { config } from "./config"
 import { Dispatcher } from "./core/dispatcher"
 import { openDb, type Db } from "./db"
@@ -27,6 +28,8 @@ export interface BootstrapOptions {
   readonly hubTokenPath?: string
   /** 空闲 MCP 会话 TTL（缺省 `DEFAULT_SESSION_TTL_MS`）；测试注入短值。 */
   readonly sessionTtlMs?: number
+  /** 已配置厂商（缺省 `config.adapters`）；启动时注册 pull 占位适配器。 */
+  readonly adapters?: readonly string[]
   /** `false` = 不启动 dispatcher（仅 HTTP；测试/诊断）。缺省 true。 */
   readonly startDispatcher?: boolean
   /** dispatcher 单轮异常回调（缺省 `console.error`）。 */
@@ -48,6 +51,9 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<HubHand
   const hubTokenPath = options.hubTokenPath ?? join(home, "hub_token")
   const ownsDb = options.db === undefined
   const db = options.db ?? openDb(join(home, "agentchat.db"))
+  const adapters = options.adapters ?? config.adapters
+  // 先登记可用性，再拉起 dispatcher（避免首轮把 pull 目标误当无通道/推送处理）。
+  registerConfiguredAdapters({ adapters })
   const dispatcher =
     options.startDispatcher === false
       ? undefined
@@ -65,6 +71,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<HubHand
     home,
     hubTokenPath,
     ...(options.sessionTtlMs === undefined ? {} : { sessionTtlMs: options.sessionTtlMs }),
+    adapters,
   })
   let closed = false
   return {

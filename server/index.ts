@@ -14,6 +14,7 @@ import type { AddressInfo } from "node:net"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Hono } from "hono"
+import { registerConfiguredAdapters } from "./adapters/types"
 import { config } from "./config"
 import type { Db } from "./db"
 import { internalRoutes, type InternalRoutesOptions } from "./routes/internal"
@@ -27,9 +28,12 @@ export interface AppOptions extends InternalRoutesOptions {
   readonly home?: string
   readonly sessionTtlMs?: number
   readonly distDir?: string
+  /** 已配置厂商（缺省 `config.adapters`）；启动时注册 pull 占位适配器。 */
+  readonly adapters?: readonly string[]
 }
 
 export function createApp(db?: Db, options?: AppOptions): Hono {
+  registerConfiguredAdapters({ adapters: options?.adapters ?? config.adapters })
   const app = new Hono()
   const distDir = options?.distDir ?? fileURLToPath(new URL("../client/dist", import.meta.url))
   const indexPath = join(distDir, "index.html")
@@ -66,6 +70,8 @@ export interface StartOptions {
   readonly home?: string
   /** 空闲 MCP 会话 TTL（缺省 `DEFAULT_SESSION_TTL_MS`）；测试注入短值。 */
   readonly sessionTtlMs?: number
+  /** 已配置厂商（缺省 `config.adapters`）；启动时注册 pull 占位适配器。 */
+  readonly adapters?: readonly string[]
 }
 
 export async function start(options: StartOptions = {}): Promise<RunningServer> {
@@ -75,6 +81,7 @@ export async function start(options: StartOptions = {}): Promise<RunningServer> 
       ...(options.hubTokenPath === undefined ? {} : { hubTokenPath: options.hubTokenPath }),
       ...(options.home === undefined ? {} : { home: options.home }),
       ...(options.sessionTtlMs === undefined ? {} : { sessionTtlMs: options.sessionTtlMs }),
+      ...(options.adapters === undefined ? {} : { adapters: options.adapters }),
     }).fetch,
     port,
   })

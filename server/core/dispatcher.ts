@@ -4,8 +4,8 @@
  *
  * - 周期 `DISPATCHER_INTERVAL_MS = 2000`；`tick(now)` 可注入时钟，测试不 sleep
  * - 每轮：`backupIfDue`（spec §12 每日单文件备份）→ busy 24h 过期 → 在途超时回收 →
- *   到期 job 分流（busy/offline/无适配器 → 退避重投；online → 原子认领 → `adapter.inject`
- *   → 结果落库）→ 失败通知扫描（30min 同对合并）
+ *   到期 job 分流（busy/offline/无适配器 → 退避重投；pull 适配器 → 跳过保持 pending；
+ *   online → 原子认领 → `adapter.inject` → 结果落库）→ 失败通知扫描（30min 同对合并）
  * - 与适配器解耦：经进程内 `VendorAdapter` 注册表按收件方 `vendor` 取适配器，
  *   单测注入 fake（Constraints）
  * - 状态推进处由本层发布回执事件（T5 交接的第三发布点）；
@@ -289,6 +289,9 @@ export class Dispatcher {
         deferWakeJob(this.db, { id: job.id, now, reason: null })
         continue
       }
+      // 进程外 pull：dispatcher 无推送通道，job 保持 pending 待 `/internal/wake` 认领，
+      // 绝不注入、绝不因“无推送通道”转 refused。
+      if (adapter.mode === "pull") continue
       const claimed = claimWakeJob(this.db, { id: job.id, now })
       if (claimed === undefined) continue
       const message = getBySeq(this.db, claimed.messageId)
