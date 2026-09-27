@@ -35,6 +35,8 @@
 写入策略：改动前先备份 `<config>.bak`，再以**临时文件 + rename 原子替换**；`--dry-run` 只打印不落盘。
 幂等：重复安装内容等价；`--uninstall` 只精确移除本适配器条目，保留用户其它键（含注释安全的 JSONC 解析，
 但改写后的活动文件为标准 JSON——原文可在 `.bak` 找回）。
+**MCP 条目所有权守卫**：写入前对既有 `mcp.agentchat` 做结构比对——仅当结构与本安装器将写入的一致才覆盖；
+结构不同则**拒绝并给非 0 退出码**（除非 `--force`）。`--uninstall` 仅当结构匹配本安装器产物时才移除该键，否则保留并提示。
 
 ### PowerShell（Windows）
 
@@ -146,8 +148,9 @@ export default { id: "agentchat", server: AgentChatPlugin }
 | 空闲未被唤醒（idle 未触发） | 宿主未发 `session.idle`/`session.status`（版本差异） | 核对 `@opencode-ai/plugin` 版本（实测 1.18.32）；`session.idle` 是主要触发，`session.status` 仅补 busy 起点 |
 | 回信似乎「开了新回合」 | 注入走 `client.session.promptAsync`，会开启新回合（符合「唤醒即续跑」语义） | 预期行为：busy 期间到达的消息会在**下一次 idle** 才被认领注入 |
 | 401/404 无重试 | 确定性错误按设计不重试、记录并降级（仅 5xx/429/网络错误指数退避） | 修正配置后重启；非 bug |
+| 子节点在 roster 中长期残留 | 退役依赖宿主发 `session.deleted`（子会话）事件 | 子会话删除时插件调 `/internal/retire`（幂等；`404` 视为已退役、不报错）；若宿主版本不发该事件则节点留待下一次清理（已知限制，见 `adapters/opencode/README.md` 健壮性） |
 
 ## 约束
 
-- 安装器不改动用户无关配置键；重复安装内容等价；`--uninstall` 精确移除。
+- 安装器不改动用户无关配置键；重复安装内容等价；`--uninstall` 精确移除本适配器条目（`mcp.agentchat` 仅在结构匹配本安装器产物时移除，否则保留用户自有条目并提示）；覆盖结构不同的既有 `mcp.agentchat` 需显式 `--force`。
 - 适配器只经 HTTP 契约与 Hub 通信，不 import Hub 的 server 代码；无新增运行时依赖。

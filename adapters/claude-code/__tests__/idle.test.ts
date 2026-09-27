@@ -1,8 +1,8 @@
 /**
  * Task 4 单测：Stop / Notification(idle_prompt)。
  * 覆盖：Stop → idle + wake + 注入（decision block + reason 正文 + additionalContext JSON）+ result delivered；
- * reason 双通道保底；空积压不 block/不投递；stop_hook_active 放行；每会话 block 上限后放行且不再 wake；
- * 无消息时计数归零；Notification 仅 idle 且不 wake；超时/不可达静默退出 0。
+ * reason 双通道保底；空积压不 block/不投递；链内 block 上限 3 + 链边界（stop_hook_active）重置；
+ * 租约重投按 messageId 去重不重复注入；Notification 仅 idle 且不 wake；超时/不可达静默退出 0。
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -35,6 +35,24 @@ function wakeWith(messages: unknown[]) {
   return {
     internal: (path: string) =>
       path === "/internal/wake" ? { status: 200, body: { messages, receipts: [] } } : undefined,
+  }
+}
+
+/** 每次 wake 返回**新** messageId 的积压（避免触发去重，专测 block 链计数）。 */
+function wakeFresh() {
+  let n = 0
+  return {
+    internal: (path: string) => {
+      if (path !== "/internal/wake") return undefined
+      n += 1
+      return {
+        status: 200,
+        body: {
+          messages: [{ id: `m${n}`, fromAgentId: "peer", conversationId: "c1", body: `msg-${n}` }],
+          receipts: [],
+        },
+      }
+    },
   }
 }
 
@@ -84,37 +102,85 @@ describe("Stop 取件注入", () => {
   })
 })
 
-describe("Stop 稳健性（stop_hook_active / block 上限）", () => {
-  it("passes without wake or block when stop_hook_active is true", async () => {
+describe("Stop 稳健性（链内 block 上限 + 链边界重置）", () => {
+  it("caps blocks within one chain at 3, then passes the 4th without waking (same chain)", async () => {
+    const hub = await startHub(wakeFresh())
+    const home = tempHome()
+    seedAgentId(home, "agent-root")
+    // 新链首停：block（计数 1）。
+    const first = await runHook("idle", { hook_event_name: "Stop", session_id: "sess-1" }, hubEnv(hub, home))
+    expect(first.stdout.trim()).not.toBe("")
+    // 同链续跑（stop_hook_active=true）：再 block 两次（计数 2、3），第 4 次达上限放行。
+    const continues: HookRun[] = []
+    for (let i = 0; i < 3; i += 1) {
+      continues.push(
+        await runHook(
+          "idle",
+          { hook_event_name: "Stop", session_id: "sess-1", stop_hook_active: true },
+          hubEnv(hub, home),
+        ),
+      )
+    }
+    expect(continues[0]?.stdout.trim()).not.toBe("")
+    expect(continues[1]?.stdout.trim()).not.toBe("")
+    expect(continues[2]?.stdout.trim()).toBe("")
+    expect(hub.requests.filter((r) => r.path === "/internal/wake")).toHaveLength(3)
+    expect(readStopState(home)).toMatchObject({ sessionId: "sess-1", count: 3 })
+    expect(readLog(home)).toContain("block cap 3 reached")
+    await hub.close()
+  })
+
+  it("never blocks again within the same chain after the cap (no infinite loop)", async () => {
+    const hub = await startHub(wakeFresh())
+    const home = tempHome()
+    seedAgentId(home, "agent-root")
+    await runHook("idle", { hook_event_name: "Stop", session_id: "sess-1" }, hubEnv(hub, home))
+    const payload = { hook_event_name: "Stop", session_id: "sess-1", stop_hook_active: true }
+    const runs: HookRun[] = []
+    for (let i = 0; i < 6; i += 1) runs.push(await runHook("idle", payload, hubEnv(hub, home)))
+    // 链内首停 + 2 次续 block = 共 3 次 wake；此后 4 次同链停全放行且不再 wake。
+    expect(hub.requests.filter((r) => r.path === "/internal/wake")).toHaveLength(3)
+    expect(runs.filter((r) => r.stdout.trim() !== "")).toHaveLength(2)
+    await hub.close()
+  })
+
+  it("resets the counter at a chain boundary (stop_hook_active absent/false) so a new chain can block again", async () => {
     const hub = await startHub(wakeWith(twoMessages))
     const home = tempHome()
     seedAgentId(home, "agent-root")
-    const run = await runHook(
+    // 预置一个已达上限的链计数（同 session），模拟上一链已放行。
+    mkdirSync(join(home, "agents"), { recursive: true })
+    writeFileSync(stopStatePath(home), `${JSON.stringify({ sessionId: "sess-1", count: 3, at: 1 })}\n`)
+    // 新回合（无 stop_hook_active）→ 计数归零、可再次 block（旧实现会永久放行）。
+    const run = await runHook("idle", { hook_event_name: "Stop", session_id: "sess-1" }, hubEnv(hub, home))
+    expect(run.code).toBe(0)
+    expect(run.stdout.trim()).not.toBe("")
+    expect(readStopState(home)).toMatchObject({ sessionId: "sess-1", count: 1 })
+    await hub.close()
+  })
+
+  it("does not re-inject a message id redelivered by the wake lease; reports delivered instead", async () => {
+    const hub = await startHub(wakeWith(twoMessages))
+    const home = tempHome()
+    seedAgentId(home, "agent-root")
+    const first = await runHook("idle", { hook_event_name: "Stop", session_id: "sess-1" }, hubEnv(hub, home))
+    // 租约重投：同一批 messageId 再次返回 → 绝不重复注入，仅补回执。
+    const second = await runHook(
       "idle",
       { hook_event_name: "Stop", session_id: "sess-1", stop_hook_active: true },
       hubEnv(hub, home),
     )
-    expect(run.code).toBe(0)
-    expect(run.stdout.trim()).toBe("")
-    expect(hub.requests.some((r) => r.path === "/internal/wake")).toBe(false)
-    expect(hub.requests.some((r) => r.path === "/internal/result")).toBe(false)
-    expect(readLog(home)).toContain("stop_hook_active")
-    await hub.close()
-  })
-
-  it("caps consecutive blocks per session, then passes without waking", async () => {
-    const hub = await startHub(wakeWith(twoMessages))
-    const home = tempHome()
-    seedAgentId(home, "agent-root")
-    const payload = { hook_event_name: "Stop", session_id: "sess-1" }
-    const runs: HookRun[] = []
-    for (let i = 0; i < 4; i += 1) runs.push(await runHook("idle", payload, hubEnv(hub, home)))
-    expect(runs.every((r) => r.code === 0)).toBe(true)
-    expect(runs.filter((r) => r.stdout.trim() !== "")).toHaveLength(3)
-    expect(runs[3]?.stdout.trim()).toBe("")
-    expect(hub.requests.filter((r) => r.path === "/internal/wake")).toHaveLength(3)
-    expect(stateBodies(hub)).toHaveLength(4)
-    expect(readLog(home)).toContain("block cap 3 reached")
+    expect(first.stdout).toContain("hello")
+    expect(second.stdout.trim()).toBe("") // 无新消息 → 不 block
+    const results = hub.requests.filter((r) => r.path === "/internal/result")
+    expect(results).toHaveLength(2)
+    expect(bodyOf(hub, "/internal/result")).toEqual({
+      agentId: "agent-root",
+      items: [
+        { messageId: "m1", result: "delivered" },
+        { messageId: "m2", result: "delivered" },
+      ],
+    })
     await hub.close()
   })
 

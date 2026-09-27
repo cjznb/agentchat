@@ -27,6 +27,8 @@ export function adapterPaths(home) {
     subs: join(agents, "claude-code.subs.json"),
     subseq: join(agents, "claude-code.subseq.json"),
     stop: join(agents, "claude-code.stop.json"),
+    substop: join(agents, "claude-code.substop.json"),
+    seen: join(agents, "claude-code.seen.json"),
     log: join(home, "logs", "claude-code-adapter.log"),
   }
 }

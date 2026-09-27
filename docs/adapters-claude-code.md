@@ -63,7 +63,10 @@ hook 由 Claude Code 进程派生，故 `HUB_TOKEN` 需出现在**启动 `claude
 
 写入策略：改动前备份 `<file>.bak`，再以**临时文件 + rename 原子替换**；`--dry-run` 只打印两处目标、不落盘。
 合并语义：`hooks` 下**用户既有条目一律保留**，只追加本适配器条目并按**规范化绝对路径**去重（幂等）；
-`mcpServers` 只增/改 `agentchat` 键。`--uninstall` 精确移除两处本适配器条目（事件数组清空后删该键）。
+`mcpServers` 只增/改 `agentchat` 键。**MCP 条目所有权守卫**：写入前对既有 `mcpServers.agentchat` 做结构比对——
+仅当结构与本安装器将写入的一致才覆盖；结构不同则**拒绝并给非 0 退出码**（除非 `--force`）。`--uninstall` 仅当结构
+匹配本安装器产物时才精确移除该键（否则保留并提示）。**同一文件拒绝**按**规范化真实路径**（`realpath` + win32/darwin
+大小写折叠）判定，大小写变体/别名无法绕过。
 
 ### PowerShell（Windows）
 
@@ -117,6 +120,7 @@ node adapters/claude-code/install.mjs --help
       }
     ],
     "SubagentStart": [{ "hooks": [{ "type": "command", "command": "node", "args": ["<…>/subagent-start.mjs"] }] }],
+    "SubagentStop":  [{ "hooks": [{ "type": "command", "command": "node", "args": ["<…>/subagent-stop.mjs"] }] }],
     "PreToolUse":    [{ "hooks": [{ "type": "command", "command": "node", "args": ["<…>/busy.mjs"] }] }],
     "PostToolUse":   [{ "hooks": [{ "type": "command", "command": "node", "args": ["<…>/busy.mjs"] }] }],
     "Stop":          [{ "hooks": [{ "type": "command", "command": "node", "args": ["<…>/idle.mjs"] }] }],
@@ -185,7 +189,12 @@ MCP 配置（`~/.claude.json` 顶层；见 `mcp.snippet.json`）：
   `additionalContext` 生效时机；本适配器以 `reason` 同文镜像保底。
 - `headersHelper` 在真实连接中的调用时机/工作目录，以及它输出的 `Authorization`/`x-agent-id` 是否被完整采纳
   （含 401/403 后重跑 helper 的行为）。
-- `stop_hook_active` 的精确置位时机（本适配器仅在确有消息时 block，未额外依赖该字段）。
+- `stop_hook_active` 的精确置位时机（官方定义为「already continuing as a result of a stop hook」，宿主另设
+  8 连续续跑硬上限；本适配器的链内 block 计数依赖该字段，未在真机核对置位边界）。
+- `SubagentStop` 与 `Stop` 共用同一 decision control（官方明示），但其 `hookSpecificOutput{ hookEventName:"SubagentStop" }`
+  / `decision:"block"` 的**真机**接受情况、以及 `agent_id` 在 `SubagentStart`/`SubagentStop` 间稳定配对性未实测。
+- **子节点退役后的再注册**：退役不可复活、Hub 按 `task_ref` 拒绝复活；依赖「Claude Code 每次派生 `agent_id` 唯一」。
+  若同 `agent_id` 复用（文档未承诺），该子代理注册会被拒（保守：不误复活已死节点）。
 - `SubagentStart` 载荷是否含父/会话关联字段（当前文档只列 `agent_id`/`agent_type`；适配器按「根回合窗口」兜底）。
 - `Notification` 的 matcher / `notification_type` 字段命名（按 `idle_prompt` 匹配）。
 - `SessionStart` 的 `additionalContext` 真实渲染（仅用 `additionalContext`）。
@@ -202,7 +211,8 @@ MCP 配置（`~/.claude.json` 顶层；见 `mcp.snippet.json`）：
 | MCP `401 unauthorized` | `mcp-headers.mjs` 未产出 `Authorization`（`hub_token` 缺失/为空，且 `HUB_TOKEN` 未设） | 确认 Hub 已启动并生成 `<AGENTCHAT_HOME>/hub_token`；在启动 `claude` 的环境设 `HUB_TOKEN`；`/mcp` 面板可 Reconnect 触发 helper 重跑 |
 | MCP `400 agent_not_found` / 工具报 `identity_required` | `mcp-headers.mjs` 未产出 `x-agent-id`：`claude-code.id` 尚未生成（首次启动）或已变 | 启动一次让 `SessionStart` 写 id，然后**重启 `claude`**（连接时 helper 会重读）；若仍缺，删 token+id 重注册 |
 | MCP 头在配置里看不到 token | 设计如此：头由 `headersHelper` 连接时动态产出 | 需要手工核对时直接运行 `node adapters/claude-code/mcp-headers.mjs`，应输出 `{"Authorization":"Bearer …","x-agent-id":"…"}` |
-| 回合未在空闲时注入（`Stop` 未 wake） | `stop_hook_active===true` 时放行；或每会话连续 block 已达上限 3 | 预期防死循环行为：放行、不 wake；下个正常回合或重启后再试。`delivered` 后下次 `wake` 为空亦自然终止 |
+| 回合未在空闲时注入（`Stop` 未 wake） | 已达**该链**内 block 上限 3（同链续跑不再 block） | 预期防死循环：链内 3 次后放行；**新回合/新链自动重置计数、可再次 block**（修复旧版达上限后永久放行导致的「会话永不再被唤醒」）。`delivered` 后下次 `wake` 为空/仅租约重投的重复消息亦自然终止 |
+| 子代理未收到待投递 | `SubagentStop` 未注册，或该子代理未注册（`subs.json` 无映射） | 确认 `settings.json` 含 `SubagentStop → subagent-stop.mjs`；子代理须在**会话匹配**的活跃根窗口内派生方可注册；退役不可复活（重派生即新 `agent_id`/新节点） |
 | `Notification(idle_prompt)` 未注入 | 设计如此：`Notification` 无注入通道，仅上报 `idle`（避免认领后无法投递而丢消息） | 注入统一由 `Stop` 承担；核对 `Stop` 是否触发 |
 | 搬移适配器目录后重复安装留下旧条目 | 归属按**绝对路径**匹配（**不做 basename 兜底**，以免误删用户同名脚本）；旧路径不再被识别 | 搬移前先 `--uninstall`；或手工删除指向旧路径的 hooks 条目后再安装 |
 | 重复安装产生重复 hook 条目 | `args[0]` 路径被手工改动致不再命中本适配器绝对路径 | 归属按规范化绝对路径匹配；勿改动 `args` 里的脚本路径；`--uninstall` 后重装 |

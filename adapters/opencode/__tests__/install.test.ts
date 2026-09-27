@@ -132,7 +132,8 @@ describe("install.mjs 幂等安装", () => {
   it("--uninstall removes only this adapter's entries", () => {
     const cfg = join(tempDir(), "opencode.json")
     seedConfig(cfg)
-    expect(run(["--config", cfg]).status).toBe(0)
+    const home = join(tempDir(), "home")
+    expect(run(["--config", cfg], { AGENTCHAT_HOME: home }).status).toBe(0)
 
     const installed = readConfig(cfg)
     pluginList(installed).push("keep-me")
@@ -140,7 +141,7 @@ describe("install.mjs 幂等安装", () => {
     mcp["keep"] = { type: "remote", url: "https://keep.example/mcp" }
     writeFileSync(cfg, `${JSON.stringify(installed, null, 2)}\n`)
 
-    const result = run(["--config", cfg, "--uninstall"])
+    const result = run(["--config", cfg, "--uninstall"], { AGENTCHAT_HOME: home })
     expect(result.status).toBe(0)
     const parsed = readConfig(cfg)
     expect(pluginList(parsed)).not.toContain(EXPECTED_PLUGIN)
@@ -149,6 +150,37 @@ describe("install.mjs 幂等安装", () => {
     expect(mcpEntry(parsed, "agentchat")).toBeUndefined()
     expect(mcpEntry(parsed, "other")).toEqual(OTHER_MCP)
     expect(mcpEntry(parsed, "keep")).toEqual({ type: "remote", url: "https://keep.example/mcp" })
+  })
+
+  it("refuses to overwrite a structurally different user-owned mcp.agentchat unless --force", () => {
+    const cfg = join(tempDir(), "opencode.json")
+    const home = join(tempDir(), "home")
+    const foreign = { type: "remote", url: "https://user.example/mcp", enabled: true }
+    writeFileSync(cfg, `${JSON.stringify({ mcp: { agentchat: foreign } }, null, 2)}\n`)
+
+    const refused = run(["--config", cfg], { AGENTCHAT_HOME: home })
+    expect(refused.status).not.toBe(0)
+    expect(refused.stderr).toContain("结构不同")
+    expect(mcpEntry(readConfig(cfg), "agentchat")).toEqual(foreign) // 未被改动
+
+    const forced = run(["--config", cfg, "--force"], { AGENTCHAT_HOME: home })
+    expect(forced.status).toBe(0)
+    const entry = mcpEntry(readConfig(cfg), "agentchat")
+    if (entry === undefined) throw new Error("mcp.agentchat missing after --force")
+    expect(entry["type"]).toBe("remote")
+    expect(nested(entry, "headers")["Authorization"]).toBe("Bearer {env:HUB_TOKEN}")
+  })
+
+  it("does not delete a structurally different user-owned mcp.agentchat on --uninstall", () => {
+    const cfg = join(tempDir(), "opencode.json")
+    const home = join(tempDir(), "home")
+    const foreign = { type: "remote", url: "https://user.example/mcp" }
+    writeFileSync(cfg, `${JSON.stringify({ mcp: { agentchat: foreign, other: OTHER_MCP } }, null, 2)}\n`)
+
+    const result = run(["--config", cfg, "--uninstall"], { AGENTCHAT_HOME: home })
+    expect(result.status).toBe(0)
+    expect(mcpEntry(readConfig(cfg), "agentchat")).toEqual(foreign) // 保留用户自有条目
+    expect(result.stderr).toContain("已保留")
   })
 
   it("fails with a clear message and non-zero exit when the path is missing", () => {

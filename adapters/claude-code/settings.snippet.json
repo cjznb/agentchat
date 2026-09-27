@@ -23,6 +23,17 @@
         ]
       }
     ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["__AGENTCHAT_ADAPTER_DIR__/subagent-stop.mjs"]
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "hooks": [

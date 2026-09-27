@@ -22,10 +22,21 @@
  *
  * 纯 JS（不参与 `tsc`）；无第三方依赖。
  */
-import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs"
-import { homedir } from "node:os"
-import { dirname, join, sep } from "node:path"
+import { dirname, sep } from "node:path"
 import { fileURLToPath } from "node:url"
+import {
+  assertParentExists,
+  assertSettingsExists,
+  canonicalPath,
+  commit,
+  isRecord,
+  normalizePath,
+  readJson,
+  readJsonIfExists,
+  resolveMcpPath,
+  resolveSettingsPath,
+  serialize,
+} from "./install-io.mjs"
 
 const MCP_KEY = "agentchat"
 const ADAPTER_DIR = dirname(fileURLToPath(import.meta.url))
@@ -35,6 +46,7 @@ const ADAPTER_POSIX = ADAPTER_DIR.split(sep).join("/")
 const HOOK_EVENTS = [
   { event: "SessionStart", script: "session-start.mjs", matcher: "startup|resume|clear|compact|fork" },
   { event: "SubagentStart", script: "subagent-start.mjs", matcher: undefined },
+  { event: "SubagentStop", script: "subagent-stop.mjs", matcher: undefined },
   { event: "PreToolUse", script: "busy.mjs", matcher: undefined },
   { event: "PostToolUse", script: "busy.mjs", matcher: undefined },
   { event: "Stop", script: "idle.mjs", matcher: undefined },
@@ -42,46 +54,6 @@ const HOOK_EVENTS = [
 ]
 /** 本适配器 hooks 的规范化绝对路径集合；归属识别严格按此匹配（用户同名脚本不受影响）。 */
 const OUR_HOOK_PATHS = new Set(HOOK_EVENTS.map((e) => `${ADAPTER_POSIX}/${e.script}`))
-
-// ── 目标文件解析 ────────────────────────────────────────────────────
-
-function normalizePath(p) {
-  return p.replace(/\\/g, "/").replace(/\/+$/, "")
-}
-
-/** Claude Code 配置目录：`$CLAUDE_CONFIG_DIR`（非空）否则 `~/.claude`。 */
-function claudeConfigDir(env) {
-  return env.CLAUDE_CONFIG_DIR !== undefined && env.CLAUDE_CONFIG_DIR !== ""
-    ? env.CLAUDE_CONFIG_DIR
-    : join(homedir(), ".claude")
-}
-
-function resolveSettingsPath(explicit, env) {
-  if (explicit !== undefined && explicit !== "") return explicit
-  if (env.CLAUDE_SETTINGS !== undefined && env.CLAUDE_SETTINGS !== "") return env.CLAUDE_SETTINGS
-  return join(claudeConfigDir(env), "settings.json")
-}
-
-/**
- * MCP 目标：`--mcp-config` 显式优先；否则官方用户 scope 文件——**设置了 `CLAUDE_CONFIG_DIR`
- * 时 Claude Code 从该目录读 `.claude.json`**（与 settings 同目录），否则 `~/.claude.json`。
- */
-function resolveMcpPath(explicit, env) {
-  if (explicit !== undefined && explicit !== "") return explicit
-  return env.CLAUDE_CONFIG_DIR !== undefined && env.CLAUDE_CONFIG_DIR !== ""
-    ? join(env.CLAUDE_CONFIG_DIR, ".claude.json")
-    : join(homedir(), ".claude.json")
-}
-
-function assertParentExists(path, label) {
-  const dir = dirname(path)
-  if (!existsSync(dir)) throw new Error(`${label} 父目录不存在：${dir}`)
-}
-
-function assertSettingsExists(path) {
-  assertParentExists(path, "settings")
-  if (!existsSync(path)) throw new Error(`settings 文件不存在：${path}（用 --config <path> 指定，或先创建）`)
-}
 
 // ── 将写内容 ────────────────────────────────────────────────────────
 
@@ -117,10 +89,6 @@ function desiredMcp(env) {
 }
 
 // ── 合并 / 移除 ─────────────────────────────────────────────────────
-
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
 
 function isOurHook(hook) {
   return (
@@ -175,63 +143,56 @@ function uninstallHooks(config) {
   return changed
 }
 
-function mergeMcp(config, desired) {
+function mergeMcp(config, desired, force) {
   if (config.mcpServers === undefined) config.mcpServers = {}
   else if (!isRecord(config.mcpServers)) throw new Error("目标 MCP 配置的 mcpServers 字段不是对象，拒绝改写")
-  if (JSON.stringify(config.mcpServers[MCP_KEY]) === JSON.stringify(desired)) return false
+  const existing = config.mcpServers[MCP_KEY]
+  if (existing === undefined) {
+    config.mcpServers[MCP_KEY] = desired
+    return true
+  }
+  if (JSON.stringify(existing) === JSON.stringify(desired)) return false
+  // 结构不同 = 非本安装器产物（可能用户自有同名条目）：默认拒绝覆盖，除非 --force。
+  if (!force) {
+    throw new Error(
+      `目标 MCP 配置已存在结构不同的 mcpServers.agentchat 条目（非本安装器产物）；拒绝覆盖。` +
+        `确认它是本适配器的旧产物后，可加 --force 覆盖`,
+    )
+  }
   config.mcpServers[MCP_KEY] = desired
   return true
 }
 
-function uninstallMcp(config) {
+function uninstallMcp(config, desired) {
   if (!isRecord(config.mcpServers) || !Object.prototype.hasOwnProperty.call(config.mcpServers, MCP_KEY)) {
-    return false
+    return { changed: false, keptForeign: false }
+  }
+  // 仅当结构与本安装器产物一致才移除；否则保留用户自有条目并提示。
+  if (JSON.stringify(config.mcpServers[MCP_KEY]) !== JSON.stringify(desired)) {
+    return { changed: false, keptForeign: true }
   }
   delete config.mcpServers[MCP_KEY]
   if (Object.keys(config.mcpServers).length === 0) delete config.mcpServers
-  return true
-}
-
-// ── JSON 读写（备份 + tmp+rename 原子写）─────────────────────────────
-
-function parseJson(text, label) {
-  let value
-  try {
-    value = JSON.parse(text)
-  } catch (error) {
-    throw new Error(`${label} 不是合法 JSON：${error instanceof Error ? error.message : String(error)}`)
-  }
-  if (!isRecord(value)) throw new Error(`${label} 顶层不是对象，拒绝改写`)
-  return value
-}
-
-function readJson(path, label) {
-  return parseJson(readFileSync(path, "utf8"), label)
-}
-
-function readJsonIfExists(path, label) {
-  return existsSync(path) ? readJson(path, label) : undefined
-}
-
-function serialize(config) {
-  return `${JSON.stringify(config, null, 2)}\n`
-}
-
-function commit(path, text) {
-  if (existsSync(path)) copyFileSync(path, `${path}.bak`)
-  const tmp = `${path}.tmp-${process.pid}`
-  writeFileSync(tmp, text)
-  renameSync(tmp, path)
+  return { changed: true, keptForeign: false }
 }
 
 // ── 参数与主流程 ────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const args = { config: undefined, mcpConfig: undefined, dryRun: false, uninstall: false, help: false, error: undefined }
+  const args = {
+    config: undefined,
+    mcpConfig: undefined,
+    dryRun: false,
+    uninstall: false,
+    force: false,
+    help: false,
+    error: undefined,
+  }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === "--dry-run") args.dryRun = true
     else if (arg === "--uninstall") args.uninstall = true
+    else if (arg === "--force") args.force = true
     else if (arg === "--help" || arg === "-h") args.help = true
     else if (arg === "--config" || arg === "--mcp-config") {
       const value = argv[i + 1]
@@ -243,7 +204,7 @@ function parseArgs(argv) {
       else args.mcpConfig = value
       i += 1
     } else {
-      args.error = `未知参数：${arg}（支持 --config <path>、--mcp-config <path>、--dry-run、--uninstall、--help）`
+      args.error = `未知参数：${arg}（支持 --config <path>、--mcp-config <path>、--dry-run、--uninstall、--force、--help）`
       return args
     }
   }
@@ -253,10 +214,11 @@ function parseArgs(argv) {
 const HELP =
   [
     "AgentChat Claude Code 安装器",
-    "用法：node adapters/claude-code/install.mjs [--config <path>] [--mcp-config <path>] [--dry-run] [--uninstall]",
+    "用法：node adapters/claude-code/install.mjs [--config <path>] [--mcp-config <path>] [--dry-run] [--uninstall] [--force]",
     "  --config <path>      hooks 目标 settings.json（默认：$CLAUDE_SETTINGS 或 $CLAUDE_CONFIG_DIR/settings.json 或 ~/.claude/settings.json）",
     "  --mcp-config <path>  MCP 目标（默认：$CLAUDE_CONFIG_DIR/.claude.json 或 ~/.claude.json；项目级可用 <repo>/.mcp.json）",
     "  --dry-run 只打印不落盘；--uninstall 精确移除两处本适配器条目；--help 显示本帮助",
+    "  --force 覆盖结构不同的既有 mcpServers.agentchat 条目（默认拒绝，以免破坏用户自有同名条目）",
   ].join("\n") + "\n"
 
 function main() {
@@ -273,7 +235,7 @@ function main() {
     const env = process.env
     const settingsPath = resolveSettingsPath(args.config, env)
     const mcpPath = resolveMcpPath(args.mcpConfig, env)
-    if (normalizePath(settingsPath) === normalizePath(mcpPath)) {
+    if (canonicalPath(settingsPath) === canonicalPath(mcpPath)) {
       throw new Error("settings 与 MCP 目标不能是同一文件（settings.json 的 mcpServers 会被静默忽略）")
     }
     assertSettingsExists(settingsPath)
@@ -281,11 +243,18 @@ function main() {
     const existingMcp = readJsonIfExists(mcpPath, "MCP 配置")
     if (!args.uninstall && existingMcp === undefined) assertParentExists(mcpPath, "MCP 配置")
 
+    const desired = desiredMcp(env)
     const hooksChanged = args.uninstall ? uninstallHooks(settings) : mergeHooks(settings, desiredHooks())
     const mcp = existingMcp ?? {}
-    const mcpChanged = args.uninstall
-      ? existingMcp !== undefined && uninstallMcp(mcp)
-      : mergeMcp(mcp, desiredMcp(env))
+    const mcpOutcome = args.uninstall
+      ? existingMcp === undefined
+        ? { changed: false, keptForeign: false }
+        : uninstallMcp(mcp, desired)
+      : { changed: mergeMcp(mcp, desired, args.force), keptForeign: false }
+    const mcpChanged = mcpOutcome.changed
+    if (mcpOutcome.keptForeign) {
+      console.error("[agentchat] 已保留结构不同的 mcpServers.agentchat 条目（非本适配器产物，未删除）")
+    }
     const action = args.uninstall ? "卸载" : "安装"
 
     if (args.dryRun) {

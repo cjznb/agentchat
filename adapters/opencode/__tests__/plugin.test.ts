@@ -493,3 +493,82 @@ describe("网络健壮性", () => {
     expect(harness.kit.internalCalls.some((call) => call.path === "/internal/result")).toBe(false)
   })
 })
+
+// ── 租约重投去重（pull 语义）────────────────────────────────────────
+
+describe("租约重投去重", () => {
+  const redelivered = [
+    { id: "m1", fromAgentId: "peer", conversationId: "c1", body: "hello" },
+    { id: "m2", fromAgentId: "peer", conversationId: "c1", body: "world" },
+  ]
+  const wake = {
+    internal: (path: string) =>
+      path === "/internal/wake" ? jsonResponse({ messages: redelivered, receipts: [] }) : undefined,
+  }
+
+  it("does not re-inject message ids redelivered by the wake lease; reports delivered again", async () => {
+    const home = tempHome()
+    const harness = setup({ home, overrides: wake })
+    await emit(harness, rootCreated(), sessionIdle("root-sess"))
+    await emit(harness, sessionIdle("root-sess"))
+    expect(harness.client.texts).toHaveLength(2) // 只注入一次；重投不重复注入
+    const results = harness.kit.internalCalls.filter((call) => call.path === "/internal/result")
+    expect(results).toHaveLength(2)
+    expect(resultItems(harness.kit)).toEqual([
+      { messageId: "m1", result: "delivered" },
+      { messageId: "m2", result: "delivered" },
+    ])
+  })
+})
+
+// ── 运行期子节点退役（缺陷 #4 适配器侧）─────────────────────────────
+
+describe("子节点退役", () => {
+  const childDeleted: OpencodeEvent = {
+    type: "session.deleted",
+    properties: { info: { id: "child-1", parentID: "root-sess" } },
+  }
+
+  it("retires the child node on child session deletion, keeping root offline semantics", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(harness, rootCreated(), childCreated("child-1", "root-sess"), childDeleted, {
+      type: "session.deleted",
+      properties: { info: { id: "root-sess" } },
+    })
+    expect(harness.kit.internalCalls.find((call) => call.path === "/internal/retire")?.body).toEqual({
+      agentId: "agent-2",
+    })
+    const offline = stateCalls(harness.kit).filter((body) => isRecord(body) && body["state"] === "offline")
+    expect(offline).toEqual([{ agentId: "agent-1", state: "offline" }])
+  })
+
+  it("treats 404 from /internal/retire as already retired (no failure log)", async () => {
+    const home = tempHome()
+    const harness = setup({
+      home,
+      overrides: {
+        internal: (path) =>
+          path === "/internal/retire" ? jsonResponse({ ok: false, error: "agent_not_found" }, 404) : undefined,
+      },
+    })
+    await emit(harness, rootCreated(), childCreated("child-1", "root-sess"), childDeleted)
+    expect(harness.kit.internalCalls.some((call) => call.path === "/internal/retire")).toBe(true)
+    expect(harness.logs.some((line) => line.includes("retire failed"))).toBe(false)
+  })
+
+  it("logs a retire network failure without throwing", async () => {
+    const home = tempHome()
+    const harness = setup({
+      home,
+      overrides: {
+        internal: (path) => {
+          if (path === "/internal/retire") throw new Error("network down")
+          return undefined
+        },
+      },
+    })
+    await emit(harness, rootCreated(), childCreated("child-1", "root-sess"), childDeleted)
+    expect(harness.logs.some((line) => line.includes("retire failed"))).toBe(true)
+  })
+})

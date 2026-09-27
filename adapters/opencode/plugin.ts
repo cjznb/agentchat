@@ -26,7 +26,7 @@ import {
 } from "./hub"
 import { agentIdPath, clearToken, readToken, resolveHome, tokenPath, writeToken } from "./token"
 import type { Hooks, OpencodeEvent, OpencodeSession, Plugin, PluginInput } from "./types"
-import { createTaskQueue, type TaskQueue } from "./util"
+import { createBoundedSet, createTaskQueue, formatInjection, type BoundedSet, type TaskQueue } from "./util"
 
 export const ADAPTER_VENDOR = "opencode"
 
@@ -59,6 +59,8 @@ interface RuntimeState {
   agentId: string | undefined
   readonly sessionToAgent: Map<string, string>
   readonly lastState: Map<string, AdapterState>
+  /** 已成功注入的 messageId 去重集合（有界 FIFO）：Hub 的在途租约重投不重复注入。 */
+  readonly seenMessages: BoundedSet
 }
 
 function createRuntime(
@@ -75,7 +77,12 @@ function createRuntime(
   })
   const path = tokenPath(resolveHome(deps.env))
   const idPath = agentIdPath(resolveHome(deps.env))
-  const state: RuntimeState = { agentId: undefined, sessionToAgent: new Map(), lastState: new Map() }
+  const state: RuntimeState = {
+    agentId: undefined,
+    sessionToAgent: new Map(),
+    lastState: new Map(),
+    seenMessages: createBoundedSet(256),
+  }
 
   /** 上报状态并去重同态（同态即心跳，重复信号无需再发）；失败不记账以便下次重试。 */
   const reportState = async (agentId: string, next: AdapterState): Promise<void> => {
@@ -195,11 +202,17 @@ function createRuntime(
     if (messages.length === 0) return
     const items: ResultItem[] = []
     for (const message of messages) {
+      if (state.seenMessages.has(message.id)) {
+        // 租约重投的重复消息：已注入过，绝不重复注入，仅补回执（幂等）。
+        items.push({ messageId: message.id, result: "delivered" })
+        continue
+      }
       try {
         await input.client.session.promptAsync({
           path: { id: sessionID },
           body: { parts: [{ type: "text", text: formatInjection(message) }] },
         })
+        state.seenMessages.add(message.id)
         items.push({ messageId: message.id, result: "delivered" })
       } catch (error) {
         log(`inject failed for ${message.id}: ${describe(error)}`)
@@ -216,8 +229,18 @@ function createRuntime(
   const onDeleted = async (session: OpencodeSession): Promise<void> => {
     const agentId = state.sessionToAgent.get(session.id)
     state.sessionToAgent.delete(session.id)
-    if (session.parentID === undefined && agentId !== undefined) {
+    if (agentId === undefined) return
+    if (session.parentID === undefined) {
       await reportState(agentId, "offline")
+      return
+    }
+    // 子会话消失 → 退役子节点（不可复活；Hub 侧取消待投递 job），
+    // 避免名单残留与向已死参与者投递。根保持既有 offline 语义，不退役。
+    state.lastState.delete(agentId)
+    try {
+      await hub.retire(agentId)
+    } catch (error) {
+      log(`retire failed for ${agentId}: ${describe(error)}`)
     }
   }
 
@@ -250,14 +273,6 @@ function createRuntime(
       if (state.agentId !== undefined) await reportState(state.agentId, "offline")
     },
   }
-}
-
-function formatInjection(message: WakeMessage): string {
-  return [
-    `[AgentChat] 来自 ${message.fromAgentId} 的消息（会话 ${message.conversationId}，消息 id ${message.id}）`,
-    message.body,
-    `（如需回复，请用 AgentChat 的 send 工具发给 ${message.fromAgentId}）`,
-  ].join("\n")
 }
 
 function describe(error: unknown): string {

@@ -16,15 +16,16 @@
 
 ## 事件映射（实测 `@opencode-ai/plugin@1.18.32`）
 
-插件经 `Hooks.event` 收全部事件，本适配器关心的四类：
+插件经 `Hooks.event` 收全部事件，本适配器关心的几类：
 
 | OpenCode 事件 | 动作 |
 |---|---|
 | `session.created`（`info.parentID` 缺失） | MCP `register`（根）：无 token → 首注册并把返回的 `join_token` 写 `<home>/agents/opencode.token`（0600）；有 token → 带 `join_token` 重连认领 |
 | `session.created`（`info.parentID` 存在） | MCP `register{parent_ref, task_ref: info.id}`（`parent_ref` = 父会话已映射的节点 id；缺失时按「当前根 = 父回合窗口」兜底） |
 | `session.status`（`busy`/`retry`/`idle`） | `POST /internal/state {busy\|idle}`（同态去重） |
-| `session.idle` | 报 `idle`（同态去重，兜底宿主只发此事件的情况）→ `POST /internal/wake` → 逐条 `client.session.promptAsync` 注入 → `POST /internal/result {items:[{messageId,result:"delivered"\|"refused"}]}`（注入抛错记 `refused`） |
-| `session.deleted`（根）/ `dispose` | `POST /internal/state {offline}`（子节点不报 offline，Hub 侧 409 拒绝） |
+| `session.idle` | 报 `idle`（同态去重，兜底宿主只发此事件的情况）→ `POST /internal/wake` → 逐条 `client.session.promptAsync` 注入（**按 `messageId` 有界去重**，租约重投不重复注入）→ `POST /internal/result {items:[{messageId,result:"delivered"\|"refused"}]}`（注入抛错记 `refused`） |
+| `session.deleted`（根） | `POST /internal/state {offline}`（根保持 offline 语义） |
+| `session.deleted`（子）/ `dispose` | `POST /internal/retire {agentId:<子节点>}` 退役子节点（**幂等**；`404` 视为已退役，不重试）；子节点不报 `offline`（Hub 侧 409 拒绝） |
 
 依据：`@opencode-ai/sdk@1.18.32` 的类型联合含 `EventSessionCreated`（`info.parentID` 即子会话父引用）、
 `EventSessionStatus`、`EventSessionIdle`、`EventSessionDeleted`；注入走 `client.session.promptAsync`
@@ -43,11 +44,18 @@
   重新注册为根并写回新 token（此路径不可能产生重复根），日志给明确 warn。
 - 未映射会话（自身尚未注册的子会话）的 `session.status`/`session.idle` 一律跳过并 warn，
   **不回落根节点**（避免「给根取件、往子会话注入」错配）；该子会话注册后自然恢复。
+- **在途租约去重**：Hub 的 `/internal/wake` 认领即 job → `sending` + 30s 在途租约（**非** `accepted`/`delivered`），
+  未回执则租约到期后重投；故插件按 `messageId` **有界去重**（上限 256，FIFO 淘汰），已注入者**绝不重复注入**、仅补回执。
+- **运行期子节点退役**：子会话 `session.deleted` → `POST /internal/retire`（幂等，`404` 视为已退役不重试；失败只记日志、
+  不阻塞主流程），避免名单残留与向已死参与者投递。退役**不可复活**：同一 `task_ref`（=`session.id`）再注册被 Hub 拒绝；
+  OpenCode 子会话 id 唯一，重派生即新节点。**根节点保持 `offline` 语义，不退役**。
 - Windows 上 `chmod 0600` 调用成功但权限位可能不生效（与 Hub 侧 token 同策略）。
 
 ## 安装
 
 见 `docs/adapters-opencode.md`（Task 3）与 `adapters/opencode/install.mjs`。
+安装器对既有 `mcp.agentchat` 条目做**结构比对**：仅当结构与本安装器将写入的一致才覆盖（幂等），
+否则**拒绝并给非 0 退出码**（除非 `--force`）；`--uninstall` 仅当结构匹配本安装器产物时才移除，否则保留用户自有条目并提示。
 
 `plugin.ts` 默认导出 OpenCode 期望的 `PluginModule` 形态 `{ id: "agentchat", server }`
 （加载器 `readV1Plugin` 只读 `default`，且本地路径插件必须带 `id`），命名导出 `AgentChatPlugin`

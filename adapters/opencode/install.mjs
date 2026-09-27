@@ -19,6 +19,7 @@ import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } fro
 import { homedir } from "node:os"
 import { dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
+import { parseConfig } from "./jsonc.mjs"
 
 const MCP_KEY = "agentchat"
 const ADAPTER_DIR = dirname(fileURLToPath(import.meta.url))
@@ -89,76 +90,6 @@ function desiredEntries(env) {
   }
 }
 
-// ── JSONC 解析（剥离注释与尾逗号；字符串感知）────────────────────────
-
-function stripJsonc(text) {
-  let out = ""
-  let i = 0
-  let inString = false
-  let inLine = false
-  let inBlock = false
-  while (i < text.length) {
-    const ch = text[i]
-    const next = text[i + 1]
-    if (inLine) {
-      if (ch === "\n") {
-        inLine = false
-        out += ch
-      }
-      i += 1
-      continue
-    }
-    if (inBlock) {
-      if (ch === "*" && next === "/") {
-        inBlock = false
-        i += 2
-        continue
-      }
-      i += 1
-      continue
-    }
-    if (inString) {
-      out += ch
-      if (ch === "\\") {
-        out += next ?? ""
-        i += 2
-        continue
-      }
-      if (ch === '"') inString = false
-      i += 1
-      continue
-    }
-    if (ch === '"') {
-      inString = true
-      out += ch
-      i += 1
-      continue
-    }
-    if (ch === "/" && next === "/") {
-      inLine = true
-      i += 2
-      continue
-    }
-    if (ch === "/" && next === "*") {
-      inBlock = true
-      i += 2
-      continue
-    }
-    if (ch === "}" || ch === "]") out = out.replace(/,\s*$/, "")
-    out += ch
-    i += 1
-  }
-  return out
-}
-
-function parseConfig(text) {
-  try {
-    return JSON.parse(stripJsonc(text))
-  } catch (error) {
-    throw new Error(`目标配置不是合法 JSON/JSONC：${error instanceof Error ? error.message : String(error)}`)
-  }
-}
-
 // ── 合并 / 移除 ─────────────────────────────────────────────────────
 
 function isRecord(value) {
@@ -171,7 +102,7 @@ function pluginSpec(entry) {
   return undefined
 }
 
-function install(config, entries) {
+function install(config, entries, force) {
   let changed = false
   if (config.plugin === undefined) {
     config.plugin = []
@@ -189,7 +120,18 @@ function install(config, entries) {
   } else if (!isRecord(config.mcp)) {
     throw new Error("目标配置的 mcp 字段不是对象，拒绝改写")
   }
-  if (JSON.stringify(config.mcp[MCP_KEY]) !== JSON.stringify(entries.mcp)) {
+  const existing = config.mcp[MCP_KEY]
+  if (existing === undefined) {
+    config.mcp[MCP_KEY] = entries.mcp
+    changed = true
+  } else if (JSON.stringify(existing) !== JSON.stringify(entries.mcp)) {
+    // 结构不同 = 非本安装器产物（可能用户自有同名条目）：默认拒绝覆盖，除非 --force。
+    if (!force) {
+      throw new Error(
+        `目标配置已存在结构不同的 mcp.agentchat 条目（非本安装器产物）；拒绝覆盖。` +
+          `确认它是本适配器的旧产物后，可加 --force 覆盖`,
+      )
+    }
     config.mcp[MCP_KEY] = entries.mcp
     changed = true
   }
@@ -205,21 +147,28 @@ function uninstall(config, entries) {
       changed = true
     }
   }
+  let keptForeign = false
   if (isRecord(config.mcp) && Object.prototype.hasOwnProperty.call(config.mcp, MCP_KEY)) {
-    delete config.mcp[MCP_KEY]
-    changed = true
+    // 仅当结构与本安装器产物一致才移除；否则保留用户自有条目并提示。
+    if (JSON.stringify(config.mcp[MCP_KEY]) === JSON.stringify(entries.mcp)) {
+      delete config.mcp[MCP_KEY]
+      changed = true
+    } else {
+      keptForeign = true
+    }
   }
-  return changed
+  return { changed, keptForeign }
 }
 
 // ── 参数与主流程 ────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const args = { config: undefined, dryRun: false, uninstall: false, help: false, error: undefined }
+  const args = { config: undefined, dryRun: false, uninstall: false, force: false, help: false, error: undefined }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === "--dry-run") args.dryRun = true
     else if (arg === "--uninstall") args.uninstall = true
+    else if (arg === "--force") args.force = true
     else if (arg === "--help" || arg === "-h") args.help = true
     else if (arg === "--config") {
       const value = argv[i + 1]
@@ -230,7 +179,7 @@ function parseArgs(argv) {
       args.config = value
       i += 1
     } else {
-      args.error = `未知参数：${arg}（支持 --config <path>、--dry-run、--uninstall、--help）`
+      args.error = `未知参数：${arg}（支持 --config <path>、--dry-run、--uninstall、--force、--help）`
       return args
     }
   }
@@ -239,9 +188,10 @@ function parseArgs(argv) {
 
 const HELP = [
   "AgentChat OpenCode 安装器",
-  "用法：node adapters/opencode/install.mjs [--config <path>] [--dry-run] [--uninstall]",
+  "用法：node adapters/opencode/install.mjs [--config <path>] [--dry-run] [--uninstall] [--force]",
   "  --config <path>   目标 OpenCode 配置（默认：$OPENCODE_CONFIG 或 ~/.config/opencode/opencode.jsonc|json）",
   "  --dry-run 只打印不落盘；--uninstall 精确移除本适配器条目；--help 显示本帮助",
+  "  --force 覆盖结构不同的既有 mcp.agentchat 条目（默认拒绝，以免破坏用户自有同名条目）",
 ].join("\n") + "\n"
 
 function main() {
@@ -261,15 +211,20 @@ function main() {
     const config = parseConfig(readFileSync(configPath, "utf8"))
     const entries = desiredEntries(env)
     const action = args.uninstall ? "卸载" : "安装"
-    const changed = args.uninstall ? uninstall(config, entries) : install(config, entries)
+    const outcome = args.uninstall
+      ? uninstall(config, entries)
+      : { changed: install(config, entries, args.force), keptForeign: false }
     const text = `${JSON.stringify(config, null, 2)}\n`
+    if (outcome.keptForeign) {
+      console.error("[agentchat] 已保留结构不同的 mcp.agentchat 条目（非本适配器产物，未删除）")
+    }
 
     if (args.dryRun) {
       process.stdout.write(text)
-      console.error(`[agentchat] --dry-run：未写入 ${configPath}（${changed ? "将有改动" : "无改动"}）`)
+      console.error(`[agentchat] --dry-run：未写入 ${configPath}（${outcome.changed ? "将有改动" : "无改动"}）`)
       return 0
     }
-    if (!changed) {
+    if (!outcome.changed) {
       console.log(`[agentchat] 目标配置已是最新（${action}无改动）：${configPath}`)
       return 0
     }

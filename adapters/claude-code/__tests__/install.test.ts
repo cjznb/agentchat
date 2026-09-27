@@ -10,7 +10,7 @@
 import { spawnSync, type SpawnSyncReturns } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 
@@ -22,6 +22,7 @@ const ADAPTER_POSIX = ADAPTER_DIR.split(/[\\/]/).join("/")
 const EVENTS: ReadonlyArray<readonly [string, string]> = [
   ["SessionStart", "session-start.mjs"],
   ["SubagentStart", "subagent-start.mjs"],
+  ["SubagentStop", "subagent-stop.mjs"],
   ["PreToolUse", "busy.mjs"],
   ["PostToolUse", "busy.mjs"],
   ["Stop", "idle.mjs"],
@@ -336,8 +337,68 @@ describe("install.mjs 幂等安装（hooks→settings，MCP→独立文件）", 
   })
 })
 
-// ── Important #3：headersHelper 脚本产出头（配置不含 token）──────────
+// ── 缺陷 #5：MCP 条目所有权守卫；缺陷 #6：同一文件规范化 ──────────────
 
+describe("MCP 条目所有权守卫与同一文件规范化", () => {
+  const FOREIGN_AGENTCHAT = { type: "http", url: "https://user.example/mcp" }
+
+  it("refuses to overwrite a structurally different user-owned mcpServers.agentchat unless --force", () => {
+    const dir = tempDir()
+    const cfg = join(dir, "settings.json")
+    const mcpFile = join(dir, "claude.json")
+    seedSettings(cfg)
+    writeFileSync(mcpFile, `${JSON.stringify({ mcpServers: { agentchat: FOREIGN_AGENTCHAT } }, null, 2)}\n`)
+
+    const refused = run(["--config", cfg, "--mcp-config", mcpFile])
+    expect(refused.status).not.toBe(0)
+    expect(refused.stderr).toContain("结构不同")
+    expect(mcpEntry(readConfig(mcpFile), "agentchat")).toEqual(FOREIGN_AGENTCHAT)
+
+    const forced = run(["--config", cfg, "--mcp-config", mcpFile, "--force"])
+    expect(forced.status).toBe(0)
+    const entry = mcpEntry(readConfig(mcpFile), "agentchat")
+    if (entry === undefined) throw new Error("agentchat missing after --force")
+    expect(entry["type"]).toBe("http")
+    expect(entry["headersHelper"]).toBeDefined()
+  })
+
+  it("does not delete a structurally different user-owned mcpServers.agentchat on --uninstall", () => {
+    const dir = tempDir()
+    const cfg = join(dir, "settings.json")
+    const mcpFile = join(dir, "claude.json")
+    seedSettings(cfg)
+    writeFileSync(
+      mcpFile,
+      `${JSON.stringify({ mcpServers: { agentchat: FOREIGN_AGENTCHAT, other: OTHER_MCP } }, null, 2)}\n`,
+    )
+
+    const result = run(["--config", cfg, "--mcp-config", mcpFile, "--uninstall"])
+    expect(result.status).toBe(0)
+    expect(mcpEntry(readConfig(mcpFile), "agentchat")).toEqual(FOREIGN_AGENTCHAT)
+    expect(mcpEntry(readConfig(mcpFile), "other")).toEqual(OTHER_MCP)
+    expect(result.stderr).toContain("已保留")
+  })
+
+  it("rejects the same file expressed via a non-canonical alias or case variant", () => {
+    const dir = tempDir()
+    const cfg = join(dir, "settings.json")
+    seedSettings(cfg)
+
+    // 点段别名解析到同一真实文件（跨平台）。
+    const alias = `${dir}${sep}.${sep}settings.json`
+    const dot = run(["--config", cfg, "--mcp-config", alias])
+    expect(dot.status).not.toBe(0)
+    expect(dot.stderr).toContain("同一文件")
+
+    // 大小写变体：注入 win32 判定，使大小写折叠语义跨平台确定（旧实现会误判为不同文件）。
+    const upper = join(dir, "SETTINGS.JSON")
+    const cased = run(["--config", cfg, "--mcp-config", upper], { AGENTCHAT_INSTALLER_PLATFORM: "win32" })
+    expect(cased.status).not.toBe(0)
+    expect(cased.stderr).toContain("同一文件")
+  })
+})
+
+// ── Important #3：headersHelper 脚本产出头（配置不含 token）──────────
 function envWithout(keys: readonly string[], extra: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {}
   for (const [k, v] of Object.entries(process.env)) {

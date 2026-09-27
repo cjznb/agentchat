@@ -45,6 +45,7 @@ export interface Hub {
   reportState(agentId: string, state: AdapterState): Promise<void>
   wake(agentId: string): Promise<WakeResult>
   reportResult(agentId: string, items: readonly ResultItem[]): Promise<void>
+  retire(agentId: string): Promise<void>
 }
 
 function toWakeMessage(value: unknown): WakeMessage | undefined {
@@ -89,6 +90,12 @@ export function createHubClient(options: HubClientOptions): Hub {
     },
     async reportResult(agentId, items) {
       expectStatus(200, await transport.send("/internal/result", { agentId, items }, bearer), "POST /internal/result")
+    },
+    async retire(agentId) {
+      const result = await transport.send("/internal/retire", { agentId }, bearer)
+      // 幂等：`404 agent_not_found` 视为已退役/不存在，不重试也不报错（确定性错误）。
+      if (result.status === 404) return
+      expectStatus(200, result, "POST /internal/retire")
     },
   }
 }
