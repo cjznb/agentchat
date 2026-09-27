@@ -6,15 +6,14 @@
  * 同一 `wait` 阻塞机制、同一首答条件 UPDATE。
  * - `ask`：`to='human'` 落发起方↔用户审批通道；`to=agent` 落双方**既有**可沟通会话（DM 优先，
  *   否则共同群），无 → `conversation_required`；`to==from` → `self_ask`。建卡 + `publishMessage` + `emitApproval`。
- * - `respondAsk`：人类超级观察者可答任意 ask；agent 仅限 `target`。选项合法性 → `invalid_choice`；
- *   首答生效（`markAnswered` 条件 UPDATE）；答复消息落卡所在会话 + publish（解锁 `wait`）。
  * - `awaitAsk`：`awaitShoutApproval` 模板 —— 卡会话 `latestInConversation` 取基线 seq →
  *   `waitFor(...,{until:"message"})` 循环 → 每轮复查单据状态 → 超时返回 pending。
+ * - 答复编排（`respondAsk`）在 `core/respond.ts`（本文件 ≤250 纯行红线拆分，controller 授权；
+ *   `core/permissions` 一并 re-export）。
  */
-import { z } from "zod"
 import type { Db } from "../db"
 import { AgentNotFoundError, getAgent } from "../store/agents"
-import { getApproval, insertAsk, markAnswered, type Approval } from "../store/approvals"
+import { getApproval, insertAsk, type Approval } from "../store/approvals"
 import {
   dmKey,
   getConversationByKey,
@@ -116,13 +115,6 @@ export interface AskWaitResult {
   readonly timedOut: boolean
 }
 
-export interface RespondAskInput {
-  /** 选择某个选项（必须 ∈ options）。 */
-  readonly choice?: string
-  /** 自由答复（仅 `allowCustom !== false` 时允许）。 */
-  readonly text?: string
-}
-
 /**
  * agent 目标的可沟通会话：既有 DM 优先，否则首个共同群；皆无 → `undefined`
  * （**不自动建会话** —— spec §17 要求「已有可沟通会话」，故 `to=agent` 只取不建）。
@@ -157,8 +149,8 @@ function resolveTarget(
   return { target: to, conversation }
 }
 
-/** 卡所在会话（respondAsk 复用 ask 的定位规则；目标会话消失 → `conversation_required`）。 */
-function cardConversation(db: Db, ask: Approval): Conversation {
+/** 卡所在会话（`respondAsk` 回退复用 ask 的定位规则；目标会话消失 → `conversation_required`）。 */
+export function cardConversation(db: Db, ask: Approval): Conversation {
   if (ask.target === HUMAN_TARGET) return approvalChannel(db, ask.requesterAgentId)
   const conversation = sharedConversation(db, ask.requesterAgentId, ask.target)
   if (conversation === undefined) {
@@ -170,33 +162,6 @@ function cardConversation(db: Db, ask: Approval): Conversation {
 function cardBody(question: string, options: readonly string[], allowCustom: boolean): string {
   const optionsText = options.length === 0 ? "" : `（选项：${options.join(" / ")}）`
   return `❓ 请求批示：${question}${optionsText}${allowCustom ? "，也可自由答复" : ""}`
-}
-
-/** 校验并归一答案：choice 必须 ∈ options；text 仅 `allowCustom`；二者互斥且至少其一。 */
-function resolveAnswer(
-  input: RespondAskInput,
-  rawOptions: unknown,
-  allowCustom: boolean,
-): { readonly choice: string } | { readonly text: string } {
-  const { choice, text } = input
-  if (choice !== undefined && text !== undefined) throw new InvalidChoiceError("choice and text are mutually exclusive")
-  if (choice !== undefined) {
-    const parsed = z.array(z.string()).safeParse(rawOptions)
-    const options = parsed.success ? parsed.data : []
-    if (!options.includes(choice)) {
-      throw new InvalidChoiceError(`choice "${choice}" is not one of the options`)
-    }
-    return { choice }
-  }
-  if (text !== undefined) {
-    if (!allowCustom) throw new InvalidChoiceError("custom text is not allowed for this ask")
-    return { text }
-  }
-  throw new InvalidChoiceError("either choice or text is required")
-}
-
-function answerBody(answer: { readonly choice: string } | { readonly text: string }): string {
-  return "choice" in answer ? `✅ 已答复：${answer.choice}` : `✅ 已答复：${answer.text}`
 }
 
 /** 发起请求批示；`wait` 时阻塞至答复（已决）或超时（仍 pending）。 */
@@ -273,47 +238,3 @@ export async function awaitAsk(
   }
 }
 
-/**
- * 答复请求批示（首答生效）：校验应答权限与答案合法性 → `markAnswered`（仅 `pending` 成功）；
- * 答复消息落**卡所在会话**（优先取建卡时持久化的 `payload.conversationId`，缺失才回退
- * `cardConversation` 重算 —— 向后兼容既有行）+ publish（解锁 wait）+ `emitApproval`。
- * 人类超级观察者（`vendor='human'`）可答任意 ask；agent 仅限 `target`。
- */
-export function respondAsk(
-  db: Db,
-  askId: string,
-  responder: string,
-  input: RespondAskInput,
-): Approval {
-  const stored = getApproval(db, askId)
-  if (stored === undefined || stored.kind !== "ask") throw new AskNotFoundError(askId)
-  const responderAgent = getAgent(db, responder)
-  if (responderAgent?.vendor !== "human" && responder !== stored.target) {
-    throw new AskForbiddenError(responder, askId)
-  }
-  // 卡所在会话：优先建卡时持久化的会话 id（即使双方后来又建了 DM，也恒落卡会话）；
-  // 仅当旧行缺该字段时回退按目标规则重算（向后兼容）。
-  const persistedConversationId = stored.payload["conversationId"]
-  const conversationId =
-    typeof persistedConversationId === "string"
-      ? persistedConversationId
-      : cardConversation(db, stored).id
-  const answer = resolveAnswer(
-    input,
-    stored.payload["options"],
-    stored.payload["allowCustom"] !== false,
-  )
-  const decidedAt = Date.now()
-  const result: Record<string, unknown> = { ...answer, responder, decidedAt }
-  if (!markAnswered(db, askId, result, decidedAt)) throw new AskAlreadyAnsweredError(askId)
-  const decided: Approval = { ...stored, status: "answered", result, decidedAt }
-  postSystem(db, {
-    conversationId,
-    fromAgentId: responder,
-    body: answerBody(answer),
-    meta: { askId, kind: "ask", result },
-    idempotencyKey: `ask-answer:${askId}`,
-  })
-  emitApproval(decided)
-  return decided
-}
