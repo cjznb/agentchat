@@ -9,7 +9,9 @@
  * - 退避 `min(30000, 500·2^attempts)` ms；`busy` 保留 `24h`、`offline` 不过期
  * - 连续 `refused` 达 `REFUSAL_LIMIT`(2) 次 → 终态 `refused` → 发送方收合并通知
  * - `read` 仅由 ack 触发；回执 `delivered` 由 job `accepted` 派生
- *   （`/internal/result delivered` → `accepted`，见 core/publish `receiptState`）
+ *   （**仅** `/internal/result delivered` → `accepted`，见 core/publish `receiptState`）。
+ *   pull 认领（`store/wake-claims.ts` 的 `claimWakeBacklogJob`）只置 `sending` 在途租约，
+ *   绝不直接 `accepted`
  *
  * 生成规则（binding）：仅 `kind='runtime' AND status IN (online,busy)` 收件方建 job，
  * `logical`（含 human）与 offline/retired 收件方纯收件箱；另要求该 vendor 已注册
@@ -221,34 +223,6 @@ export function makeJobsDue(db: Db, input: { readonly agentId: string; readonly 
       "UPDATE wake_jobs SET retry_at = $now WHERE agent_id = $agentId AND state = 'pending'",
     )
     .run(input).changes
-}
-
-/**
- * `POST /internal/wake` 认领积压（Key facts：job → `accepted`，回执 → delivered 待复核）。
- * 无 job 时补建行（初始 `accepted` 为创建而非状态迁移）；已终态（refused/expired/cancelled）不翻转。
- */
-export function acceptWakeJob(
-  db: Db,
-  input: { readonly messageSeq: number; readonly agentId: string; readonly now: number },
-): { readonly stateChanged: boolean; readonly conversationId: string | undefined } {
-  const conversationId = getBySeq(db, input.messageSeq)?.conversationId
-  const existing = getWakeJob(db, input.messageSeq, input.agentId)
-  if (existing === undefined) {
-    db.prepare<[number, string, number, number], void>(
-      `INSERT INTO wake_jobs (message_id, agent_id, state, attempts, retry_at, pending_reason, detail, created_at)
-       VALUES (?, ?, 'accepted', 0, ?, NULL, '', ?)`,
-    ).run(input.messageSeq, input.agentId, input.now, input.now)
-    return { stateChanged: true, conversationId }
-  }
-  if (existing.state === "accepted" || !canWakeTransition(existing.state, "accepted")) {
-    return { stateChanged: false, conversationId }
-  }
-  const result = db
-    .prepare<[number, WakeState], { changes: number }>(
-      "UPDATE wake_jobs SET state = 'accepted', detail = '' WHERE id = ? AND state = ?",
-    )
-    .run(existing.id, existing.state)
-  return { stateChanged: result.changes > 0, conversationId }
 }
 
 // ── 投递结果与失败处理 ────────────────────────────────────────────

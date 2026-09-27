@@ -30,6 +30,7 @@ import {
   type PendingReason,
   type WakeJob,
 } from "../store/wake"
+import { requeueExpiredClaims } from "../store/wake-claims"
 import { sweepExpired } from "./permissions"
 import { publishMessage, publishReceipt } from "./publish"
 
@@ -93,23 +94,6 @@ function expireBusyJobs(db: Db, now: number): string[] {
             detail = 'Recipient stayed busy for the whole 24h retry window'
       WHERE state = 'pending' AND pending_reason = 'busy' AND created_at < ?`,
   ).run(cutoff)
-  return conversationIdsOf(
-    db,
-    rows.map((row) => row.message_id),
-  )
-}
-
-/** 在途超时回收：`sending` 且过时限 → 回 `pending` 等待重投（发送方回执退回 queued）。 */
-function rependStuckSending(db: Db, now: number): string[] {
-  const rows = db
-    .prepare<[number], { message_id: number }>(
-      "SELECT message_id FROM wake_jobs WHERE state = 'sending' AND retry_at <= ?",
-    )
-    .all(now)
-  if (rows.length === 0) return []
-  db.prepare<[number], void>(
-    "UPDATE wake_jobs SET state = 'pending' WHERE state = 'sending' AND retry_at <= ?",
-  ).run(now)
   return conversationIdsOf(
     db,
     rows.map((row) => row.message_id),
@@ -251,7 +235,9 @@ export class Dispatcher {
       backupIfDue(this.db, this.home, now)
       sweepExpired(this.db, now) // 审批 24h 过期（Task 7；brief 授权每轮顺带调用）
       for (const conversationId of expireBusyJobs(this.db, now)) publishReceipt(this.db, conversationId)
-      for (const conversationId of rependStuckSending(this.db, now)) publishReceipt(this.db, conversationId)
+      // 过期在途租约回收（pull 崩溃自愈）：`sending` 超时 → `pending` 待重投。
+      for (const conversationId of conversationIdsOf(this.db, requeueExpiredClaims(this.db, now)))
+        publishReceipt(this.db, conversationId)
       await this.dispatchDue(now)
       for (let i = 0; i < MAX_JOBS_PER_TICK; i += 1) {
         const failed = claimFailedNotice(this.db, now)

@@ -7,10 +7,12 @@
  *   白名单（T3 裁决：调用方判定）；`idle` → `online`；同态上报 = 心跳触碰；
  *   **子节点永不置 offline**（T3 已裁决契约，409 拒绝）
  * - `POST /internal/wake {agentId}` → `{messages[], receipts[]}`：认领积压
- *   （job → `accepted`、回执 → `delivered` 待复核）；过滤 `from != target`
+ *   （runtime 认领即 job → `sending` + 30s 在途租约、回执 → `sending`；
+ *   **不**直接 `accepted`——崩溃未回执时租约过期可重投）；过滤 `from != target`
  *   （T4 交接：inbox 含自发消息）；logical 节点只取件不建 job
  * - `POST /internal/result {agentId, items}` → `delivered/refused` 落库
- *   （`delivered` → job `accepted` → 收件方回执 `delivered`）
+ *   （`delivered` → job `accepted` → 收件方回执 `delivered`，亦为唯一 `accepted` 来源）
+ * - `POST /internal/retire {agentId}` → `{ok}`：退役子节点（不可恢复；取消待投递 job）
  *
  * `applyAgentState` / `claimWakeBacklog` 导出为纯函数：fake 适配器的
  * `reportState` 汇点与测试复用同一处理器（与 HTTP 路径零分叉）。
@@ -22,15 +24,16 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { ReceiptStage } from "../../shared/contracts"
 import { adapterStateSchema, type AdapterState } from "../adapters/types"
-import { canTransition, emitAgentTree } from "../core/agents"
+import { canTransition, emitAgentTree, retire } from "../core/agents"
 import { receiptState } from "../core/messaging"
 import { publishReceipt } from "../core/publish"
 import { config } from "../config"
 import { openDb, type Db } from "../db"
-import { getAgent, touchAgent } from "../store/agents"
+import { AgentNotFoundError, getAgent, touchAgent } from "../store/agents"
 import { getConversationByKey, SHOUT_KEY } from "../store/conversations"
 import { DEFAULT_INBOX_LIMIT, getById, inboxMessages, type Message } from "../store/messages"
-import { acceptWakeJob, applyDeliveryResult, getWakeJob, makeJobsDue } from "../store/wake"
+import { applyDeliveryResult, makeJobsDue } from "../store/wake"
+import { claimWakeBacklogJob } from "../store/wake-claims"
 
 // 生产缺省连接（同 routes/ui 模式）：首个 /internal 请求时按 config 打开并复用。
 let defaultDb: Db | undefined
@@ -111,9 +114,11 @@ export interface WakeBacklogResult {
 }
 
 /**
- * 认领积压（Key facts：job → `accepted`、回执 → `delivered` 待复核）：
- * 收件箱中回执未 delivered/read 且 job 缺失或仍在 `pending/sending` 的消息；
- * 已终态（refused/expired/cancelled）或已认领（accepted）的不重复认领。
+ * 认领积压（pull 在途租约）：收件箱中回执未 delivered/read 的消息；runtime 收件方
+ * 认领即置 `sending` + `CLAIM_TIMEOUT_MS` 租约（**不是** `accepted`——`accepted`
+ * 只由 `/internal/result {delivered}` 派生）；job 缺失时补建为 `sending`，崩溃未回执
+ * 则租约过期后下一次 wake 重投。已终态或在途租约仍有效的 `sending` 不重复认领。
+ * logical（含 human）只取件不建 job。回执 stage 因此为 `sending`。
  */
 export function claimWakeBacklog(
   db: Db,
@@ -136,17 +141,14 @@ export function claimWakeBacklog(
     if (message.fromAgentId === input.agentId) continue // T4 交接：过滤自发消息（from != target）
     const stage = receiptState(db, message, input.agentId)
     if (stage === "delivered" || stage === "read") continue
-    const job = getWakeJob(db, message.seq, input.agentId)
-    if (job !== undefined && job.state !== "pending" && job.state !== "sending") continue
     if (agent.kind === "runtime") {
-      const accepted = acceptWakeJob(db, {
+      const claimed = claimWakeBacklogJob(db, {
         messageSeq: message.seq,
         agentId: input.agentId,
         now,
       })
-      if (accepted.stateChanged && accepted.conversationId !== undefined) {
-        conversations.add(accepted.conversationId)
-      }
+      if (claimed === undefined) continue // 终态或在途租约仍有效：不重复认领
+      conversations.add(message.conversationId)
     }
     messages.push(message)
     receipts.push({ messageId: message.id, stage: receiptState(db, message, input.agentId) })
@@ -162,6 +164,7 @@ const resultBodySchema = z.object({
     z.object({ messageId: z.string().min(1), result: z.enum(["delivered", "refused"]) }),
   ),
 })
+const retireBodySchema = z.object({ agentId: z.string().min(1) })
 
 export interface InternalRoutesOptions {
   /** `hub_token` 路径（缺省 `config.hubTokenPath`）；测试注入临时 home。 */
@@ -221,5 +224,18 @@ export function internalRoutes(db?: Db, options?: InternalRoutesOptions): Hono {
         applied += 1
       }
       return c.json({ ok: true, applied })
+    })
+    .post("/internal/retire", async (c) => {
+      const parsed = retireBodySchema.safeParse(await c.req.json().catch(() => undefined))
+      if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
+      try {
+        retire(resolveDb(db), parsed.data.agentId)
+      } catch (error) {
+        if (error instanceof AgentNotFoundError) {
+          return c.json({ ok: false, error: "agent_not_found" }, 404)
+        }
+        throw error
+      }
+      return c.json({ ok: true })
     })
 }

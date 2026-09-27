@@ -2,7 +2,8 @@
  * 回执派生与等待事件发布钩子（spec §6.3；Task 5 决议 4/5）。
  *
  * 从 `messaging.ts` 抽出（controller 授权偏差，保持编排层 ≤250 纯 LOC）：
- * - 四级回执派生 `receiptState`（`read_states` → `wake_jobs` → `queued`）
+ * - 四级回执派生 `receiptState`（`read_states` → `wake_jobs` → `queued`）；
+ *   `accepted` 只由 `/internal/result delivered` 产生（pull 认领仅置 `sending` 租约）
  * - 两个事件发布点的小钩子：`sendMessage` 入库后 → `publishMessage`；
  *   `ack` 事务提交后 → `publishReceipt`（均委托 `wait.publish`，同步 bump+notify）
  */
@@ -38,7 +39,9 @@ const WAKE_STATE_STAGE: Record<z.infer<typeof wakeStateSchema>, ReceiptStage> = 
 
 /**
  * 四级回执派生（决议 4）：`read_states.last_read_seq ≥ seq` → `read`（仅 ack 触发）；
- * 否则看该收件方的 wake_jobs 行（T6 前恒无行 → `queued`）。每收件方独立、互不串扰。
+ * 否则看该收件方的 wake_jobs 行：`sending`（pull 在途租约）→ `sending`，
+ * `accepted`（**仅** `/internal/result delivered` 派生）→ `delivered`，其余 → `queued`；
+ * 无行 → `queued`。每收件方独立、互不串扰。
  */
 export function receiptState(db: Db, message: Message, recipient: string): ReceiptStage {
   const read = getReadState(db, message.conversationId, recipient)

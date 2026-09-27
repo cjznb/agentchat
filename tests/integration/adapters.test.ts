@@ -2,7 +2,8 @@
  * Task 1 —— Hub 适配器接缝集成测试（brief DoD）：
  * - **pull 模式**：`AGENTCHAT_ADAPTERS` 配置的厂商注册为 pull 占位；向在线 runtime 发送 →
  *   job `pending`，dispatcher tick 不注入、不产生 refused（消息留给 `/internal/wake` 认领）
- * - 该节点 `POST /internal/wake` → 取件 + job `accepted` + 回执 `delivered`
+ * - 该节点 `POST /internal/wake` → 取件 + job `sending`（在途租约）+ 回执 `sending`
+ *   （**非** `delivered`；`accepted`/`delivered` 只由 `/internal/result delivered` 派生）
  * - **push（fake）零回归**：默认 `mode` 为 push，inject 收到消息 → job accepted
  * - `AGENTCHAT_ADAPTERS` 解析：空/未设/含空白/重复项
  * 时间断言用注入时钟（`dispatcher.tick(now)`），无 sleep。
@@ -101,7 +102,7 @@ describe("pull adapter seam", () => {
     expect(receiptState(db, message, node.id)).toBe("queued")
   })
 
-  it("hands the backlog to /internal/wake: job accepted and receipt delivered", async () => {
+  it("hands the backlog to /internal/wake as an in-flight lease, then accepts on result delivered", async () => {
     const app = createApp(db, { hubTokenPath: join(home, "hub_token"), adapters: ["opencode"] })
     const sender = makeAgent("wake-sender")
     const node = makeAgent("wake-node")
@@ -114,8 +115,17 @@ describe("pull adapter seam", () => {
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({
       messages: [expect.objectContaining({ id: message.id })],
-      receipts: [{ messageId: message.id, stage: "delivered" }],
+      receipts: [{ messageId: message.id, stage: "sending" }],
     })
+    // 认领 = sending 租约（崩溃未回执则可重投），绝不提前 accepted/delivered
+    expect(expectJob(message.seq, node.id).state).toBe("sending")
+    expect(receiptState(db, message, node.id)).toBe("sending")
+
+    const result = await post(app, "/internal/result", {
+      agentId: node.id,
+      items: [{ messageId: message.id, result: "delivered" }],
+    })
+    expect(await result.json()).toEqual({ ok: true, applied: 1 })
     expect(expectJob(message.seq, node.id).state).toBe("accepted")
     expect(receiptState(db, message, node.id)).toBe("delivered")
   })

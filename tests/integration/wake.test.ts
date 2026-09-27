@@ -223,15 +223,15 @@ describe("offline root reconnect", () => {
     expect(fake.injections[0]?.msgs.map((m) => m.body)).toEqual(["积压一"])
     expect(expectJob(backlog.seq, root.id).state).toBe("accepted")
 
-    // 适配器 SessionStart 拉取积压：已投递的不重复认领，无 job 的补建 accepted
+    // 适配器 SessionStart 拉取积压：已投递的不重复认领，无 job 的补建 sending 租约
     const res = await post("/internal/wake", { agentId: root.id })
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({
       messages: [expect.objectContaining({ id: whileOffline.id })],
-      receipts: [{ messageId: whileOffline.id, stage: "delivered" }],
+      receipts: [{ messageId: whileOffline.id, stage: "sending" }],
     })
-    expect(expectJob(whileOffline.seq, root.id).state).toBe("accepted")
-    expect(receiptState(db, whileOffline, root.id)).toBe("delivered")
+    expect(expectJob(whileOffline.seq, root.id).state).toBe("sending")
+    expect(receiptState(db, whileOffline, root.id)).toBe("sending")
   })
 })
 
@@ -324,18 +324,18 @@ describe("internal endpoints", () => {
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({
       messages: [expect.objectContaining({ id: foreign.id })],
-      receipts: [{ messageId: foreign.id, stage: "delivered" }],
+      receipts: [{ messageId: foreign.id, stage: "sending" }],
     })
   })
 
-  it("lets /internal/result revoke an accepted (pending-review) job back to pending on refusal", async () => {
+  it("lets /internal/result revoke an in-flight (sending) claimed job back to pending on refusal", async () => {
     const sender = makeAgent("revoke-sender")
     const node = makeAgent("revoke-node")
     const { message } = sendMessage(db, { from: sender.id, to: node.id, body: "待复核" })
 
     const wakeRes = await post("/internal/wake", { agentId: node.id })
     expect(wakeRes.status).toBe(200)
-    expect(receiptState(db, message, node.id)).toBe("delivered") // 认领 → delivered 待复核
+    expect(receiptState(db, message, node.id)).toBe("sending") // 认领 → sending 在途租约
 
     const res = await post("/internal/result", {
       agentId: node.id,
