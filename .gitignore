@@ -15,6 +15,9 @@ AGENTS.md
 # 适配器与应用日志
 *.log
 logs/
+test-results/
+playwright-report/
+artifacts/
 
 # BEGIN oh-my-opencode-slim clonedeps
 .slim/clonedeps/repos/

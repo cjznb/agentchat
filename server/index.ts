@@ -7,8 +7,12 @@
  */
 import type { ServerType } from "@hono/node-server"
 import { serve } from "@hono/node-server"
+import { serveStatic } from "@hono/node-server/serve-static"
+import { existsSync, readFileSync } from "node:fs"
 import { Server as HttpServer } from "node:http"
 import type { AddressInfo } from "node:net"
+import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { Hono } from "hono"
 import { config } from "./config"
 import type { Db } from "./db"
@@ -22,15 +26,26 @@ import { attachWsServer } from "./ws"
 export interface AppOptions extends InternalRoutesOptions {
   readonly home?: string
   readonly sessionTtlMs?: number
+  readonly distDir?: string
 }
 
 export function createApp(db?: Db, options?: AppOptions): Hono {
   const app = new Hono()
+  const distDir = options?.distDir ?? fileURLToPath(new URL("../client/dist", import.meta.url))
+  const indexPath = join(distDir, "index.html")
+  const hasClient = existsSync(indexPath)
+  if (hasClient) app.use("*", serveStatic({ root: distDir }))
   app.get("/api/health", (c) => c.json({ status: "ok" }))
   app.route("/", uiRoutes(db))
   app.route("/", notificationRoutes(db))
   app.route("/", internalRoutes(db, options))
   app.route("/", mcpRoutes(db, options))
+  app.notFound((c) => {
+    const protectedPath = ["/api", "/mcp", "/internal"].some((prefix) => c.req.path.startsWith(prefix))
+    if (protectedPath || c.req.path.startsWith("/assets/")) return c.text("Not Found", 404)
+    if (!hasClient) return c.text("AgentChat client is unavailable; run npm run build first.", 503)
+    return c.html(readFileSync(indexPath, "utf8"))
+  })
   return app
 }
 
