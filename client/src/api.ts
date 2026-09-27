@@ -12,6 +12,7 @@ import {
   approvalListSchema,
   conversationListSchema,
   conversationReadResultSchema,
+  ensureDmResultSchema,
   groupCreateResultSchema,
   groupListSchema,
   groupMemberResultSchema,
@@ -30,6 +31,7 @@ import {
   type ChatMessage,
   type ConversationList,
   type ConversationReadResult,
+  type EnsureDmResult,
   type GroupCreateResult,
   type GroupEntry,
   type GroupMemberResult,
@@ -160,6 +162,11 @@ export function shout(body: string): Promise<ShoutResult> {
 
 export function loadAgentCard(id: string, signal?: AbortSignal): Promise<AgentCard> {
   return request(`/api/agents/${encodeURIComponent(id)}`, agentCardSchema, signalInit(signal))
+}
+
+/** 确保 human↔节点 DM（取或建，幂等）——资料卡「发消息」用。 */
+export function ensureDm(to: string): Promise<EnsureDmResult> {
+  return request("/api/conversations", ensureDmResultSchema, postInit({ to }))
 }
 
 export function markNotificationRead(id: string): Promise<NotificationReadResult> {

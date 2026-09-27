@@ -147,6 +147,8 @@ export interface RosterNode {
   readonly purpose: string | null
   readonly role_tag: string | null
   readonly remark: string | null
+  /** 技能 chips（spec §11.1 联系人信息卡）；Plan 3 T6 补入线格式（旧出参无此字段亦兼容）。 */
+  readonly skills?: readonly string[]
   readonly unread: number
   readonly children: readonly RosterNode[]
 }
@@ -164,6 +166,7 @@ const rosterNodeSchema: z.ZodType<RosterNode> = z.lazy(() =>
     purpose: z.string().nullable(),
     role_tag: z.string().nullable(),
     remark: z.string().nullable(),
+    skills: z.array(z.string()).default([]),
     unread: z.number().int().nonnegative(),
     children: z.array(rosterNodeSchema),
   }),
@@ -578,6 +581,16 @@ export const conversationSchema = z.object({
   createdBy: z.string(),
   createdAt: z.number().int().nonnegative(),
 })
+
+/**
+ * 确保 DM 结果（Plan 3 T6 `POST /api/conversations {to}`）：human↔节点 DM 的取或建
+ * （幂等）；资料卡「发消息」在无既有 DM 时凭此创建会话。
+ */
+export const ensureDmResultSchema = z.object({
+  ok: z.literal(true),
+  conversation: conversationSchema,
+})
+export type EnsureDmResult = z.infer<typeof ensureDmResultSchema>
 
 /** 群列表元素（`GET /api/groups`）。 */
 export const groupEntrySchema = conversationSchema

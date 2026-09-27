@@ -6,6 +6,9 @@
  * 展开态走手风琴，持久化键前缀 `agentchat:`，坏 JSON 容错。
  */
 import type { ConversationSummary, RosterNode } from "../../shared/contracts"
+import { loadExpanded, saveExpanded, toggleExpanded, type StorageLike } from "./accordion"
+
+export type { StorageLike }
 /** 嵌套于根容器内的子会话行。 */
 export interface ChildRow {
   readonly conversation: ConversationSummary
@@ -210,40 +213,22 @@ export function foldConversations(
 }
 
 // ── 展开态：手风琴 + localStorage（键前缀 `agentchat:`） ─────────────
+// 纯原语抽到 `accordion.ts`（Plan 3 T6：会话列表与组织树共用同一折叠模式）；
+// 以下为会话列表专属的键绑定 + 薄封装，导出名与行为保持不变。
 
 export const EXPANDED_ROOTS_KEY = "agentchat:expandedRoots"
 
-/** 可注入的存储面（浏览器 `Storage` 与测试假实现皆满足）。 */
-export interface StorageLike {
-  getItem(key: string): string | null
-  setItem(key: string, value: string): void
-}
-
-/** 读取展开的根 id；坏 JSON / 非字符串数组 / 存储异常 → 空数组（容错）。 */
+/** 读取展开的根 id。 */
 export function loadExpandedRoots(storage: StorageLike | null): readonly string[] {
-  if (storage === null) return []
-  try {
-    const raw = storage.getItem(EXPANDED_ROOTS_KEY)
-    if (raw === null) return []
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return (parsed as readonly unknown[]).filter((value): value is string => typeof value === "string")
-  } catch {
-    return [] // 坏 JSON：忽略持久化，回到默认收起
-  }
+  return loadExpanded(storage, EXPANDED_ROOTS_KEY)
 }
 
-/** 写入展开的根 id；配额/隐私模式异常吞掉（持久化失败不影响交互）。 */
+/** 写入展开的根 id。 */
 export function saveExpandedRoots(storage: StorageLike | null, roots: readonly string[]): void {
-  if (storage === null) return
-  try {
-    storage.setItem(EXPANDED_ROOTS_KEY, JSON.stringify(roots))
-  } catch {
-    /* 存储不可用：忽略 */
-  }
+  saveExpanded(storage, EXPANDED_ROOTS_KEY, roots)
 }
 
 /** 手风琴：展开新根只保留它；再点已展开的根则收起。 */
 export function toggleExpandedRoot(roots: readonly string[], rootId: string): readonly string[] {
-  return roots.includes(rootId) ? [] : [rootId]
+  return toggleExpanded(roots, rootId)
 }

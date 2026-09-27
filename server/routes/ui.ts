@@ -31,8 +31,9 @@ import {
 import { agentCard, conversationList, conversationMessages, groupList } from "../core/ui-queries"
 import { config } from "../config"
 import { openDb, type Db } from "../db"
+import { getAgent } from "../store/agents"
 import { getApproval, listApprovals, type Approval } from "../store/approvals"
-import { addParticipant, createGroup, getConversation } from "../store/conversations"
+import { addParticipant, createDm, createGroup, getConversation } from "../store/conversations"
 import { latestInConversation } from "../store/messages"
 import { markRead } from "../store/read_states"
 
@@ -47,6 +48,7 @@ function resolveDb(db: Db | undefined): Db {
 
 const decisionBodySchema = z.object({ decision: z.enum(["approve", "reject"]) })
 const sendBodySchema = z.object({ body: z.string() })
+const ensureDmBodySchema = z.object({ to: z.string().min(1) })
 const groupBodySchema = z.object({
   name: z.string().min(1),
   memberIds: z.array(z.string()).optional(),
@@ -149,6 +151,18 @@ export function uiRoutes(db?: Db): Hono {
     })
     // Task 9：会话列表（双层聚合未读 + 最后预览）。
     .get("/api/conversations", (c) => c.json(conversationList(resolveDb(db))))
+    // Plan 3 T6：确保 human↔节点 DM（取或建，幂等）——资料卡「发消息」在无既有 DM 时建会话。
+    .post("/api/conversations", async (c) => {
+      const database = resolveDb(db)
+      const parsed = ensureDmBodySchema.safeParse(await c.req.json().catch(() => undefined))
+      if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
+      const target = getAgent(database, parsed.data.to)
+      if (target === undefined) return c.json({ ok: false, error: "recipient_not_found" }, 404)
+      // human 自身不建 DM（human 走超级观察者直读任意会话，不参与 DM 成员表语义）。
+      if (target.vendor === "human") return c.json({ ok: false, error: "invalid_recipient" }, 400)
+      const conversation = createDm(database, ensureHuman(database).id, target.id)
+      return c.json({ ok: true, conversation })
+    })
     // Plan 3 T3：会话历史分页（`before` = seq 不含，缺省最新一页，seq 升序）；未知会话 404。
     .get("/api/conversations/:id/messages", (c) => {
       const database = resolveDb(db)

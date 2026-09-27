@@ -1,13 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import type { RosterNode } from "../../shared/contracts"
 import { ChatView } from "./components/ChatView"
+import { ContactCard } from "./components/ContactCard"
 import { ConversationList } from "./components/ConversationList"
+import { OrgTree } from "./components/OrgTree"
 import { parseDeepLink } from "./deeplink"
 import { useStore } from "./store"
 import type { ConnectionStatus } from "./ws"
 
 const modes = [
   { id: "chat", label: "聊天", glyph: "聊", title: "会话", hint: "选择一个 Agent，开始查看消息。" },
-  { id: "contacts", label: "通讯录", glyph: "联", title: "Agent 树", hint: "Agent 层级将在这里展开。" },
+  { id: "contacts", label: "通讯录", glyph: "联", title: "Agent 树", hint: "点选节点查看资料卡与参与会话。" },
   { id: "shout", label: "喊话", glyph: "播", title: "全员喊话", hint: "面向全部 Agent 发布一条消息。" },
 ] as const
 
@@ -37,13 +40,28 @@ function StatePanel({ state, title, hint }: { readonly state: ContentState; read
   return <section className="state-panel"><span className="state-mark">+</span><h2>{title}</h2><p>{hint}</p></section>
 }
 
+/** 在 roster 森林中按 id 定位节点（资料卡数据源）。 */
+function findRosterNode(nodes: readonly RosterNode[], id: string): RosterNode | null {
+  for (const node of nodes) {
+    if (node.id === id) return node
+    const found = findRosterNode(node.children, id)
+    if (found !== null) return found
+  }
+  return null
+}
+
 export function App() {
-  const { state, openConversation } = useStore()
+  const { state, openConversation, openAndRead, openDm } = useStore()
   const [activeMode, setActiveMode] = useState<ModeId>("chat")
+  const [selectedContactId, setSelectedContactId] = useState<string | null>(null)
   const active = modes.find((mode) => mode.id === activeMode) ?? modes[0]
   const list = listCopy[activeMode]
   const showConversations = activeMode === "chat" && state.conversations.length > 0
   const openId = state.openConversationId
+  const selectedContact = useMemo(
+    () => (selectedContactId === null ? null : findRosterNode(state.roster, selectedContactId)),
+    [state.roster, selectedContactId],
+  )
   const deepLink = useMemo(
     () => parseDeepLink(typeof window === "undefined" ? "" : window.location.search),
     [],
@@ -56,6 +74,27 @@ export function App() {
     deepLinkApplied.current = true
     if (deepLink.conversationId !== null) openConversation(deepLink.conversationId)
   }, [deepLink.conversationId, openConversation])
+
+  // 资料卡「发消息」：确保 DM 后切到聊天视图。
+  const handleMessage = useCallback(
+    (nodeId: string) => {
+      void openDm(nodeId).then(() => {
+        setActiveMode("chat")
+        setSelectedContactId(null)
+      })
+    },
+    [openDm],
+  )
+
+  // 资料卡「查看它的会话」条目：打开该会话并切到聊天视图。
+  const handleOpenConversation = useCallback(
+    (conversationId: string) => {
+      openAndRead(conversationId)
+      setActiveMode("chat")
+      setSelectedContactId(null)
+    },
+    [openAndRead],
+  )
 
   return (
     <main className="app-shell" data-testid="app-shell">
@@ -76,7 +115,9 @@ export function App() {
 
       <aside className="context-list" aria-labelledby="context-title" data-testid="middle-list">
         <header><p>AGENTCHAT</p><h1 id="context-title">{list.title}</h1></header>
-        {showConversations ? (
+        {activeMode === "contacts" ? (
+          <OrgTree selectedId={selectedContactId} onSelect={setSelectedContactId} />
+        ) : showConversations ? (
           <ConversationList />
         ) : (
           <div className="list-empty"><span aria-hidden="true">—</span><p>{list.detail}</p><small>数据接入将在后续任务完成</small></div>
@@ -89,7 +130,18 @@ export function App() {
         ) : (
           <>
             <header className="view-header"><div><p>当前视图</p><h1 id="view-title">{active.title}</h1></div><span className="mode-code">{active.id.toUpperCase()}</span></header>
-            <div className="view-body"><StatePanel state="empty" title={active.title} hint={active.hint} /></div>
+            <div className="view-body">
+              {activeMode === "contacts" && selectedContact !== null ? (
+                <ContactCard
+                  node={selectedContact}
+                  onClose={() => setSelectedContactId(null)}
+                  onMessage={handleMessage}
+                  onOpenConversation={handleOpenConversation}
+                />
+              ) : (
+                <StatePanel state="empty" title={active.title} hint={active.hint} />
+              )}
+            </div>
           </>
         )}
       </section>

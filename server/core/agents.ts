@@ -279,6 +279,7 @@ export function rosterTree(db: Db): RosterNode[] {
     purpose: agent.purpose ?? null,
     role_tag: agent.roleTag ?? null,
     remark: agent.remark ?? null,
+    skills: agent.skills,
     unread: unread.get(agent.id) ?? 0,
     children: (childrenByParent.get(agent.id) ?? []).map(build),
   })

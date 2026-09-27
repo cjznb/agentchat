@@ -17,6 +17,7 @@ import {
 } from "react"
 import {
   INITIAL_RELOAD_PLAN,
+  ensureDm,
   loadMessages,
   loadReload,
   markConversationRead as postConversationRead,
@@ -32,6 +33,8 @@ export interface StoreValue {
   openConversation(conversationId: string | null): void
   /** 点击会话行：打开 + 按需载入消息 + 推进已读位点（徽标经重拉清零）。 */
   openAndRead(conversationId: string): void
+  /** 资料卡「发消息」：确保 human↔节点 DM（取或建，幂等）后打开。 */
+  openDm(nodeId: string): Promise<void>
   reload(plan: ReloadPlan): void
   sendMessage(conversationId: string, body: string): Promise<void>
   /** 上翻分页：拉取 `beforeSeq` 之前一页并入会话；返回本页条数（< 页大小 = 无更多）。 */
@@ -150,17 +153,38 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
     [dispatch, reload, markConversationRead],
   )
 
+  const openDm = useCallback(
+    async (nodeId: string): Promise<void> => {
+      try {
+        const { conversation } = await ensureDm(nodeId)
+        // 先重拉会话列表使新 DM 可见，再打开并按需载入消息 + 标已读。
+        reload({
+          roster: false,
+          conversations: true,
+          notifications: false,
+          approvals: false,
+          messages: [],
+        })
+        openAndRead(conversation.id)
+      } catch (error) {
+        console.warn("open dm failed", error)
+      }
+    },
+    [openAndRead, reload],
+  )
+
   const value = useMemo<StoreValue>(
     () => ({
       state,
       openConversation,
       openAndRead,
+      openDm,
       reload,
       sendMessage,
       loadOlder,
       markConversationRead,
     }),
-    [state, openConversation, openAndRead, reload, sendMessage, loadOlder, markConversationRead],
+    [state, openConversation, openAndRead, openDm, reload, sendMessage, loadOlder, markConversationRead],
   )
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>
