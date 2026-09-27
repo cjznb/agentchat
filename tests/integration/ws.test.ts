@@ -11,14 +11,16 @@ import { connect, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { wsResyncSchema, wsServerFrameSchema } from "../../shared/contracts"
+import { wsApprovalPayloadSchema, wsResyncSchema, wsServerFrameSchema } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
 import { registerRoot, retire } from "../../server/core/agents"
 import { ack, ensureHuman, sendMessage, shout } from "../../server/core/messaging"
+import { ask, respondAsk } from "../../server/core/permissions"
 import { openDb, type Db } from "../../server/db"
 import { start, type RunningServer } from "../../server/index"
 import { applyAgentState } from "../../server/routes/internal"
 import { insertAgent } from "../../server/store/agents"
+import { listApprovals } from "../../server/store/approvals"
 import { activeWsClients, currentWsSeq, MAX_CLIENT_FRAME_BYTES, resetWsHub } from "../../server/ws"
 
 let home = ""
@@ -107,6 +109,11 @@ function seqOf(frame: unknown): number {
   return (frame as { seq: number }).seq
 }
 
+/** 帧 payload（`approval` 事件的判别断言用）。 */
+function payloadOf(frame: unknown): unknown {
+  return (frame as { payload: unknown }).payload
+}
+
 /** 生成 `count` 条 message 事件（human → 逻辑节点 DM）。 */
 function produceMessages(count: number): { humanId: string; peerId: string } {
   const human = ensureHuman(db)
@@ -134,6 +141,36 @@ describe("/api/ws 四类事件", () => {
     expect(new Set(received.map(typeOf))).toEqual(
       new Set(["message", "receipt", "agent", "approval"]),
     )
+    // Task 4：`approval` payload 带 kind 判别（shout 审批 → 'action'）。
+    const approvalFrame = received.find((frame) => typeOf(frame) === "approval")
+    if (approvalFrame === undefined) throw new Error("expected an approval frame")
+    expect(wsApprovalPayloadSchema.parse(payloadOf(approvalFrame)).kind).toBe("action")
+    await closeWs(socket)
+  })
+
+  it("tags ask approval events with kind 'ask' and re-emits them on respond", async () => {
+    const human = ensureHuman(db)
+    const root = registerRoot(db, home, { name: "ws-ask-root", vendor: "opencode" }).agent
+    const { socket, stream } = await connectWs(wsUrl(running.url))
+
+    // 建卡（message）+ pending approval（kind='ask'）。
+    ask(db, root.id, { to: "human", question: "走不走", options: ["走", "不走"] })
+    const pendingFrames = await stream.next(2)
+    const pendingApproval = pendingFrames.find((frame) => typeOf(frame) === "approval")
+    if (pendingApproval === undefined) throw new Error("expected a pending approval frame")
+    expect(wsApprovalPayloadSchema.parse(payloadOf(pendingApproval)).kind).toBe("ask")
+
+    // 答复（message）+ answered approval（kind='ask'）。
+    const stored = listApprovals(db, "pending").find((approval) => approval.kind === "ask")
+    if (stored === undefined) throw new Error("expected a pending ask")
+    respondAsk(db, stored.id, human.id, { choice: "走" })
+    const after = await stream.next(4)
+    const approvals = after.filter((frame) => typeOf(frame) === "approval")
+    const answered = approvals[approvals.length - 1]
+    if (answered === undefined) throw new Error("expected an answered approval frame")
+    const parsed = wsApprovalPayloadSchema.parse(payloadOf(answered))
+    expect(parsed.kind).toBe("ask")
+    expect(parsed.approval.status).toBe("answered")
     await closeWs(socket)
   })
 

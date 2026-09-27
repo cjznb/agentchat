@@ -79,6 +79,11 @@ export type ApprovalStatus = (typeof APPROVAL_STATUS)[number]
 export const approvalActionSchema = z.enum(APPROVAL_ACTIONS)
 export const approvalStatusSchema = z.enum(APPROVAL_STATUS)
 
+/** 单据种类（spec §17.2 决策②：一套 `approvals` 状态机两用；WS `approval` 事件的判别字段）。 */
+export const APPROVAL_KINDS = ["action", "ask"] as const
+export type ApprovalKind = (typeof APPROVAL_KINDS)[number]
+export const approvalKindSchema = z.enum(APPROVAL_KINDS)
+
 /**
  * ask 单的 `action` 占位（spec §17.2；`approvals.action` 列 NOT NULL）。
  * `approvalActionSchema` 仍锁定三值审批动作；本值域 = 三值 ∪ `'ask'`，
@@ -99,6 +104,33 @@ export const approvalSnapshotSchema = z.object({
   decidedAt: z.number().int().nonnegative().nullable(),
 })
 export type ApprovalSnapshot = z.infer<typeof approvalSnapshotSchema>
+
+// ── 通知页线格式（spec §11.5/§17.3；Task 4 数据面，Plan 3 UI 消费） ──
+
+/**
+ * 通知条目（`GET /api/notifications` 元素）：单据全量 + 深链锚点。
+ * `cardMessageId`/`conversationId` 由卡消息（`meta.askId`/`meta.approvalId`）反查得到，
+ * 供 UI 深链 `?conversation=<id>&msg=<cardMessageId>` 滚动定位；卡缺失时为 `null`（理论不出现）。
+ * `readAt` 缺省 = 未读（单用户 MVP：全局已读）。
+ */
+export const notificationEntrySchema = z.object({
+  id: z.string(),
+  kind: approvalKindSchema,
+  target: z.string(),
+  action: approvalActionValueSchema,
+  payload: z.record(z.string(), z.unknown()),
+  status: approvalStatusSchema,
+  result: z.record(z.string(), z.unknown()).optional(),
+  createdAt: z.number().int().nonnegative(),
+  decidedAt: z.number().int().nonnegative().optional(),
+  readAt: z.number().int().nonnegative().optional(),
+  cardMessageId: z.string().nullable(),
+  conversationId: z.string().nullable(),
+})
+export type NotificationEntry = z.infer<typeof notificationEntrySchema>
+
+/** `GET /api/notifications` 响应体（按 `scope` 过滤后的条目数组，最新在前）。 */
+export const notificationListSchema = z.array(notificationEntrySchema)
 
 // ── roster 线格式（spec §5.1/§9；Task 9 自 core/agents 上移，供 REST/WS/前端共用） ──
 
@@ -167,8 +199,15 @@ export type WsReceiptPayload = z.infer<typeof wsReceiptPayloadSchema>
 export const wsAgentPayloadSchema = z.object({ tree: rosterTreeSchema })
 export type WsAgentPayload = z.infer<typeof wsAgentPayloadSchema>
 
-/** `approval`：审批单变化（单据快照）。 */
-export const wsApprovalPayloadSchema = z.object({ approval: approvalSnapshotSchema })
+/**
+ * `approval`：审批/批示单变化（单据快照 + `kind` 判别）。
+ * `kind` 置顶为**判别字段**（spec §17.2 决策②）：WS 消费者无需窥探 `approval.action`
+ * 即可区分审批单（`action`）与批示单（`ask`）；不新增第五类事件（`WS_EVENT_TYPES` 锁定四类）。
+ */
+export const wsApprovalPayloadSchema = z.object({
+  kind: approvalKindSchema,
+  approval: approvalSnapshotSchema,
+})
 export type WsApprovalPayload = z.infer<typeof wsApprovalPayloadSchema>
 
 /** 四类事件 payload schema（键恰为 WS_EVENT_TYPES，Plan 2 前端复用）。 */

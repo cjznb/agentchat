@@ -102,7 +102,8 @@ export function uiRoutes(db?: Db): Hono {
       ensureHuman(database)
       return c.json(rosterTree(database))
     })
-    .get("/api/approvals", (c) => c.json(listApprovals(resolveDb(db), "pending")))
+    // Task 4：审批列表只列**审批单**（kind='action'）—— 批示单（ask）归 `/api/notifications`（含 ask）。
+    .get("/api/approvals", (c) => c.json(listApprovals(resolveDb(db), "pending", "action")))
     .post("/api/approvals/:id", async (c) => {
       const database = resolveDb(db)
       const parsed = decisionBodySchema.safeParse(await c.req.json().catch(() => undefined))

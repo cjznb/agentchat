@@ -9,22 +9,24 @@ import { randomUUID } from "node:crypto"
 import { z } from "zod"
 import {
   approvalActionValueSchema,
+  approvalKindSchema,
   approvalStatusSchema,
+  APPROVAL_KINDS,
   ASK_ACTION,
   type ApprovalAction,
   type ApprovalActionValue,
+  type ApprovalKind,
   type ApprovalStatus,
 } from "../../shared/contracts"
 import type { Db } from "../db"
 
-// 枚举单源在 shared/contracts（Task 9 上移，REST/WS/前端共用）；此处仅再导出既有类型名。
+// 枚举单源在 shared/contracts（Task 9 上移，REST/WS/前端共用；Task 4 起 kind 亦供 WS 判别）；
+// 此处仅再导出既有类型/值名，保持既有导入路径不变。
 export type { ApprovalAction, ApprovalActionValue, ApprovalStatus }
 export { ASK_ACTION }
-
-/** 审批单种类（spec §5.3/§17.2：一套状态机两用）。 */
-export const APPROVAL_KINDS = ["action", "ask"] as const
-export type ApprovalKind = (typeof APPROVAL_KINDS)[number]
-export const approvalKindSchema = z.enum(APPROVAL_KINDS)
+// 审批单种类（spec §5.3/§17.2：一套状态机两用）。
+export { APPROVAL_KINDS, approvalKindSchema }
+export type { ApprovalKind }
 
 const payloadSchema = z.record(z.string(), z.unknown())
 
@@ -183,16 +185,27 @@ export function getApproval(db: Db, id: string): Approval | undefined {
   return row === undefined ? undefined : toApproval(row)
 }
 
-/** 单据列表（`GET /api/approvals` 传 `"pending"` 取未处理）；并列 created_at 以 id 定序。 */
-export function listApprovals(db: Db, status?: ApprovalStatus): Approval[] {
-  const rows =
-    status === undefined
-      ? db.prepare<[], ApprovalRow>("SELECT * FROM approvals ORDER BY created_at ASC, id ASC").all()
-      : db
-          .prepare<{ status: ApprovalStatus }, ApprovalRow>(
-            "SELECT * FROM approvals WHERE status = $status ORDER BY created_at ASC, id ASC",
-          )
-          .all({ status })
+/**
+ * 单据列表（`GET /api/approvals` 传 `"pending"` + `"action"` 取未处理**审批**；Task 4 增 kind 过滤，
+ * 令审批列表不再混入批示单）。过滤项缺省即不过滤；并列 `created_at` 以 id 定序。
+ */
+export function listApprovals(db: Db, status?: ApprovalStatus, kind?: ApprovalKind): Approval[] {
+  const conditions: string[] = []
+  const params: { status?: ApprovalStatus; kind?: ApprovalKind } = {}
+  if (status !== undefined) {
+    conditions.push("status = $status")
+    params.status = status
+  }
+  if (kind !== undefined) {
+    conditions.push("kind = $kind")
+    params.kind = kind
+  }
+  const where = conditions.length === 0 ? "" : ` WHERE ${conditions.join(" AND ")}`
+  const rows = db
+    .prepare<{ status?: ApprovalStatus; kind?: ApprovalKind }, ApprovalRow>(
+      `SELECT * FROM approvals${where} ORDER BY created_at ASC, id ASC`,
+    )
+    .all(params)
   return rows.map(toApproval)
 }
 

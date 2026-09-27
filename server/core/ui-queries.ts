@@ -6,10 +6,13 @@
  * - `unreadByRoot` 对每个根调既有 `unreadFor`（自身 + 全部后代递归，两层聚合）
  * - 排序：最后消息时间倒序（无消息者置底，稳定次序按会话创建序）
  */
+import type { NotificationEntry } from "../../shared/contracts"
 import type { Db } from "../db"
 import { listAgents } from "../store/agents"
+import type { Approval } from "../store/approvals"
 import { isParticipant, listConversations, SHOUT_KEY } from "../store/conversations"
-import { latestInConversation, type Message } from "../store/messages"
+import { findCardMessage, latestInConversation, type Message } from "../store/messages"
+import { listNotifications, type NotificationScope } from "../store/notifications"
 import { rosterTree, type RosterNode } from "./agents"
 import { ensureHuman, unreadFor } from "./messaging"
 
@@ -146,4 +149,34 @@ export function agentCard(db: Db, id: string): AgentCard | undefined {
       }),
     )
   return { node, conversations }
+}
+
+// ── 通知页读模型（spec §11.5/§17.3；Task 4）─────────────────────────
+
+/** 单条通知组装：单据全量 + 卡消息深链锚点（`cardMessageId` + `conversationId`）。 */
+function notificationEntry(db: Db, approval: Approval): NotificationEntry {
+  const card = findCardMessage(db, approval.id)
+  return {
+    id: approval.id,
+    kind: approval.kind,
+    target: approval.target,
+    action: approval.action,
+    payload: approval.payload,
+    status: approval.status,
+    ...(approval.result === undefined ? {} : { result: approval.result }),
+    createdAt: approval.createdAt,
+    ...(approval.decidedAt === undefined ? {} : { decidedAt: approval.decidedAt }),
+    ...(approval.readAt === undefined ? {} : { readAt: approval.readAt }),
+    cardMessageId: card?.id ?? null,
+    conversationId: card?.conversationId ?? null,
+  }
+}
+
+/**
+ * 通知列表（spec §11.5）：`scope` 语义见 `store/notifications.listNotifications`
+ * （`actionable` = `target='human' AND status='pending'`；`all` = 全部）；
+ * 每条附深链锚点，供 UI `?conversation=<id>&msg=<cardMessageId>` 滚动定位。
+ */
+export function notificationList(db: Db, scope: NotificationScope): readonly NotificationEntry[] {
+  return listNotifications(db, scope).map((approval) => notificationEntry(db, approval))
 }

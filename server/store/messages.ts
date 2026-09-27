@@ -134,6 +134,22 @@ export function latestInConversation(db: Db, conversationId: string): Message | 
 }
 
 /**
+ * 卡消息反查（Task 4 深链锚点，spec §11.5）：按卡 `meta.askId` / `meta.approvalId` 命中单据卡，
+ * 取**最早一条** —— 卡先于答复/回执落库，故最早即卡本身（而非答复/回执消息）。无卡 → `undefined`。
+ * JSON1 `json_extract`（better-sqlite3 内建启用）；`meta IS NULL` 时返回 null，比较自然不命中。
+ */
+export function findCardMessage(db: Db, approvalId: string): Message | undefined {
+  const row = db
+    .prepare<{ id: string }, MessageRow>(
+      `SELECT * FROM messages
+        WHERE json_extract(meta, '$.askId') = $id OR json_extract(meta, '$.approvalId') = $id
+        ORDER BY seq ASC LIMIT 1`,
+    )
+    .get({ id: approvalId })
+  return row === undefined ? undefined : toMessage(row)
+}
+
+/**
  * 会话历史：默认返回最新一页（seq 升序）；
  * 给 `before`（seq，不含）则返回紧邻其前的一页，供客户端向上翻页。
  */

@@ -14,6 +14,7 @@ import { config } from "./config"
 import type { Db } from "./db"
 import { internalRoutes, type InternalRoutesOptions } from "./routes/internal"
 import { mcpRoutes } from "./routes/mcp"
+import { notificationRoutes } from "./routes/notifications"
 import { uiRoutes } from "./routes/ui"
 import { attachWsServer } from "./ws"
 
@@ -27,6 +28,7 @@ export function createApp(db?: Db, options?: AppOptions): Hono {
   const app = new Hono()
   app.get("/api/health", (c) => c.json({ status: "ok" }))
   app.route("/", uiRoutes(db))
+  app.route("/", notificationRoutes(db))
   app.route("/", internalRoutes(db, options))
   app.route("/", mcpRoutes(db, options))
   return app

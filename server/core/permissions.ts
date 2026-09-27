@@ -193,6 +193,7 @@ export function postSystem(db: Db, post: SystemPost): void {
  * `approval` WS 事件发布（Task 9 发布点：审批卡产生/决定/过期处，单据快照）。
  * 快照经 `approvalSnapshotSchema` 自校验（R1）—— `ask` 行也必须构造成通过该 schema 的 payload，
  * 契约漂移在发布点即暴露而非静默推给前端。
+ * Task 4：payload 置顶 `kind` 判别字段（spec §17.2 决策②），WS 消费者无需窥探 `action` 即可分流。
  */
 export function emitApproval(approval: Approval): void {
   const snapshot = approvalSnapshotSchema.parse({
@@ -204,7 +205,7 @@ export function emitApproval(approval: Approval): void {
     createdAt: approval.createdAt,
     decidedAt: approval.decidedAt ?? null,
   })
-  emit("approval", { approval: snapshot })
+  emit("approval", { kind: approval.kind, approval: snapshot })
 }
 
 /**
