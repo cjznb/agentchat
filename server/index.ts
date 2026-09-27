@@ -12,13 +12,20 @@ import { Hono } from "hono"
 import { config } from "./config"
 import type { Db } from "./db"
 import { internalRoutes, type InternalRoutesOptions } from "./routes/internal"
+import { mcpRoutes } from "./routes/mcp"
 import { uiRoutes } from "./routes/ui"
 
-export function createApp(db?: Db, options?: InternalRoutesOptions): Hono {
+/** 组装选项：internal 的 token 路径 + MCP 的 join_token 落盘 home（测试注入临时 home）。 */
+export interface AppOptions extends InternalRoutesOptions {
+  readonly home?: string
+}
+
+export function createApp(db?: Db, options?: AppOptions): Hono {
   const app = new Hono()
   app.get("/api/health", (c) => c.json({ status: "ok" }))
   app.route("/", uiRoutes(db))
   app.route("/", internalRoutes(db, options))
+  app.route("/", mcpRoutes(db, options))
   return app
 }
 
@@ -33,11 +40,21 @@ export interface StartOptions {
   readonly port?: number
   /** UI 路由的数据库连接；缺省时按 `config.dbPath` 惰性打开（首个 roster 请求） */
   readonly db?: Db
+  /** `hub_token` 路径（缺省 `config.hubTokenPath`）；测试注入临时 home。 */
+  readonly hubTokenPath?: string
+  /** join_token 落盘目录（缺省 `config.home`）；测试注入临时 home。 */
+  readonly home?: string
 }
 
 export async function start(options: StartOptions = {}): Promise<RunningServer> {
   const port = options.port ?? config.port
-  const server: ServerType = serve({ fetch: createApp(options.db).fetch, port })
+  const server: ServerType = serve({
+    fetch: createApp(options.db, {
+      ...(options.hubTokenPath === undefined ? {} : { hubTokenPath: options.hubTokenPath }),
+      ...(options.home === undefined ? {} : { home: options.home }),
+    }).fetch,
+    port,
+  })
 
   const info = await new Promise<AddressInfo>((resolve, reject) => {
     server.once("listening", () => {

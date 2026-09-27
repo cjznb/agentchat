@@ -241,6 +241,17 @@ export function touchAgent(db: Db, id: string, status?: AgentStatus): Agent {
   return toAgent(row)
 }
 
+/** 更新状态文本（spec §9 `status`）：单行 `UPDATE ... RETURNING`；行不存在抛 `AgentNotFoundError`。 */
+export function setStatusText(db: Db, id: string, text: string): Agent {
+  const row = db
+    .prepare<{ id: string; text: string }, AgentRow>(
+      "UPDATE agents SET status_text = $text WHERE id = $id RETURNING *",
+    )
+    .get({ id, text })
+  if (row === undefined) throw new AgentNotFoundError(id)
+  return toAgent(row)
+}
+
 /**
  * 各 agent 的直达未读数：其参与会话中、未过自身 `read_states` 位点、
  * 且非自己发出的消息条数（聚合规则是 Task 4 的事，这里只算单层）。

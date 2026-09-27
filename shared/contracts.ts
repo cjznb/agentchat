@@ -63,3 +63,92 @@ export const wsEventSchema = z.object({
 })
 
 export type WsEvent = z.infer<typeof wsEventSchema>
+
+// ── MCP 十工具 input schema（spec §9；Task 8） ──────────────────────
+// 路由层零手写类型：server/routes/mcp.ts 全部经 `MCP_TOOL_INPUTS[name]`
+// 校验入参后 `z.infer` 派生类型调 core。金样例见 tests/integration/mcp.test.ts。
+
+/** `wait` 入参（spec §6.2；缺省锁定 285000/either，经 zod 校验后原样透传字面量）。 */
+export const mcpWaitSchema = z.object({
+  until: waitUntilSchema.default("either"),
+  timeoutMs: z.number().int().positive().default(285000),
+})
+export type McpWait = z.infer<typeof mcpWaitSchema>
+
+const mcpRegisterInput = z.object({
+  join_token: z.string().optional(),
+  parent_ref: z.string().optional(),
+  task_ref: z.string().optional(),
+  kind: agentKindSchema.optional(),
+  name: z.string().optional(),
+  vendor: z.string().optional(),
+  model: z.string().optional(),
+  purpose: z.string().optional(),
+  skills: z.array(z.string()).optional(),
+  role_tag: z.string().optional(),
+  remark: z.string().optional(),
+})
+
+const mcpSendInput = z.object({
+  to: z.string().min(1),
+  body: z.string(),
+  wait: mcpWaitSchema.optional(),
+  idempotencyKey: z.string().optional(),
+})
+
+const mcpInboxInput = z.object({
+  conversation: z.string().optional(),
+  after: z.number().int().nonnegative().optional(),
+  ack: z.boolean().optional(),
+  timeout: z.number().int().positive().optional(),
+})
+
+const mcpAckInput = z.object({
+  message_ids: z.array(z.string().min(1)).min(1),
+})
+
+const mcpRosterInput = z.object({
+  filter: z.string().optional(),
+  online_only: z.boolean().optional(),
+})
+
+const mcpConversationInput = z.object({
+  id: z.string().min(1),
+  before: z.number().int().nonnegative().optional(),
+  limit: z.number().int().positive().optional(),
+})
+
+const mcpGroupInput = z.discriminatedUnion("op", [
+  z.object({ op: z.literal("create"), name: z.string().min(1), member_ids: z.array(z.string()).optional() }),
+  z.object({ op: z.literal("add"), group: z.string().min(1), member: z.string().min(1) }),
+  z.object({ op: z.literal("list") }),
+])
+
+const mcpShoutInput = z.object({
+  body: z.string(),
+  wait: mcpWaitSchema.optional(),
+})
+
+const mcpStatusInput = z.object({
+  text: z.string(),
+})
+
+const mcpMessageStatusInput = z.object({
+  ids: z.array(z.string().min(1)).min(1),
+})
+
+/** 十工具入参（键恰为 MCP_TOOLS；spec §9 参数列的 zod 化）。 */
+export const MCP_TOOL_INPUTS = {
+  register: mcpRegisterInput,
+  send: mcpSendInput,
+  inbox: mcpInboxInput,
+  ack: mcpAckInput,
+  roster: mcpRosterInput,
+  conversation: mcpConversationInput,
+  group: mcpGroupInput,
+  shout: mcpShoutInput,
+  status: mcpStatusInput,
+  message_status: mcpMessageStatusInput,
+} as const satisfies Record<McpToolName, z.ZodType>
+
+export type McpToolInput<N extends McpToolName> = z.infer<(typeof MCP_TOOL_INPUTS)[N]>

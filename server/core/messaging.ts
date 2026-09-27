@@ -119,7 +119,7 @@ function resolveConversation(db: Db, sender: Agent, to: string): Conversation {
 }
 
 /** 收件方：DM/群 = 其余成员；喊话 = 全部节点（决议 3）。均不含发送者本人。 */
-function recipientsOf(db: Db, conversation: Conversation, senderId: string): readonly string[] {
+export function recipientsOf(db: Db, conversation: Conversation, senderId: string): readonly string[] {
   const ids =
     conversation.key === SHOUT_KEY
       ? listAgents(db).map((agent) => agent.id)
@@ -208,10 +208,38 @@ function deliver(db: Db, input: SendMessageInput): SendMessageResult {
   return { message, receipts }
 }
 
+/** 喊话结果（带 `wait` 时附等待结果；spec §9 `shout` 工具用）。 */
+export interface ShoutWaitResult extends SendMessageResult {
+  readonly reply: WaitResult<Receipt>
+}
+
 /** 喊话（`to='*'`）：写入唯一广播会话，全部节点收件箱可见（决议 3）；入口经 `gate`（Task 7）。 */
 export function shout(db: Db, from: string, body: string): Gated<SendMessageResult>
-export function shout(db: Db, from: string, body: string): SendMessageResult | ApprovalRequested {
-  const outcome = gate(db, "shout", from, { body }, () => sendMessage(db, { from, to: "*", body }))
+export function shout(
+  db: Db,
+  from: string,
+  body: string,
+  wait: WaitOptions,
+): Promise<ShoutWaitResult> | ApprovalRequested
+export function shout(
+  db: Db,
+  from: string,
+  body: string,
+  wait?: WaitOptions,
+): SendMessageResult | ApprovalRequested | Promise<ShoutWaitResult> {
+  const execute = (): SendMessageResult | Promise<ShoutWaitResult> => {
+    if (wait === undefined) return sendMessage(db, { from, to: "*", body })
+    return sendMessage(db, {
+      from,
+      to: "*",
+      body,
+      wait: {
+        ...(wait.until === undefined ? {} : { until: wait.until }),
+        ...(wait.timeoutMs === undefined ? {} : { timeoutMs: wait.timeoutMs }),
+      },
+    })
+  }
+  const outcome = gate(db, "shout", from, { body }, execute)
   return "approval" in outcome ? outcome : outcome.approved
 }
 
