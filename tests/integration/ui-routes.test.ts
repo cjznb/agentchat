@@ -14,13 +14,20 @@ import type { Hono } from "hono"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { z } from "zod"
 import {
+  agentCardSchema,
+  conversationListSchema,
+  conversationReadResultSchema,
   ensureDmResultSchema,
+  groupCreateResultSchema,
+  groupListSchema,
   messageHistorySchema,
   notificationListSchema,
+  notificationReadResultSchema,
+  sendMessageResultSchema,
   type ChatMessage,
 } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
-import { registerLogical, registerRoot } from "../../server/core/agents"
+import { registerLogical, registerRoot, retire } from "../../server/core/agents"
 import {
   ack,
   createGroup,
@@ -71,44 +78,8 @@ async function post(path: string, body: unknown): Promise<Response> {
   })
 }
 
-const previewSchema = z.object({
-  id: z.string(),
-  seq: z.number(),
-  from: z.string(),
-  body: z.string(),
-  createdAt: z.number(),
-})
-const conversationSummarySchema = z.object({
-  id: z.string(),
-  name: z.string().nullable(),
-  kind: z.string(),
-  key: z.string(),
-  // Plan 3 T7：会话创建时间（无消息的新会话排序依据）必须随列表返回。
-  createdAt: z.number(),
-  lastMessage: previewSchema.nullable(),
-  unread: z.number(),
-})
-const conversationListSchema = z.object({
-  conversations: z.array(conversationSummarySchema),
-  unreadByRoot: z.record(z.string(), z.number()),
-})
-const messageResultSchema = z.object({
-  ok: z.boolean(),
-  message: z.object({
-    id: z.string(),
-    body: z.string(),
-    fromAgentId: z.string(),
-    conversationId: z.string(),
-  }),
-  receipts: z.array(z.object({ agentId: z.string(), stage: z.string() })),
-})
-const groupListSchema = z.object({
-  groups: z.array(z.object({ id: z.string(), name: z.string().nullable(), key: z.string() })),
-})
-const agentCardSchema = z.object({
-  node: z.object({ id: z.string(), name: z.string() }),
-  conversations: z.array(z.object({ id: z.string(), kind: z.string() })),
-})
+// F8：出参一律用 **shared/contracts** 的单一 schema 源解析（不再在测试内复制宽松 schema），
+// 并对计划外新增字段（群 kind/members/createdAt、通知 requesterAgentId）做**取值断言**。
 
 describe("GET /api/conversations", () => {
   it("aggregates human unread + last preview and per-root double-aggregate unread", async () => {
@@ -128,7 +99,7 @@ describe("POST /api/conversations/:id/messages", () => {
   it("lets the human speak in an existing conversation", async () => {
     const res = await post(`/api/conversations/${dmId}/messages`, { body: "yo" })
     expect(res.status).toBe(200)
-    const json = messageResultSchema.parse(await res.json())
+    const json = sendMessageResultSchema.parse(await res.json())
     expect(json.ok).toBe(true)
     expect(json.message.body).toBe("yo")
     expect(json.message.fromAgentId).toBe(humanId)
@@ -145,13 +116,19 @@ describe("GET/POST /api/groups", () => {
   it("creates a group (human immediate) and adds a member through the gate", async () => {
     const created = await post("/api/groups", { name: "g1", memberIds: [rootId] })
     expect(created.status).toBe(200)
-    const createdJson = z
-      .object({ ok: z.boolean(), group: z.object({ id: z.string(), kind: z.string(), name: z.string() }) })
-      .parse(await created.json())
+    // F8：用 shared `groupCreateResultSchema` 解析完整响应并断言实际值。
+    const createdJson = groupCreateResultSchema.parse(await created.json())
+    if (!("group" in createdJson)) throw new Error("human group creation must execute immediately")
     expect(createdJson.group.kind).toBe("group")
+    expect(createdJson.group.createdBy).toBe(humanId)
+    expect(createdJson.group.createdAt).toBeGreaterThan(0)
 
+    // F8：`GET /api/groups` 新增 `kind`/`members`/`createdAt` 用 shared schema 解析并取值断言。
     const list = groupListSchema.parse(await (await app.request("/api/groups")).json())
-    expect(list.groups.some((group) => group.id === createdJson.group.id)).toBe(true)
+    const listed = list.groups.find((group) => group.id === createdJson.group.id)
+    expect(listed?.kind).toBe("group")
+    expect(listed?.createdAt).toBeGreaterThan(0)
+    expect(listed?.members).toContain(rootId)
 
     const child = insertAgent(db, {
       name: "ui-child",
@@ -163,6 +140,11 @@ describe("GET/POST /api/groups", () => {
     const added = await post(`/api/groups/${createdJson.group.id}/members`, { agentId: child.id })
     expect(added.status).toBe(200)
     expect(isParticipant(db, createdJson.group.id, child.id)).toBe(true)
+
+    // 成员集合经 shared schema 解析后如实反映新增成员（kind/members 非仅 parse 通过）。
+    const afterAdd = groupListSchema.parse(await (await app.request("/api/groups")).json())
+    const updated = afterAdd.groups.find((group) => group.id === createdJson.group.id)
+    expect(new Set(updated?.members)).toEqual(new Set([humanId, rootId, child.id]))
   })
 })
 
@@ -170,7 +152,7 @@ describe("POST /api/shout", () => {
   it("broadcasts a human shout into the shout conversation", async () => {
     const res = await post("/api/shout", { body: "everyone" })
     expect(res.status).toBe(200)
-    const json = messageResultSchema.parse(await res.json())
+    const json = sendMessageResultSchema.parse(await res.json())
     expect(json.message.body).toBe("everyone")
     expect(getConversationByKey(db, SHOUT_KEY)).toBeDefined()
   })
@@ -193,7 +175,6 @@ describe("GET /api/agents/:id", () => {
 // ── Task 4：通知页数据面（spec §11.5/§17.3） ─────────────────────────
 
 const errorBodySchema = z.object({ ok: z.boolean(), error: z.string() })
-const readBodySchema = z.object({ ok: z.boolean(), read: z.boolean() })
 
 describe("GET /api/notifications", () => {
   it("lists actionable asks with card deep-link fields and honours scope", async () => {
@@ -220,6 +201,9 @@ describe("GET /api/notifications", () => {
       cardMessageId: card?.id,
       conversationId: card?.conversationId,
     })
+    // F8：`requesterAgentId` 取真实发起方（不再仅靠 schema parse 通过）。
+    expect(entry?.requesterAgentId).toBe(rootId)
+    expect(entry?.createdAt).toBeGreaterThan(0)
 
     // 缺省 scope = actionable；待处理 human 单在列。
     const actionable = notificationListSchema.parse(
@@ -297,13 +281,13 @@ describe("POST /api/notifications/:id/read", () => {
 
     const first = await post(`/api/notifications/${stored.id}/read`, {})
     expect(first.status).toBe(200)
-    expect(readBodySchema.parse(await first.json()).read).toBe(true)
+    expect(notificationReadResultSchema.parse(await first.json()).read).toBe(true)
     const readAt = getApproval(db, stored.id)?.readAt
     expect(readAt).toEqual(expect.any(Number))
 
     // 幂等：第二次不再置位，`read_at` 不变。
     const second = await post(`/api/notifications/${stored.id}/read`, {})
-    expect(readBodySchema.parse(await second.json()).read).toBe(false)
+    expect(notificationReadResultSchema.parse(await second.json()).read).toBe(false)
     expect(getApproval(db, stored.id)?.readAt).toBe(readAt)
 
     // 已读不改变 actionable 归属：列表仍含该单，且带 readAt。
@@ -320,8 +304,6 @@ describe("POST /api/notifications/:id/read", () => {
 })
 
 // ── Task 1：human 会话读位点（POST /api/conversations/:id/read） ─────
-
-const readConversationBodySchema = z.object({ ok: z.boolean(), lastReadSeq: z.number() })
 
 describe("POST /api/conversations/:id/read", () => {
   it("advances the human cursor to the latest seq, is idempotent, and leaves other conversations untouched", async () => {
@@ -343,7 +325,7 @@ describe("POST /api/conversations/:id/read", () => {
 
     const res = await post(`/api/conversations/${dmId}/read`, {})
     expect(res.status).toBe(200)
-    const body = readConversationBodySchema.parse(await res.json())
+    const body = conversationReadResultSchema.parse(await res.json())
     expect(body.ok).toBe(true)
     expect(body.lastReadSeq).toBeGreaterThan(0)
 
@@ -356,7 +338,7 @@ describe("POST /api/conversations/:id/read", () => {
     // 幂等：重复调用仍 200、值不变，其他会话仍不受影响。
     const again = await post(`/api/conversations/${dmId}/read`, {})
     expect(again.status).toBe(200)
-    expect(readConversationBodySchema.parse(await again.json()).lastReadSeq).toBe(body.lastReadSeq)
+    expect(conversationReadResultSchema.parse(await again.json()).lastReadSeq).toBe(body.lastReadSeq)
     const afterAgain = conversationListSchema.parse(
       await (await app.request("/api/conversations")).json(),
     )
@@ -590,6 +572,14 @@ describe("POST /api/conversations（Plan 3 T6 确保 DM）", () => {
     expect(body.conversation.kind).toBe("dm")
     expect(isParticipant(db, body.conversation.id, logical.id)).toBe(true)
     expect(isParticipant(db, body.conversation.id, humanId)).toBe(true)
+  })
+
+  it("returns 409 recipient_retired for a retired target (F3②)", async () => {
+    const target = registerRoot(db, home, { name: "retired-root", vendor: "opencode" }).agent
+    retire(db, target.id)
+    const res = await post("/api/conversations", { to: target.id })
+    expect(res.status).toBe(409)
+    expect(errorBodySchema.parse(await res.json()).error).toBe("recipient_retired")
   })
 
   it("returns 404 recipient_not_found for an unknown target", async () => {

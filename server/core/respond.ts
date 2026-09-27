@@ -11,6 +11,8 @@ import { z } from "zod"
 import type { Db } from "../db"
 import { getAgent } from "../store/agents"
 import { getApproval, markAnswered, type Approval } from "../store/approvals"
+import { getConversation } from "../store/conversations"
+import { send } from "../store/messages"
 import {
   AskAlreadyAnsweredError,
   AskForbiddenError,
@@ -18,7 +20,8 @@ import {
   cardConversation,
   InvalidChoiceError,
 } from "./ask"
-import { emitApproval, postSystem } from "./permissions"
+import { emitApproval } from "./permissions"
+import { publishMessage } from "./publish"
 
 export interface RespondAskInput {
   /** 选择某个选项（必须 ∈ options）。 */
@@ -73,12 +76,12 @@ export function respondAsk(
     throw new AskForbiddenError(responder, askId)
   }
   // 卡所在会话：优先建卡时持久化的会话 id（即使双方后来又建了 DM，也恒落卡会话）；
-  // 仅当旧行缺该字段时回退按目标规则重算（向后兼容）。
-  const persistedConversationId = stored.payload["conversationId"]
-  const conversationId =
-    typeof persistedConversationId === "string"
-      ? persistedConversationId
-      : cardConversation(db, stored).id
+  // 仅当该字段缺失 / 空串 / 指向不存在的会话时回退按目标规则重算（F5①：任意字符串不再
+  // 被当作持久化 conversationId，防止答复落进不存在会话而不可恢复）。
+  const persisted = stored.payload["conversationId"]
+  const persistedConversation =
+    typeof persisted === "string" && persisted !== "" ? getConversation(db, persisted) : undefined
+  const conversationId = persistedConversation?.id ?? cardConversation(db, stored).id
   const answer = resolveAnswer(
     input,
     stored.payload["options"],
@@ -86,15 +89,25 @@ export function respondAsk(
   )
   const decidedAt = Date.now()
   const result: Record<string, unknown> = { ...answer, responder, decidedAt }
-  if (!markAnswered(db, askId, result, decidedAt)) throw new AskAlreadyAnsweredError(askId)
+  // F5②：状态迁移与答复消息写入同事务 —— 写消息失败则 `markAnswered` 一并回滚
+  //（绝不留下「answered 但无答复消息」的不可恢复中间态）；publish 放在提交之后。
+  const committed = db
+    .transaction((): boolean => {
+      if (!markAnswered(db, askId, result, decidedAt)) return false
+      send(db, {
+        conversationId,
+        fromAgentId: responder,
+        body: answerBody(answer),
+        kind: "system",
+        meta: { askId, kind: "ask", result },
+        idempotencyKey: `ask-answer:${askId}`,
+      })
+      return true
+    })
+    .immediate()
+  if (!committed) throw new AskAlreadyAnsweredError(askId)
+  publishMessage(db, conversationId)
   const decided: Approval = { ...stored, status: "answered", result, decidedAt }
-  postSystem(db, {
-    conversationId,
-    fromAgentId: responder,
-    body: answerBody(answer),
-    meta: { askId, kind: "ask", result },
-    idempotencyKey: `ask-answer:${askId}`,
-  })
   emitApproval(decided)
   return decided
 }

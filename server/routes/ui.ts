@@ -160,6 +160,8 @@ export function uiRoutes(db?: Db): Hono {
       if (target === undefined) return c.json({ ok: false, error: "recipient_not_found" }, 404)
       // human 自身不建 DM（human 走超级观察者直读任意会话，不参与 DM 成员表语义）。
       if (target.vendor === "human") return c.json({ ok: false, error: "invalid_recipient" }, 400)
+      // F3：退役节点不可开新 DM（灰显保留资料卡/历史，仅禁发消息）——明确错误码 + 409。
+      if (target.status === "retired") return c.json({ ok: false, error: "recipient_retired" }, 409)
       const conversation = createDm(database, ensureHuman(database).id, target.id)
       return c.json({ ok: true, conversation })
     })
