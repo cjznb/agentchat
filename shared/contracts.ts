@@ -481,3 +481,184 @@ export const MCP_TOOL_OUTPUTS = {
 } as const satisfies Record<McpToolName, z.ZodType>
 
 export type McpToolOutput<N extends McpToolName> = z.infer<(typeof MCP_TOOL_OUTPUTS)[N]>
+
+// ── UI REST 线格式（Plan 3 T3：前端数据层消费；出参形状对齐 Task 9 / Task 4 路由） ──
+// 前端一律经 `zod` 边界解析后 `z.infer` 复用，禁止在 client 手写重复的服务端类型。
+
+/** 会话种类（spec §5.3：一对一 DM / 群组，含喊话广播会话）。 */
+export const CONVERSATION_KINDS = ["dm", "group"] as const
+export type ConversationKind = (typeof CONVERSATION_KINDS)[number]
+export const conversationKindSchema = z.enum(CONVERSATION_KINDS)
+
+/** 消息种类（spec §5.3：普通文本 / 系统消息）。 */
+export const MESSAGE_KINDS = ["text", "system"] as const
+export type UiMessageKind = (typeof MESSAGE_KINDS)[number]
+export const messageKindSchema = z.enum(MESSAGE_KINDS)
+
+/** 单收件方回执视图（REST 出参元素）。 */
+export const receiptViewSchema = z.object({ agentId: z.string(), stage: receiptStageSchema })
+export type ReceiptView = z.infer<typeof receiptViewSchema>
+
+/**
+ * 会话消息线格式（`GET /api/conversations/:id/messages` 与发送结果元素）。
+ * `meta` 缺省 = 无（JSON 省略 undefined 属性），故 optional。
+ */
+export const chatMessageSchema = z.object({
+  seq: z.number().int().nonnegative(),
+  id: z.string(),
+  conversationId: z.string(),
+  fromAgentId: z.string(),
+  body: z.string(),
+  kind: messageKindSchema,
+  meta: z.record(z.string(), z.unknown()).optional(),
+  createdAt: z.number().int().nonnegative(),
+})
+export type ChatMessage = z.infer<typeof chatMessageSchema>
+
+/** 会话列表最后一条消息预览。 */
+export const conversationPreviewSchema = z.object({
+  id: z.string(),
+  seq: z.number().int().nonnegative(),
+  from: z.string(),
+  body: z.string(),
+  createdAt: z.number().int().nonnegative(),
+})
+export type ConversationPreview = z.infer<typeof conversationPreviewSchema>
+
+/** 会话摘要（`GET /api/conversations` 元素）。 */
+export const conversationSummarySchema = z.object({
+  id: z.string(),
+  name: z.string().nullable(),
+  kind: conversationKindSchema,
+  key: z.string(),
+  lastMessage: conversationPreviewSchema.nullable(),
+  unread: z.number().int().nonnegative(),
+})
+export type ConversationSummary = z.infer<typeof conversationSummarySchema>
+
+/** `GET /api/conversations` 响应体（会话数组 + 各根双层聚合未读）。 */
+export const conversationListSchema = z.object({
+  conversations: z.array(conversationSummarySchema),
+  unreadByRoot: z.record(z.string(), z.number().int().nonnegative()),
+})
+export type ConversationList = z.infer<typeof conversationListSchema>
+
+/** `GET /api/conversations/:id/messages` 响应体（seq 升序）。 */
+export const messageHistorySchema = z.object({ messages: z.array(chatMessageSchema) })
+export type MessageHistory = z.infer<typeof messageHistorySchema>
+
+/** 发送消息 / 喊话即时投递响应体（元素消息 + 各收件方回执）。 */
+export const sendMessageResultSchema = z.object({
+  ok: z.literal(true),
+  message: chatMessageSchema,
+  receipts: z.array(receiptViewSchema),
+})
+export type SendMessageResult = z.infer<typeof sendMessageResultSchema>
+
+/** 会话已读位点推进结果。 */
+export const conversationReadResultSchema = z.object({
+  ok: z.literal(true),
+  lastReadSeq: z.number().int().nonnegative(),
+})
+export type ConversationReadResult = z.infer<typeof conversationReadResultSchema>
+
+/** 会话核心资料（建群出参 `group` 字段）。 */
+export const conversationSchema = z.object({
+  id: z.string(),
+  kind: conversationKindSchema,
+  key: z.string(),
+  name: z.string().nullable().optional(),
+  createdBy: z.string(),
+  createdAt: z.number().int().nonnegative(),
+})
+
+/** 群列表元素（`GET /api/groups`）。 */
+export const groupEntrySchema = conversationSchema
+export type GroupEntry = z.infer<typeof groupEntrySchema>
+export const groupListSchema = z.object({ groups: z.array(groupEntrySchema) })
+
+/** 审批/批示单出参（内部 `decidedAt`/`result`/`readAt` 为 undefined，JSON 省略 → optional）。 */
+export const approvalEntrySchema = z.object({
+  id: z.string(),
+  requesterAgentId: z.string(),
+  kind: approvalKindSchema,
+  target: z.string(),
+  action: approvalActionValueSchema,
+  payload: z.record(z.string(), z.unknown()),
+  status: approvalStatusSchema,
+  result: z.record(z.string(), z.unknown()).optional(),
+  createdAt: z.number().int().nonnegative(),
+  decidedAt: z.number().int().nonnegative().optional(),
+  readAt: z.number().int().nonnegative().optional(),
+})
+export type ApprovalEntry = z.infer<typeof approvalEntrySchema>
+
+/** `GET /api/approvals` 响应体（pending 审批单数组）。 */
+export const approvalListSchema = z.array(approvalEntrySchema)
+
+/** 建群结果：即时执行 → group；经闸 → pending approval。 */
+export const groupCreateResultSchema = z.union([
+  z.object({ ok: z.literal(true), group: conversationSchema }),
+  z.object({ ok: z.literal(true), approval: approvalEntrySchema }),
+])
+export type GroupCreateResult = z.infer<typeof groupCreateResultSchema>
+
+/** 拉成员结果：即时执行 → ok；经闸 → pending approval。 */
+export const groupMemberResultSchema = z.union([
+  z.object({ ok: z.literal(true) }),
+  z.object({ ok: z.literal(true), approval: approvalEntrySchema }),
+])
+export type GroupMemberResult = z.infer<typeof groupMemberResultSchema>
+
+/** 喊话结果：即时投递 → 消息+回执；经闸 → pending approval。 */
+export const shoutResultSchema = z.union([
+  sendMessageResultSchema,
+  z.object({ ok: z.literal(true), approval: approvalEntrySchema }),
+])
+export type ShoutResult = z.infer<typeof shoutResultSchema>
+
+/** 资料卡（`GET /api/agents/:id`）：roster 节点 + 参与会话入口。 */
+export const agentCardSchema = z.object({
+  node: rosterNodeSchema,
+  conversations: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string().nullable(),
+      kind: conversationKindSchema,
+      key: z.string(),
+    }),
+  ),
+})
+export type AgentCard = z.infer<typeof agentCardSchema>
+
+/** ask 答复入参（`choice?` | `text?`，二者择一由服务端裁决）。 */
+export const respondAskInputSchema = z.object({
+  choice: z.string().optional(),
+  text: z.string().optional(),
+})
+export type RespondAskInput = z.infer<typeof respondAskInputSchema>
+
+/** 审批决议入参。 */
+export const approvalDecisionSchema = z.enum(["approve", "reject"])
+export type ApprovalDecision = z.infer<typeof approvalDecisionSchema>
+
+/** 通知已读结果（`read` = 本次是否新置位）。 */
+export const notificationReadResultSchema = z.object({
+  ok: z.literal(true),
+  read: z.boolean(),
+})
+export type NotificationReadResult = z.infer<typeof notificationReadResultSchema>
+
+/** ask 答复结果（`ask` = 已决批示单）。 */
+export const respondAskResultSchema = z.object({
+  ok: z.literal(true),
+  ask: approvalEntrySchema,
+})
+export type RespondAskResult = z.infer<typeof respondAskResultSchema>
+
+/** 审批决议结果（`approval` = 已决审批单）。 */
+export const approvalDecisionResultSchema = z.object({
+  ok: z.literal(true),
+  approval: approvalEntrySchema,
+})
+export type ApprovalDecisionResult = z.infer<typeof approvalDecisionResultSchema>

@@ -12,6 +12,7 @@ import { rosterTree } from "../core/agents"
 import {
   addParticipant as gatedAddParticipant,
   createGroup as gatedCreateGroup,
+  history,
   NotParticipantError,
   RecipientNotFound,
   sendMessage,
@@ -149,6 +150,20 @@ export function uiRoutes(db?: Db): Hono {
     })
     // Task 9：会话列表（双层聚合未读 + 最后预览）。
     .get("/api/conversations", (c) => c.json(conversationList(resolveDb(db))))
+    // Plan 3 T3：会话历史分页（`before` = seq 不含，缺省最新一页，seq 升序）；未知会话 404。
+    .get("/api/conversations/:id/messages", (c) => {
+      const database = resolveDb(db)
+      const id = c.req.param("id")
+      if (getConversation(database, id) === undefined) {
+        return c.json({ ok: false, error: "conversation_not_found" }, 404)
+      }
+      const raw = c.req.query("before")
+      const before = raw === undefined || raw === "" ? undefined : Number(raw)
+      if (before !== undefined && (!Number.isInteger(before) || before < 0)) {
+        return c.json({ ok: false, error: "invalid_before" }, 400)
+      }
+      return c.json({ messages: history(database, id, before) })
+    })
     // Task 1：human 会话读位点推进到该会话**最新 seq**（幂等，只前进不回退）；未知会话 404。
     .post("/api/conversations/:id/read", (c) => {
       const database = resolveDb(db)

@@ -1,4 +1,6 @@
 import { useState } from "react"
+import { useStore } from "./store"
+import type { ConnectionStatus } from "./ws"
 
 const modes = [
   { id: "chat", label: "聊天", glyph: "聊", title: "会话", hint: "选择一个 Agent，开始查看消息。" },
@@ -15,6 +17,13 @@ const listCopy = {
   shout: { title: "广播记录", detail: "还没有喊话" },
 } as const satisfies Record<ModeId, { readonly title: string; readonly detail: string }>
 
+const connectionLabel = {
+  connecting: "连接中",
+  connected: "已连接",
+  reconnecting: "重连中",
+  resync: "同步中",
+} as const satisfies Record<ConnectionStatus, string>
+
 function StatePanel({ state, title, hint }: { readonly state: ContentState; readonly title: string; readonly hint: string }) {
   if (state === "loading") {
     return <section className="state-panel" role="status"><span className="state-mark is-loading" /><h2>正在载入</h2><p>正在同步 AgentChat 数据。</p></section>
@@ -26,9 +35,11 @@ function StatePanel({ state, title, hint }: { readonly state: ContentState; read
 }
 
 export function App() {
+  const { state, openConversation } = useStore()
   const [activeMode, setActiveMode] = useState<ModeId>("chat")
   const active = modes.find((mode) => mode.id === activeMode) ?? modes[0]
   const list = listCopy[activeMode]
+  const showConversations = activeMode === "chat" && state.conversations.length > 0
 
   return (
     <main className="app-shell" data-testid="app-shell">
@@ -42,12 +53,35 @@ export function App() {
             </button>
           ))}
         </div>
-        <span className="hub-status"><i aria-hidden="true" />Hub</span>
+        <span className="hub-status" data-testid="connection-badge" data-state={state.connection}>
+          <i aria-hidden="true" />{connectionLabel[state.connection]}
+        </span>
       </nav>
 
       <aside className="context-list" aria-labelledby="context-title" data-testid="middle-list">
         <header><p>AGENTCHAT</p><h1 id="context-title">{list.title}</h1></header>
-        <div className="list-empty"><span aria-hidden="true">—</span><p>{list.detail}</p><small>数据接入将在后续任务完成</small></div>
+        {showConversations ? (
+          <ul className="conversation-list" data-testid="conversation-list">
+            {state.conversations.map((conversation) => (
+              <li key={conversation.id}>
+                <button
+                  className="conversation-item"
+                  data-testid="conversation-item"
+                  data-conversation-id={conversation.id}
+                  data-active={conversation.id === state.openConversationId}
+                  onClick={() => openConversation(conversation.id)}
+                  type="button"
+                >
+                  <strong>{conversation.name ?? "私聊"}</strong>
+                  <span>{conversation.lastMessage?.body ?? "暂无消息"}</span>
+                  {conversation.unread > 0 ? <em className="conversation-unread" aria-label="未读消息数">{conversation.unread}</em> : null}
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="list-empty"><span aria-hidden="true">—</span><p>{list.detail}</p><small>数据接入将在后续任务完成</small></div>
+        )}
       </aside>
 
       <section className="work-view" aria-labelledby="view-title" data-testid="right-view">
