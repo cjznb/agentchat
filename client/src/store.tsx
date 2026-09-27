@@ -29,6 +29,8 @@ import { browserSocketFactory, currentWsUrl, WsClient, type ConnectionStatus } f
 export interface StoreValue {
   readonly state: AppState
   openConversation(conversationId: string | null): void
+  /** 点击会话行：打开 + 按需载入消息 + 推进已读位点（徽标经重拉清零）。 */
+  openAndRead(conversationId: string): void
   reload(plan: ReloadPlan): void
   sendMessage(conversationId: string, body: string): Promise<void>
   markConversationRead(conversationId: string): Promise<void>
@@ -116,9 +118,27 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
     [reload],
   )
 
+  const openAndRead = useCallback(
+    (conversationId: string): void => {
+      dispatch({ type: "open", conversationId })
+      if (!stateRef.current.messages.has(conversationId)) {
+        reload({
+          roster: false,
+          conversations: false,
+          notifications: false,
+          approvals: false,
+          messages: [conversationId],
+        })
+      }
+      // 打开即标已读；重拉 conversations 后该会话/容器聚合徽标随之更新。
+      void markConversationRead(conversationId)
+    },
+    [dispatch, reload, markConversationRead],
+  )
+
   const value = useMemo<StoreValue>(
-    () => ({ state, openConversation, reload, sendMessage, markConversationRead }),
-    [state, openConversation, reload, sendMessage, markConversationRead],
+    () => ({ state, openConversation, openAndRead, reload, sendMessage, markConversationRead }),
+    [state, openConversation, openAndRead, reload, sendMessage, markConversationRead],
   )
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>

@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { ConversationList } from "./components/ConversationList"
 import { useStore } from "./store"
 import type { ConnectionStatus } from "./ws"
 
@@ -35,7 +36,7 @@ function StatePanel({ state, title, hint }: { readonly state: ContentState; read
 }
 
 export function App() {
-  const { state, openConversation } = useStore()
+  const { state } = useStore()
   const [activeMode, setActiveMode] = useState<ModeId>("chat")
   const active = modes.find((mode) => mode.id === activeMode) ?? modes[0]
   const list = listCopy[activeMode]
@@ -61,24 +62,7 @@ export function App() {
       <aside className="context-list" aria-labelledby="context-title" data-testid="middle-list">
         <header><p>AGENTCHAT</p><h1 id="context-title">{list.title}</h1></header>
         {showConversations ? (
-          <ul className="conversation-list" data-testid="conversation-list">
-            {state.conversations.map((conversation) => (
-              <li key={conversation.id}>
-                <button
-                  className="conversation-item"
-                  data-testid="conversation-item"
-                  data-conversation-id={conversation.id}
-                  data-active={conversation.id === state.openConversationId}
-                  onClick={() => openConversation(conversation.id)}
-                  type="button"
-                >
-                  <strong>{conversation.name ?? "私聊"}</strong>
-                  <span>{conversation.lastMessage?.body ?? "暂无消息"}</span>
-                  {conversation.unread > 0 ? <em className="conversation-unread" aria-label="未读消息数">{conversation.unread}</em> : null}
-                </button>
-              </li>
-            ))}
-          </ul>
+          <ConversationList />
         ) : (
           <div className="list-empty"><span aria-hidden="true">—</span><p>{list.detail}</p><small>数据接入将在后续任务完成</small></div>
         )}
