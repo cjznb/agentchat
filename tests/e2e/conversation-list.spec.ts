@@ -3,45 +3,17 @@
  * 喊话置顶 / 群与逻辑顶层 / human 不出现 / 默认折叠 + 摘要 /
  * 手风琴展开 / 退役子行灰显不可点 / 打开会话后子行徽标清零（其他不受影响）。
  *
- * 前置：`npm run build`（`start` 从 `client/dist` 托管静态页；Playwright webServer 只跑 `npm start`）。
+ * 前置：Playwright webServer 自举 `npm run build && npm start`（`start` 从 `client/dist` 托管静态页）。
  */
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { expect, test } from "@playwright/test"
 import { loadConfig } from "../../server/config"
-import { openDb, type Db } from "../../server/db"
-import { registerChild, registerLogical, registerRoot, retire } from "../../server/core/agents"
-import { createGroup, ensureHuman, sendMessage, shout } from "../../server/core/messaging"
+import { openDb } from "../../server/db"
 import { start } from "../../server/index"
 import { resetWsHub } from "../../server/ws"
-
-interface ListSeed {
-  readonly root1: string
-  readonly root2: string
-}
-
-/** human + 两棵根树 + 逻辑节点 + 群 + 喊话；child2 退役。返回根 id 以便定位。 */
-function seedList(db: Db, home: string): ListSeed {
-  const human = ensureHuman(db)
-  const root1 = registerRoot(db, home, { name: "cl-root1", vendor: "opencode" }).agent
-  const root2 = registerRoot(db, home, { name: "cl-root2", vendor: "opencode" }).agent
-  const child1 = registerChild(db, { name: "cl-child1", parentId: root1.id, taskRef: "cl-t1" })
-  const child2 = registerChild(db, { name: "cl-child2", parentId: root1.id, taskRef: "cl-t2" })
-  const child3 = registerChild(db, { name: "cl-child3", parentId: root2.id, taskRef: "cl-t3" })
-  const logical = registerLogical(db, { name: "cl-logical" })
-
-  sendMessage(db, { from: human.id, to: root1.id, body: "seed-root" })
-  sendMessage(db, { from: child1.id, to: human.id, body: "child-ping" })
-  sendMessage(db, { from: child2.id, to: human.id, body: "child2-ping" })
-  sendMessage(db, { from: child3.id, to: human.id, body: "child3-ping" })
-  sendMessage(db, { from: logical.id, to: human.id, body: "logical-ping" })
-  const group = createGroup(db, { name: "cl-group", createdBy: human.id, memberIds: [root1.id] })
-  if (!("approved" in group)) throw new Error("human group creation must execute immediately")
-  shout(db, human.id, "cl-shout")
-  retire(db, child2.id)
-  return { root1: root1.id, root2: root2.id }
-}
+import { seedList } from "./seed"
 
 test("folds conversations: shout pinned, human hidden, accordion, badge clears on open", async ({ page }) => {
   resetWsHub()

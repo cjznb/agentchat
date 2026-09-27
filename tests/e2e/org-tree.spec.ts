@@ -3,78 +3,19 @@
  * 默认折叠第一层 / human 不出现 / 摘要 `N子·M忙` + 聚合徽标 / 手风琴 /
  * 退役灰显不可点 / 状态变化与实时挂载 <2s / 资料卡字段与两按钮。
  *
- * 前置：`npm run build`（`start` 从 `client/dist` 托管静态页；Playwright webServer 只跑 `npm start`）。
+ * 前置：Playwright webServer 自举 `npm run build && npm start`（`start` 从 `client/dist` 托管静态页）。
  */
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { expect, test, type Locator, type Page } from "@playwright/test"
 import { loadConfig } from "../../server/config"
-import { registerChild, registerLogical, registerRoot, retire } from "../../server/core/agents"
-import { ensureHuman, sendMessage } from "../../server/core/messaging"
-import { openDb, type Db } from "../../server/db"
+import { registerChild } from "../../server/core/agents"
+import { openDb } from "../../server/db"
 import { start } from "../../server/index"
 import { applyAgentState } from "../../server/routes/internal"
-import { setStatusText, touchAgent } from "../../server/store/agents"
 import { resetWsHub } from "../../server/ws"
-
-interface OrgSeed {
-  readonly root1: string
-  readonly root2: string
-  readonly child1: string
-  readonly child2: string
-  readonly child3: string
-  readonly child4: string
-  readonly logical: string
-}
-
-/** human + 两棵根树（含 busy/退役/逻辑/多层）+ 未读；返回 id 以便精确断言。 */
-function seedOrg(db: Db, home: string): OrgSeed {
-  const human = ensureHuman(db)
-  const root1 = registerRoot(db, home, {
-    name: "org-root1",
-    vendor: "opencode",
-    model: "m1",
-    purpose: "总控协调",
-    roleTag: "组织者",
-    remark: "主根",
-  }).agent
-  const root2 = registerRoot(db, home, { name: "org-root2", vendor: "claude-code" }).agent
-  const child1 = registerChild(db, {
-    name: "org-child1",
-    parentId: root1.id,
-    taskRef: "org-t1",
-    vendor: "claude-code",
-    model: "sonnet",
-    purpose: "前端实现",
-    roleTag: "执行者",
-    skills: ["react", "css"],
-  })
-  const child2 = registerChild(db, {
-    name: "org-child2",
-    parentId: root1.id,
-    taskRef: "org-t2",
-    vendor: "opencode",
-    roleTag: "监管者",
-  })
-  const child3 = registerChild(db, { name: "org-child3", parentId: root1.id, taskRef: "org-t3" })
-  const child4 = registerChild(db, { name: "org-child4", parentId: root2.id, taskRef: "org-t4" })
-  const logical = registerLogical(db, { name: "org-board" })
-  touchAgent(db, child2.id, "busy")
-  setStatusText(db, child2.id, "编译中")
-  sendMessage(db, { from: child1.id, to: root1.id, body: "root1-ping" }) // root1 聚合未读 = 1
-  sendMessage(db, { from: child1.id, to: human.id, body: "child1-ping" }) // child1 参与 human DM
-  retire(db, child3.id)
-  return {
-    root1: root1.id,
-    root2: root2.id,
-    child1: child1.id,
-    child2: child2.id,
-    child3: child3.id,
-    child4: child4.id,
-    logical: logical.id,
-  }
-}
+import { seedOrg } from "./seed"
 
 function rowOf(page: Page, id: string): Locator {
   return page.locator(`[data-testid="org-row"][data-node-id="${id}"]`)

@@ -4,51 +4,20 @@
  * 群资料 → 加成员 → 成员树即时更新；
  * 喊话频道发送 `POST /api/shout` → 逐节点投递汇总与真实回执一致，且随 `receipt` 事件刷新。
  *
- * 前置：`npm run build`（`start` 从 `client/dist` 托管静态页；Playwright webServer 只跑 `npm start`）。
+ * 前置：Playwright webServer 自举 `npm run build && npm start`（`start` 从 `client/dist` 托管静态页）。
  */
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { expect, test, type Locator, type Page } from "@playwright/test"
 import { loadConfig } from "../../server/config"
-import { registerChild, registerLogical, registerRoot } from "../../server/core/agents"
-import { ack, ensureHuman, sendMessage, shout } from "../../server/core/messaging"
-import { openDb, type Db } from "../../server/db"
+import { ack } from "../../server/core/messaging"
+import { openDb } from "../../server/db"
 import { start } from "../../server/index"
 import { getConversationByKey, SHOUT_KEY } from "../../server/store/conversations"
 import { latestInConversation } from "../../server/store/messages"
 import { resetWsHub } from "../../server/ws"
-
-interface GroupsSeed {
-  readonly humanId: string
-  readonly root1: string
-  readonly root2: string
-  readonly child1: string
-  readonly child2: string
-  readonly logical: string
-}
-
-/** human + 两棵树（子/逻辑混合）+ root1 两名子节点；用于多选建群与喊话收件方。 */
-function seedGroups(db: Db, home: string): GroupsSeed {
-  const human = ensureHuman(db)
-  const root1 = registerRoot(db, home, { name: "gs-root1", vendor: "opencode" }).agent
-  const root2 = registerRoot(db, home, { name: "gs-root2", vendor: "claude-code" }).agent
-  const child1 = registerChild(db, { name: "gs-child1", parentId: root1.id, taskRef: "gs-t1" })
-  const child2 = registerChild(db, { name: "gs-child2", parentId: root1.id, taskRef: "gs-t2" })
-  const logical = registerLogical(db, { name: "gs-board" })
-  // 既有一条喊话（置顶）与一条有 lastMessage 的 DM：新建的空群（无消息，createdAt 最新）
-  // 必须排在**首个非 shout 行**，验证 Plan 3 T7 排序修复（否则空群活动时间为 0 落到最后）。
-  shout(db, human.id, "gs-seed-shout")
-  sendMessage(db, { from: human.id, to: root2.id, body: "gs-seed-dm" })
-  return {
-    humanId: human.id,
-    root1: root1.id,
-    root2: root2.id,
-    child1: child1.id,
-    child2: child2.id,
-    logical: logical.id,
-  }
-}
+import { seedGroups } from "./seed"
 
 function memberRow(page: Page, id: string): Locator {
   return page.locator(`[data-testid="member-row"][data-node-id="${id}"]`)

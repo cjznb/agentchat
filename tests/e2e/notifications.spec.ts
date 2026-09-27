@@ -6,53 +6,16 @@
  * - 通知页：两 tab、未读点、点击已读 + 深链跳转高亮、图标栏徽标 = actionable 未读数
  * - WS 一致性：外部答复 ask → `approval` 事件 → 通知页即时刷新
  *
- * 前置：`npm run build`（`start` 从 `client/dist` 托管静态页；Playwright webServer 只跑 `npm start`）。
+ * 前置：Playwright webServer 自举 `npm run build && npm start`（`start` 从 `client/dist` 托管静态页）。
  */
-import { mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { rmSync } from "node:fs"
 import { join } from "node:path"
 import { expect, test, type Page } from "@playwright/test"
-import { loadConfig } from "../../server/config"
-import { registerRoot } from "../../server/core/agents"
 import { ask } from "../../server/core/ask"
-import { ensureHuman, sendMessage, shout } from "../../server/core/messaging"
 import { respondAsk } from "../../server/core/respond"
-import { openDb, type Db } from "../../server/db"
 import { start } from "../../server/index"
-import { findCardMessage } from "../../server/store/messages"
 import { resetWsHub } from "../../server/ws"
-
-interface Base {
-  readonly db: Db
-  readonly home: string
-  readonly humanId: string
-  readonly rootId: string
-  readonly dmId: string
-}
-
-/** human + 一个在线带钥根 + 一条 DM；审批通道即该 DM（`approvalChannel(root, human)`）。 */
-function seedBase(prefix: string): Base {
-  const home = mkdtempSync(join(tmpdir(), prefix))
-  const db = openDb(loadConfig({ AGENTCHAT_HOME: home }).dbPath)
-  const human = ensureHuman(db)
-  const root = registerRoot(db, home, { name: "notif-root", vendor: "opencode" }).agent
-  const sent = sendMessage(db, { from: human.id, to: root.id, body: "seed" })
-  return { db, home, humanId: human.id, rootId: root.id, dmId: sent.message.conversationId }
-}
-
-/** 单据 id → 卡消息的深链锚点。 */
-function cardRef(db: Db, id: string): { readonly conversationId: string; readonly messageId: string } {
-  const card = findCardMessage(db, id)
-  if (card === undefined) throw new Error(`card message missing for ${id}`)
-  return { conversationId: card.conversationId, messageId: card.id }
-}
-
-/** 造一张待决审批卡（root 经闸 → pending approval + 卡消息）。 */
-function seedApproval(base: Base, body: string): { readonly id: string; readonly card: { conversationId: string; messageId: string } } {
-  const outcome = shout(base.db, base.rootId, body)
-  if (!("approval" in outcome)) throw new Error("expected a pending action approval")
-  return { id: outcome.approval.id, card: cardRef(base.db, outcome.approval.id) }
-}
+import { cardRef, seedApproval, seedBase, type Base } from "./seed"
 
 function openNotifications(page: Page): Promise<void> {
   return page.getByRole("button", { name: "通知" }).click()
@@ -260,6 +223,35 @@ test("notification center: tabs, unread dots, badge, jump highlight, and WS cons
     await expect(answered).toHaveAttribute("data-status", "answered")
     await expect(answered.getByTestId("notification-result")).toContainText("已选择「是」")
     expect(ask1.id).not.toBe(ask2.id)
+  } finally {
+    await teardown(page, base, running)
+  }
+})
+
+test("replies to a pending item inline from the notification list and syncs the tab", async ({ page }) => {
+  resetWsHub()
+  const base = seedBase("agentchat-notif-inline-")
+  ask(base.db, base.rootId, {
+    to: "human",
+    question: "内联答复确认？",
+    options: ["可以", "不行"],
+    allowCustom: true,
+  })
+  const running = await start({ port: 0, db: base.db, home: base.home, hubTokenPath: join(base.home, "hub_token") })
+  try {
+    await page.goto(`${running.url}/`)
+    await openNotifications(page)
+    const item = page.getByTestId("notification-item").first()
+    // 通知条目内**内联**渲染卡回复控件（与聊天卡共用 `CardActions`，spec §11.5）。
+    await expect(item.getByTestId("card-choice")).toHaveCount(2)
+    await item.getByTestId("card-choice").filter({ hasText: "可以" }).click()
+
+    // 作答后该条目移出 actionable → 空态；全部 tab 显示已答复与结果文案。
+    await expect(page.getByTestId("notifications-empty")).toBeVisible()
+    await page.getByTestId("notif-tab-all").click()
+    const answered = page.getByTestId("notification-item").filter({ hasText: "内联答复确认？" })
+    await expect(answered).toHaveAttribute("data-status", "answered")
+    await expect(answered.getByTestId("notification-result")).toContainText("已选择「可以」")
   } finally {
     await teardown(page, base, running)
   }

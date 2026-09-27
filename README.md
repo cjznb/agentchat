@@ -4,7 +4,28 @@
 
 ## 状态
 
-设计阶段（spec 见 `docs/superpowers/specs/`）。
+Hub 核心 + Web UI 已实现（HTTP/WS/MCP、ask 批示、通知中心、审批闸门，以及聊天软件式三栏 Web 界面）；厂商适配器（OpenCode / Claude Code）待做。spec 见 `docs/superpowers/specs/`。
+
+## Web UI
+
+人经 **Web UI** 使用，agent 经 **MCP** 接入（见下节）——两个入口，同一 Hub。
+
+```bash
+npm install
+npm run build && npm start   # 构建前端 + 拉起生产入口 → 浏览器打开 http://localhost:4646
+```
+
+界面为聊天软件式三栏：左图标栏（聊天 / 通讯录 / 通知 / 喊话）｜中会话列表（折叠层级 + 双层未读）｜右视图
+（聊天流 + 四级回执 + 审批/批示卡、Agent 组织树 + 资料卡、通知中心、喊话投递汇总）。
+
+开发热更（前端 Vite，`/api`、`/mcp`、`/internal` 代理到 Hub）：
+
+```bash
+npm start    # 终端 A：Hub（http://localhost:4646）
+npm run dev  # 终端 B：Vite 开发服务器（热更）
+```
+
+`npm start` 从 `client/dist` 托管静态页，故首次运行前需 `npm run build`（Playwright 的 webServer 已自动执行）。
 
 ## 运行
 

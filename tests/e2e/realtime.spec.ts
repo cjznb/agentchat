@@ -3,8 +3,7 @@
  * 进程内起 Hub（`start({port:0})` + 临时 `AGENTCHAT_HOME`）→ 打开页面（已 build 的客户端）→
  * 经 REST 在既有会话发一条新消息 → `expect.poll` 断言 UI 在 2s 内经真 WS 出现变化。
  *
- * 前置：`npm run build`（`createApp` 从 `client/dist` 托管静态页；Playwright 的 webServer
- * 只跑 `npm start`，不含 build）。
+ * 前置：Playwright webServer 自举 `npm run build && npm start`（`createApp` 从 `client/dist` 托管静态页）。
  */
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"

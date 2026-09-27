@@ -79,6 +79,8 @@ export function App() {
   const deepLinkApplied = useRef(false)
   // rail「通知」徽标 = actionable 未读数（未读 = `readAt` 为空）；0 → 隐藏。
   const notificationBadge = unreadCount(state.notifications)
+  // 首屏/重连期间数据未就绪：空态面板显示加载态（真实可达路径，替代 T2 不可达骨架）。
+  const initialSync = state.connection !== "connected"
 
   // 深链入口（spec §11.5）：挂载时带 `?conversation=` 则自动承载该会话（消息由其内部重拉）。
   useEffect(() => {
@@ -199,7 +201,7 @@ export function App() {
                   onOpenConversation={handleOpenConversation}
                 />
               ) : (
-                <StatePanel state="empty" title={active.title} hint={active.hint} />
+                <StatePanel state={initialSync ? "loading" : "empty"} title={active.title} hint={active.hint} />
               )}
             </div>
           </>

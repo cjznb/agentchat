@@ -2,46 +2,16 @@
  * Plan 3 T5 —— 聊天视图 E2E（真 Hub + 进程内种子）：
  * 气泡左右 / 系统消息居中 / 回车发送 / 滚顶分页 / 深链定位高亮 / 四级回执（core ack → read）。
  *
- * 前置：`npm run build`（`start` 从 `client/dist` 托管静态页；Playwright webServer 只跑 `npm start`）。
+ * 前置：Playwright webServer 自举 `npm run build && npm start`（`start` 从 `client/dist` 托管静态页）。
  */
-import { mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { rmSync } from "node:fs"
 import { join } from "node:path"
 import { expect, test, type Page } from "@playwright/test"
-import { loadConfig } from "../../server/config"
-import { registerRoot } from "../../server/core/agents"
-import { ack, ensureHuman, sendMessage } from "../../server/core/messaging"
-import { openDb, type Db } from "../../server/db"
+import { ack, sendMessage } from "../../server/core/messaging"
 import { start } from "../../server/index"
 import { send as storeSend } from "../../server/store/messages"
 import { resetWsHub } from "../../server/ws"
-
-interface Seeded {
-  readonly db: Db
-  readonly home: string
-  readonly humanId: string
-  readonly rootId: string
-  readonly dmId: string
-  /** 种子首条消息（body `seed`，human 发出）的短 id。 */
-  readonly seedMessageId: string
-}
-
-/** human + 一个在线根 + 一条 DM；返回 id 与临时库以便用例继续造数/断言。 */
-function seedBase(prefix: string): Seeded {
-  const home = mkdtempSync(join(tmpdir(), prefix))
-  const db = openDb(loadConfig({ AGENTCHAT_HOME: home }).dbPath)
-  const human = ensureHuman(db)
-  const root = registerRoot(db, home, { name: "chat-root", vendor: "opencode" }).agent
-  const sent = sendMessage(db, { from: human.id, to: root.id, body: "seed" })
-  return {
-    db,
-    home,
-    humanId: human.id,
-    rootId: root.id,
-    dmId: sent.message.conversationId,
-    seedMessageId: sent.message.id,
-  }
-}
+import { seedBase, type Seeded } from "./seed"
 
 async function teardown(page: Page, seeded: Seeded, running: { close(): Promise<void> }): Promise<void> {
   await page.close()
