@@ -1,7 +1,8 @@
 /**
  * MCP 工具注册与写侧工具（spec §9）—— 传输层（`routes/mcp.ts`）把 SDK 校验后的入参交给
  * `registerTools` 注册的闭包；本模块只做「契约 schema 二次解析取类型化入参 → 调 core」，
- * 路由层零手写类型（约束：全部 io 经 `shared/contracts.ts`）。读/策略工具在 `read-tools.ts`。
+ * 路由层零手写类型（约束：全部 io 经 `shared/contracts.ts`）。读/策略工具在 `read-tools.ts`，
+ * 请求批示工具在 `ask-tools.ts`（本模块仅分发）。
  */
 import { randomBytes } from "node:crypto"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
@@ -17,6 +18,7 @@ import { getAgent, getAgentByName, setStatusText, type Agent } from "../store/ag
 import { getConversation } from "../store/conversations"
 import { getById, type Message } from "../store/messages"
 import { errorResult, McpToolError, requireIdentity, sendView, toolResult, type ToolContext } from "./context"
+import { runAsk, runRespondAsk } from "./ask-tools"
 import { runConversation, runGroup, runRoster, runShout } from "./read-tools"
 
 // ── register ────────────────────────────────────────────────────────
@@ -176,6 +178,8 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   shout: "全员喊话（根节点，需审批）",
   status: "更新自身状态文本",
   message_status: "查询消息各收件方回执",
+  ask: "向用户或节点发起带选项的请求批示，可阻塞等待答复",
+  respond_ask: "答复一条请求批示（选项或自由文本，首答生效）",
 }
 
 function runTool(name: McpToolName, args: unknown, ctx: ToolContext): Promise<unknown> | unknown {
@@ -200,10 +204,14 @@ function runTool(name: McpToolName, args: unknown, ctx: ToolContext): Promise<un
       return runStatus(ctx, MCP_TOOL_INPUTS.status.parse(args))
     case "message_status":
       return runMessageStatus(ctx, MCP_TOOL_INPUTS.message_status.parse(args))
+    case "ask":
+      return runAsk(ctx, MCP_TOOL_INPUTS.ask.parse(args))
+    case "respond_ask":
+      return runRespondAsk(ctx, MCP_TOOL_INPUTS.respond_ask.parse(args))
   }
 }
 
-/** 按 `MCP_TOOLS` 顺序注册十工具；入参 schema 一律取 `MCP_TOOL_INPUTS[name]`。 */
+/** 按 `MCP_TOOLS` 顺序注册十一工具；入参 schema 一律取 `MCP_TOOL_INPUTS[name]`。 */
 export function registerTools(server: McpServer, ctx: ToolContext): void {
   for (const name of MCP_TOOLS) {
     server.registerTool(

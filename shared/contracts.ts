@@ -29,7 +29,7 @@ export type ReceiptStage = (typeof RECEIPT_STAGES)[number]
 export const WS_EVENT_TYPES = ["message", "receipt", "agent", "approval"] as const
 export type WsEventType = (typeof WS_EVENT_TYPES)[number]
 
-/** MCP 工具名（spec §9 十个工具，顺序即表序） */
+/** MCP 工具名（spec §9 十一个工具，顺序即表序；`ask`/`respond_ask` 为 2026-09-27 追加） */
 export const MCP_TOOLS = [
   "register",
   "send",
@@ -41,6 +41,8 @@ export const MCP_TOOLS = [
   "shout",
   "status",
   "message_status",
+  "ask",
+  "respond_ask",
 ] as const
 export type McpToolName = (typeof MCP_TOOLS)[number]
 
@@ -269,7 +271,23 @@ const mcpMessageStatusInput = z.object({
   ids: z.array(z.string().min(1)).min(1),
 })
 
-/** 十工具入参（键恰为 MCP_TOOLS；spec §9 参数列的 zod 化）。 */
+/** `ask` 入参（spec §9/§17：`to` = `'human'` 或目标 agent id；`wait?` 同 §6.2 阻塞语义）。 */
+const mcpAskInput = z.object({
+  to: z.string().min(1),
+  question: z.string(),
+  options: z.array(z.string()),
+  allow_custom: z.boolean().optional(),
+  wait: mcpWaitSchema.optional(),
+})
+
+/** `respond_ask` 入参（spec §9/§17：`choice` ∈ options 或 `text` 自由答复，二者择一）。 */
+const mcpRespondAskInput = z.object({
+  ask_id: z.string().min(1),
+  choice: z.string().optional(),
+  text: z.string().optional(),
+})
+
+/** 十一工具入参（键恰为 MCP_TOOLS；spec §9 参数列的 zod 化）。 */
 export const MCP_TOOL_INPUTS = {
   register: mcpRegisterInput,
   send: mcpSendInput,
@@ -281,6 +299,8 @@ export const MCP_TOOL_INPUTS = {
   shout: mcpShoutInput,
   status: mcpStatusInput,
   message_status: mcpMessageStatusInput,
+  ask: mcpAskInput,
+  respond_ask: mcpRespondAskInput,
 } as const satisfies Record<McpToolName, z.ZodType>
 
 export type McpToolInput<N extends McpToolName> = z.infer<(typeof MCP_TOOL_INPUTS)[N]>
@@ -365,7 +385,37 @@ const mcpGroupOutput = z.union([
   z.object({ approval: mcpApprovalOutput }),
 ])
 
-/** 十工具出参（键恰为 MCP_TOOLS；spec §9 返回列的 zod 化）。 */
+/**
+ * `ask` 单出参（`approvalSnapshotSchema` 家族 + `kind`/`target`/`result` 判别字段，spec §17.2）。
+ * 内部 `Approval.result`/`decidedAt` 为 `undefined`，JSON 缺省 → optional。
+ */
+const mcpAskOutput = z.object({
+  id: z.string(),
+  requesterAgentId: z.string(),
+  kind: z.literal("ask"),
+  target: z.string(),
+  action: approvalActionValueSchema,
+  payload: z.record(z.string(), z.unknown()),
+  status: approvalStatusSchema,
+  result: z.record(z.string(), z.unknown()).optional(),
+  createdAt: z.number().int().nonnegative(),
+  decidedAt: z.number().int().nonnegative().optional(),
+})
+
+/** `ask` 答复视图：已决 `{choice|text, timedOut:false}`；超时 `{timedOut:true}`（spec §9）。 */
+const mcpAskReplyOutput = z.object({
+  timedOut: z.boolean(),
+  choice: z.string().optional(),
+  text: z.string().optional(),
+})
+
+/** `ask` 出参：批示单 + 带 `wait` 时的答复视图。 */
+const mcpAskToolOutput = z.object({
+  ask: mcpAskOutput,
+  reply: mcpAskReplyOutput.optional(),
+})
+
+/** 十一工具出参（键恰为 MCP_TOOLS；spec §9 返回列的 zod 化）。 */
 export const MCP_TOOL_OUTPUTS = {
   register: z.object({
     agent: mcpAgentOutput,
@@ -387,6 +437,8 @@ export const MCP_TOOL_OUTPUTS = {
   message_status: z.array(
     z.object({ id: z.string(), receipts: z.array(mcpReceiptOutput) }),
   ),
+  ask: mcpAskToolOutput,
+  respond_ask: mcpAskOutput,
 } as const satisfies Record<McpToolName, z.ZodType>
 
 export type McpToolOutput<N extends McpToolName> = z.infer<(typeof MCP_TOOL_OUTPUTS)[N]>

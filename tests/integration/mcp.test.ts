@@ -1,10 +1,12 @@
 /**
  * Task 8 —— MCP 端点集成测试（brief DoD）：真实 MCP SDK 客户端连 `POST /mcp`（Bearer）。
- * ① `tools/list` 恰为锁定十名 + 金样例过 `MCP_TOOL_INPUTS`
+ * ① `tools/list` 恰为锁定十一名 + 金样例过 `MCP_TOOL_INPUTS`
  * ② `send{wait}` 端到端：对方 core 回信 → 调用方在 wait 内解锁拿到 reply
  * ③ 错误契约：未知收件人 RecipientNotFound / 子 shout Forbidden / `to:'*'` use_shout_tool
  *    / 缺身份 identity_required / 无 Bearer 401
  * ④ `register` 首次 → join_token → 离线后再认领同 id 回 online
+ * ⑤ Task 3：`ask`/`respond_ask` 端到端（human 与 agent 两答复路径）+ 错误码
+ *    conversation_required / invalid_choice / ask_already_answered
  * 每个用例独立临时 $AGENTCHAT_HOME，真实监听 `start({port:0})`。
  */
 import { mkdtempSync, rmSync } from "node:fs"
@@ -14,16 +16,26 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { MCP_TOOLS, MCP_TOOL_OUTPUTS, type McpToolName } from "../../shared/contracts"
+import {
+  MCP_TOOL_INPUTS,
+  MCP_TOOLS,
+  MCP_TOOL_OUTPUTS,
+  type McpToolName,
+} from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
 import { openDb, type Db } from "../../server/db"
 import { inbox, sendMessage } from "../../server/core/messaging"
+import { ask, ensureHuman, respondAsk } from "../../server/core/permissions"
 import { start, type RunningServer } from "../../server/index"
 import { applyAgentState, ensureHubToken } from "../../server/routes/internal"
 import { getAgent, insertAgent, type Agent } from "../../server/store/agents"
+import { listApprovals } from "../../server/store/approvals"
 
-/** 十工具金样例（运行时注入真实 peer id；键集合即「接线错误」检测基准）。 */
-function goldenInputs(peerId: string): Record<McpToolName, Record<string, unknown>> {
+/** 十一工具金样例（运行时注入真实 peer id 与可答复 ask id；键集合即「接线错误」检测基准）。 */
+function goldenInputs(
+  peerId: string,
+  answerableAskId: string,
+): Record<McpToolName, Record<string, unknown>> {
   return {
     register: { name: "golden-root", kind: "runtime", vendor: "opencode", model: "test" },
     send: { to: peerId, body: "hi" },
@@ -35,6 +47,8 @@ function goldenInputs(peerId: string): Record<McpToolName, Record<string, unknow
     shout: { body: "hello" },
     status: { text: "busy" },
     message_status: { ids: ["abcdef"] },
+    ask: { to: "human", question: "golden ask?", options: ["yes", "no"], allow_custom: true },
+    respond_ask: { ask_id: answerableAskId, choice: "yes" },
   }
 }
 
@@ -157,15 +171,26 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<vo
   throw new Error("condition not met in time")
 }
 
-describe("tools/list 与十工具金样例端到端（DoD ①，Important #1）", () => {
-  it("advertises the contract schemas and executes every one of the ten tools with its golden input", async () => {
+describe("tools/list 与十一工具金样例端到端（DoD ①，Important #1）", () => {
+  it("advertises the contract schemas and executes every one of the eleven tools with its golden input", async () => {
     const actor = makeAgent("mcp-golden-actor")
     const peer = makeAgent("mcp-golden-peer")
-    const golden = goldenInputs(peer.id)
+    // 预置一条可答复 ask（peer → actor：actor 为 target），令 respond_ask 金样例有落点。
+    sendMessage(db, { from: peer.id, to: actor.id, body: "seed-dm" })
+    const seeded = ask(db, peer.id, { to: actor.id, question: "seeded?", options: ["yes", "no"] })
+    const golden = goldenInputs(peer.id, seeded.ask.id)
     const client = await connect(actor.id)
     try {
       const { tools } = await client.listTools()
       expect(tools.map((tool) => tool.name)).toEqual([...MCP_TOOLS])
+
+      // 金样例入参一律过 `MCP_TOOL_INPUTS`（契约单源；ask/respond_ask 为 Task 3 新增）。
+      for (const name of MCP_TOOLS) {
+        const parsedInput = MCP_TOOL_INPUTS[name].safeParse(golden[name])
+        if (!parsedInput.success) {
+          throw new Error(`${name} golden input violates the contract: ${parsedInput.error.message}`)
+        }
+      }
 
       // 广告 schema 接线校验：每个 object 工具的 properties 必须覆盖其金样例键
       // （若 conversation/roster 等被对调，键集即不匹配而失败）。
@@ -230,6 +255,111 @@ describe("send{wait} 端到端（DoD ②）", () => {
       expect(parsed.reply?.timedOut).toBe(false)
       expect(parsed.reply?.messages.map((m) => m.body)).toEqual(["pong"])
       expect(parsed.readReceipts).toEqual([])
+    } finally {
+      await client.close()
+    }
+  })
+})
+
+describe("ask/respond_ask 端到端（DoD ⑤）", () => {
+  /** 轮询 pending ask 单（工具调用挂起期间单据已同步落库）。 */
+  async function pendingAskId(): Promise<string> {
+    let found: string | undefined
+    await waitUntil(() => {
+      found = listApprovals(db, "pending").find((approval) => approval.kind === "ask")?.id
+      return found !== undefined
+    })
+    if (found === undefined) throw new Error("no pending ask")
+    return found
+  }
+
+  it("unlocks the waiting ask when the human answers via core respondAsk", async () => {
+    const actor = makeAgent("mcp-ask-human-actor")
+    const client = await connect(actor.id)
+    try {
+      const pending = callTool(client, "ask", {
+        to: "human",
+        question: "deploy?",
+        options: ["yes", "no"],
+        wait: { until: "message", timeoutMs: 5000 },
+      })
+      const askId = await pendingAskId()
+      respondAsk(db, askId, ensureHuman(db).id, { choice: "yes" })
+
+      const result = await pending
+      expect(toolFailed(result)).toBe(false)
+      const parsed = MCP_TOOL_OUTPUTS.ask.parse(JSON.parse(textOf(result)))
+      expect(parsed.ask.status).toBe("answered")
+      expect(parsed.reply?.timedOut).toBe(false)
+      expect(parsed.reply?.choice).toBe("yes")
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("unlocks the waiting ask when the target agent responds with free text", async () => {
+    const asker = makeAgent("mcp-ask-agent-asker")
+    const target = makeAgent("mcp-ask-agent-target")
+    sendMessage(db, { from: asker.id, to: target.id, body: "seed-dm" })
+    const clientA = await connect(asker.id)
+    const clientB = await connect(target.id)
+    try {
+      const pending = callTool(clientA, "ask", {
+        to: target.id,
+        question: "which?",
+        options: ["a", "b"],
+        wait: { until: "message", timeoutMs: 5000 },
+      })
+      const askId = await pendingAskId()
+      const answered = await callTool(clientB, "respond_ask", { ask_id: askId, text: "custom" })
+      expect(toolFailed(answered)).toBe(false)
+      const decided = MCP_TOOL_OUTPUTS.respond_ask.parse(JSON.parse(textOf(answered)))
+      expect(decided.status).toBe("answered")
+      expect(decided.result?.["text"]).toBe("custom")
+
+      const result = await pending
+      expect(toolFailed(result)).toBe(false)
+      const parsed = MCP_TOOL_OUTPUTS.ask.parse(JSON.parse(textOf(result)))
+      expect(parsed.reply?.timedOut).toBe(false)
+      expect(parsed.reply?.text).toBe("custom")
+    } finally {
+      await clientB.close()
+      await clientA.close()
+    }
+  })
+})
+
+describe("ask/respond_ask 错误契约（DoD ⑤）", () => {
+  it("maps conversation_required when the ask target shares no conversation", async () => {
+    const actor = makeAgent("mcp-ask-noconv-actor")
+    const stranger = makeAgent("mcp-ask-noconv-stranger")
+    const client = await connect(actor.id)
+    try {
+      const result = await callTool(client, "ask", { to: stranger.id, question: "q", options: [] })
+      expect(toolFailed(result)).toBe(true)
+      expect(textOf(result)).toContain("conversation_required")
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("maps invalid_choice then ask_already_answered on a second answer", async () => {
+    const asker = makeAgent("mcp-ask-err-asker")
+    const target = makeAgent("mcp-ask-err-target")
+    sendMessage(db, { from: asker.id, to: target.id, body: "seed-dm" })
+    const seeded = ask(db, asker.id, { to: target.id, question: "pick?", options: ["a", "b"] })
+    const client = await connect(target.id)
+    try {
+      const bad = await callTool(client, "respond_ask", { ask_id: seeded.ask.id, choice: "zzz" })
+      expect(toolFailed(bad)).toBe(true)
+      expect(textOf(bad)).toContain("invalid_choice")
+
+      const ok = await callTool(client, "respond_ask", { ask_id: seeded.ask.id, choice: "a" })
+      expect(toolFailed(ok)).toBe(false)
+
+      const again = await callTool(client, "respond_ask", { ask_id: seeded.ask.id, choice: "b" })
+      expect(toolFailed(again)).toBe(true)
+      expect(textOf(again)).toContain("ask_already_answered")
     } finally {
       await client.close()
     }
