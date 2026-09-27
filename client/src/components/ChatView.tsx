@@ -39,6 +39,7 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
   const hasMoreRef = useRef(true)
   const nearBottomRef = useRef(true)
   const handledFocusRef = useRef<string | null>(null)
+  const highlightTimerRef = useRef<number | undefined>(undefined)
   const [draft, setDraft] = useState("")
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -50,7 +51,7 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
     if (node !== null) node.scrollTop = node.scrollHeight
   }, [])
 
-  // 切换会话：重置分页游标 / 草稿 / 高亮，并滚到底部。
+  // 切换会话：重置分页游标 / 草稿 / 高亮，并滚到底部；卸载/切会话时清掉高亮计时器（复审 I1）。
   useEffect(() => {
     hasMoreRef.current = true
     nearBottomRef.current = true
@@ -59,6 +60,12 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
     setError(null)
     setHighlightId(null)
     scrollToBottom()
+    return () => {
+      if (highlightTimerRef.current !== undefined) {
+        window.clearTimeout(highlightTimerRef.current)
+        highlightTimerRef.current = undefined
+      }
+    }
   }, [conversationId, scrollToBottom])
 
   // 新消息到达：贴底时跟随（不打断上翻阅读）。
@@ -100,7 +107,9 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
       })
   }, [conversationId, loadOlder, messages])
 
-  // 深链定位：目标载入后滚动 + 高亮 2s；每次会话仅处理一次，未命中静默。
+  // 深链定位：目标载入后滚动 + 高亮 2s；每次会话仅定位一次，未命中静默。
+  // 高亮计时器存 ref 且**不注册 effect cleanup**——2s 窗口内任何 refetch 换了 `messages`
+  // 引用都不得取消/延长高亮；清除只由计时器或会话切换/卸载触发（复审 I1）。
   useEffect(() => {
     if (focusMessageId === null || handledFocusRef.current === focusMessageId) return
     if (!messages.some((message) => message.id === focusMessageId)) return
@@ -108,8 +117,11 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
     setHighlightId(focusMessageId)
     const target = scrollRef.current?.querySelector(`[data-message-id="${focusMessageId}"]`)
     if (target instanceof HTMLElement) target.scrollIntoView({ block: "center" })
-    const timer = window.setTimeout(() => setHighlightId(null), HIGHLIGHT_MS)
-    return () => window.clearTimeout(timer)
+    if (highlightTimerRef.current !== undefined) window.clearTimeout(highlightTimerRef.current)
+    highlightTimerRef.current = window.setTimeout(() => {
+      setHighlightId(null)
+      highlightTimerRef.current = undefined
+    }, HIGHLIGHT_MS)
   }, [focusMessageId, messages])
 
   const canSend = draft.trim().length > 0 && !sending

@@ -97,3 +97,53 @@ export function publishReceipt(db: Db, conversationId: string): void {
     })),
   })
 }
+
+/** 单会话批量回执：`(message.seq, agentId) → stage` 的内存映射。 */
+export type ReceiptStageMap = ReadonlyMap<number, ReadonlyMap<string, ReceiptStage>>
+
+/**
+ * 每请求一次批量回执派生（Plan 3 T5 复审 I3）：一次读该会话的 `read_states`，
+ * 一次按「本页消息 seq × 收件方」读 `wake_jobs`，再内存映射。语义与逐条
+ * `receiptState` 逐字一致（`read_states.last_read_seq ≥ seq → read`；否则 wake 映射；
+ * 无行 → `queued`），仅把每个 own 消息的 O(M) 查询降为**每请求常数次**（O(N+M) 内存）。
+ */
+export function batchReceiptStates(
+  db: Db,
+  conversationId: string,
+  messages: readonly Message[],
+  recipients: readonly string[],
+): ReceiptStageMap {
+  const result = new Map<number, Map<string, ReceiptStage>>()
+  if (messages.length === 0 || recipients.length === 0) return result
+  const readRows = db
+    .prepare<[string], { agent_id: string; last_read_seq: number }>(
+      "SELECT agent_id, last_read_seq FROM read_states WHERE conversation_id = ?",
+    )
+    .all(conversationId)
+  const readByAgent = new Map(readRows.map((row) => [row.agent_id, row.last_read_seq] as const))
+  const seqPlaceholders = messages.map(() => "?").join(", ")
+  const agentPlaceholders = recipients.map(() => "?").join(", ")
+  const jobRows = db
+    .prepare<unknown[], { messageId: number; agentId: string; state: string }>(
+      `SELECT message_id AS messageId, agent_id AS agentId, state FROM wake_jobs
+       WHERE message_id IN (${seqPlaceholders}) AND agent_id IN (${agentPlaceholders})`,
+    )
+    .all(...messages.map((message) => message.seq), ...recipients)
+  const jobStage = new Map<string, ReceiptStage>()
+  for (const row of jobRows) {
+    jobStage.set(`${row.messageId}:${row.agentId}`, WAKE_STATE_STAGE[wakeStateSchema.parse(row.state)])
+  }
+  for (const message of messages) {
+    const perAgent = new Map<string, ReceiptStage>()
+    for (const agentId of recipients) {
+      const readSeq = readByAgent.get(agentId)
+      const stage: ReceiptStage =
+        readSeq !== undefined && readSeq >= message.seq
+          ? "read"
+          : (jobStage.get(`${message.seq}:${agentId}`) ?? "queued")
+      perAgent.set(agentId, stage)
+    }
+    result.set(message.seq, perAgent)
+  }
+  return result
+}

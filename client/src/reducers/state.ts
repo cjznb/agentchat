@@ -138,6 +138,19 @@ function applyMessage(state: AppState, chat: ChatMessage): AppState {
   }
 }
 
+/**
+ * 合并一页消息（Plan 3 T5 复审 I2）：按 id 去重，**新页覆盖同 id**（回执 stage 等更新），
+ * 并保留桶内已有、本页未含的更早消息（上翻已加载历史不被 refetch 整桶替换），seq 升序。
+ */
+function mergeMessages(
+  existing: readonly ChatMessage[],
+  incoming: readonly ChatMessage[],
+): readonly ChatMessage[] {
+  const byId = new Map(existing.map((message) => [message.id, message] as const))
+  for (const message of incoming) byId.set(message.id, message)
+  return [...byId.values()].sort((a, b) => a.seq - b.seq)
+}
+
 function toApprovalEntry(snapshot: ApprovalSnapshot): ApprovalEntry {
   return {
     id: snapshot.id,
@@ -178,8 +191,14 @@ function hydrate(state: AppState, patch: ReloadResult): AppState {
   if (patch.notificationsAll !== undefined) next = { ...next, notificationsAll: patch.notificationsAll }
   if (patch.approvals !== undefined) next = { ...next, approvals: patch.approvals }
   if (patch.messages !== undefined) {
+    // 按 id 合并而非整桶替换：refetch 只带回最新一页，须保留上翻已加载的更早消息（复审 I2）。
     const messages = new Map(next.messages)
-    for (const item of patch.messages) messages.set(item.conversationId, item.messages)
+    for (const item of patch.messages) {
+      messages.set(
+        item.conversationId,
+        mergeMessages(messages.get(item.conversationId) ?? [], item.messages),
+      )
+    }
     next = { ...next, messages }
   }
   return next
@@ -261,15 +280,14 @@ export function reducer(state: AppState, action: StoreAction): AppState {
       }
     case "message":
       return applyMessage(state, action.chat)
-    case "prepend": {
-      const existing = state.messages.get(action.conversationId) ?? []
-      const byId = new Map(existing.map((message) => [message.id, message] as const))
-      for (const message of action.messages) {
-        if (!byId.has(message.id)) byId.set(message.id, message)
+    case "prepend":
+      return {
+        ...state,
+        messages: new Map(state.messages).set(
+          action.conversationId,
+          mergeMessages(state.messages.get(action.conversationId) ?? [], action.messages),
+        ),
       }
-      const merged = [...byId.values()].sort((a, b) => a.seq - b.seq)
-      return { ...state, messages: new Map(state.messages).set(action.conversationId, merged) }
-    }
     case "connection":
       return { ...state, connection: action.status }
     case "open":

@@ -148,6 +148,11 @@ test("pages older history when scrolled to the top without duplicates", async ({
     // 零重复：id 集合大小 = 行数。
     const ids = await rows.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-message-id")))
     expect(new Set(ids).size).toBe(ids.length)
+
+    // 上滚加载更多后制造事件（新消息 WS → refetch）：已加载旧页不得被整桶替换丢弃（复审 I2）。
+    sendMessage(seeded.db, { from: seeded.humanId, to: seeded.rootId, body: "after-page" })
+    await expect.poll(async () => rows.count(), { timeout: 3000 }).toBe(61)
+    await expect(page.locator('[data-testid="message-row"]', { hasText: "msg-0" })).toHaveCount(1)
   } finally {
     await teardown(page, seeded, running)
   }
@@ -173,8 +178,14 @@ test("deep link opens the conversation, scrolls to the message, highlights then 
     await expect(target).toHaveClass(/is-highlighted/)
     await expect(target).toBeInViewport()
 
-    // 2s 后高亮移除。
-    await expect.poll(async () => target.getAttribute("data-highlight"), { timeout: 4000 }).toBeNull()
+    // 高亮窗口内触发该会话 refetch（receipt WS → 整页对账）：ack 目标消息 → 其回执转 read，
+    // 即证对账已在窗口内完成；高亮仍须清除，不得被 refetch 取消 / 残留（复审 I1）。
+    const receipt = target.getByTestId("receipt")
+    await expect(receipt).toHaveAttribute("data-stage", "queued")
+    expect(ack(seeded.db, seeded.rootId, [targetId])).toBe(1)
+    await expect(receipt).toHaveAttribute("data-stage", "read")
+    // 有界轮询：捕获「永不清理」的回归；窗口放宽以容忍 CI 负载下的计时器调度延迟。
+    await expect.poll(async () => target.getAttribute("data-highlight"), { timeout: 6000 }).toBeNull()
   } finally {
     await teardown(page, seeded, running)
   }

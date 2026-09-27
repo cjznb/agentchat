@@ -98,6 +98,9 @@ export async function start(options: StartOptions = {}): Promise<RunningServer> 
     url: `http://127.0.0.1:${info.port}`,
     close: () =>
       new Promise<void>((resolve, reject) => {
+        // 强制关闭 keep-alive 与已升级（WebSocket）连接：Node 的 `server.close` 会为它们
+        // 一直挂起（浏览器池化连接 / 在线 WS 客户端），令关停永不完成（Node ≥18.2 提供）。
+        if (server instanceof HttpServer) server.closeAllConnections()
         server.close((err) => {
           if (err) {
             reject(err)

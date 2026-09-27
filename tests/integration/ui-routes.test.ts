@@ -16,14 +16,22 @@ import { z } from "zod"
 import { messageHistorySchema, notificationListSchema, type ChatMessage } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
 import { registerRoot } from "../../server/core/agents"
-import { ack, createGroup, ensureHuman, sendMessage, shout } from "../../server/core/messaging"
+import {
+  ack,
+  createGroup,
+  ensureHuman,
+  receiptState,
+  recipientsOf,
+  sendMessage,
+  shout,
+} from "../../server/core/messaging"
 import { ask, respondAsk } from "../../server/core/permissions"
 import { openDb, type Db } from "../../server/db"
 import { createApp } from "../../server/index"
 import { insertAgent } from "../../server/store/agents"
 import { getApproval } from "../../server/store/approvals"
-import { getConversationByKey, isParticipant, SHOUT_KEY } from "../../server/store/conversations"
-import { history, send } from "../../server/store/messages"
+import { getConversation, getConversationByKey, isParticipant, SHOUT_KEY } from "../../server/store/conversations"
+import { getById, history, send } from "../../server/store/messages"
 
 let home = ""
 let db: Db
@@ -508,5 +516,41 @@ describe("GET /api/conversations/:id/messages（回执字段）", () => {
     expect(found?.kind).toBe("system")
     expect(found?.receipts).toBeUndefined()
     expect(found?.receiptStage).toBeUndefined()
+  })
+
+  it("batch derivation equals per-message receiptState for a multi-recipient shout (I3)", async () => {
+    const child = insertAgent(db, {
+      name: "t5-shout-child",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      parentId: rootId,
+    })
+    const outcome = shout(db, humanId, "shout-all")
+    if (!("approved" in outcome)) throw new Error("human shout must execute immediately")
+    const sent = outcome.approved.message
+    // 仅 child ack → child read、root queued；聚合取最落后 → queued。
+    expect(ack(db, child.id, [sent.id])).toBe(1)
+
+    const page = messageHistorySchema.parse(
+      await (await app.request(`/api/conversations/${sent.conversationId}/messages`)).json(),
+    )
+    const own = page.messages.find((message) => message.id === sent.id)
+    const stored = getById(db, sent.id)
+    const conversation = getConversation(db, sent.conversationId)
+    if (stored === undefined || conversation === undefined) {
+      throw new Error("shout message/conversation missing")
+    }
+    // 批量路径（路由出参）必须与逐条 `receiptState` 逐字一致。
+    const direct = Object.fromEntries(
+      recipientsOf(db, conversation, stored.fromAgentId).map((agentId) => [
+        agentId,
+        receiptState(db, stored, agentId),
+      ]),
+    )
+    expect(stageMap(own)).toEqual(direct)
+    expect(direct[child.id]).toBe("read")
+    expect(direct[rootId]).toBe("queued")
+    expect(own?.receiptStage).toBe("queued")
   })
 })

@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type {
   ApprovalSnapshot,
+  ChatMessage,
   ConversationSummary,
   RosterNode,
   WsServerFrame,
@@ -163,6 +164,44 @@ describe("reducer: 游标去重与 resync", () => {
     ])
     // resync 清空消息缓存后必须补回「当前打开会话」，否则已打开会话消息永不恢复。
     expect(plan.messages).toEqual(["c1"])
+  })
+})
+
+function chat(id: string, seq: number, body: string): ChatMessage {
+  return { seq, id, conversationId: "c1", fromAgentId: "human", body, kind: "text", createdAt: seq }
+}
+
+describe("reducer: 上翻分页与 refetch 对账（复审 I2）", () => {
+  it("hydrate 合并最新页：保留已加载旧页、同 id 被更新、无重复", () => {
+    let state = withConversations(initialState, humanConv)
+    state = reducer(state, { type: "open", conversationId: "c1" })
+    // 上翻并入旧页（seq 1..2）。
+    state = reducer(state, {
+      type: "prepend",
+      conversationId: "c1",
+      messages: [chat("m1", 1, "old"), chat("m2", 2, "old2")],
+    })
+    // refetch 最新页：m2 同 id 被更新（回执/正文），m3 新增。
+    state = reducer(state, {
+      type: "hydrate",
+      patch: { messages: [{ conversationId: "c1", messages: [chat("m2", 2, "old2-updated"), chat("m3", 3, "new")] }] },
+    })
+    const bucket = state.messages.get("c1") ?? []
+    expect(bucket.map((message) => message.id)).toEqual(["m1", "m2", "m3"])
+    expect(bucket.find((message) => message.id === "m2")?.body).toBe("old2-updated")
+    const ids = bucket.map((message) => message.id)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it("prepend 按 id 去重（重复页不产生重复行）", () => {
+    let state = reducer(initialState, { type: "open", conversationId: "c1" })
+    state = reducer(state, { type: "messages", conversationId: "c1", messages: [chat("m3", 3, "new")] })
+    state = reducer(state, {
+      type: "prepend",
+      conversationId: "c1",
+      messages: [chat("m1", 1, "old"), chat("m3", 3, "dup")],
+    })
+    expect(state.messages.get("c1")?.map((message) => message.id)).toEqual(["m1", "m3"])
   })
 })
 

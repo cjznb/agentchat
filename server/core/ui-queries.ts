@@ -19,7 +19,8 @@ import { getConversation, isParticipant, listConversations, SHOUT_KEY } from "..
 import { findCardMessage, history, latestInConversation, type Message } from "../store/messages"
 import { listNotifications, type NotificationScope } from "../store/notifications"
 import { rosterTree, type RosterNode } from "./agents"
-import { ensureHuman, receiptState, recipientsOf, unreadFor } from "./messaging"
+import { ensureHuman, recipientsOf, unreadFor } from "./messaging"
+import { batchReceiptStates, type ReceiptStageMap } from "./publish"
 
 /** 会话最后一条消息预览（随 `GET /api/conversations` 返回）。 */
 export interface ConversationPreview {
@@ -193,17 +194,9 @@ function stageRank(stage: ReceiptStage): number {
   return RECEIPT_STAGES.indexOf(stage)
 }
 
-/**
- * 单条消息出参：自有（human 发出）**文本**消息附各收件方四级回执 + 聚合 stage。
- * 非己方 / 系统消息 / 无收件方 → 不加回执字段（决议 1）。回执派生复用 `receiptState`。
- */
-function chatMessageView(
-  db: Db,
-  conversationId: string,
-  humanId: string,
-  message: Message,
-): ChatMessage {
-  const base: ChatMessage = {
+/** 消息线格式基础字段（不含回执）。 */
+function bareMessage(message: Message): ChatMessage {
+  return {
     seq: message.seq,
     id: message.id,
     conversationId: message.conversationId,
@@ -213,12 +206,27 @@ function chatMessageView(
     createdAt: message.createdAt,
     ...(message.meta === undefined ? {} : { meta: message.meta }),
   }
-  if (message.kind !== "text" || message.fromAgentId !== humanId) return base
-  const conversation = getConversation(db, conversationId)
-  if (conversation === undefined) return base
-  const receipts = recipientsOf(db, conversation, message.fromAgentId).map((agentId) => ({
+}
+
+/**
+ * 单条消息出参：自有（human 发出）**文本**消息附各收件方四级回执 + 聚合 stage（取最落后）。
+ * 非己方 / 系统消息 / 无收件方 → 不加回执字段（决议 1）。回执来自批量派生（复审 I3）。
+ */
+function chatMessageView(
+  message: Message,
+  humanId: string,
+  recipients: readonly string[],
+  receiptMap: ReceiptStageMap,
+): ChatMessage {
+  const base = bareMessage(message)
+  if (message.kind !== "text" || message.fromAgentId !== humanId || recipients.length === 0) {
+    return base
+  }
+  const perAgent = receiptMap.get(message.seq)
+  if (perAgent === undefined) return base
+  const receipts = recipients.map((agentId) => ({
     agentId,
-    stage: receiptState(db, message, agentId),
+    stage: perAgent.get(agentId) ?? "queued",
   }))
   const [first, ...rest] = receipts
   if (first === undefined) return base
@@ -231,7 +239,8 @@ function chatMessageView(
 
 /**
  * 会话历史（UI 出参 `GET /api/conversations/:id/messages`）：分页语义同 `store.history`，
- * 自有文本消息附四级回执（决议 1）。未知会话在本层返回空（路由层已先 404 判定）。
+ * 自有文本消息附四级回执（决议 1）。**每请求只解析一次会话 / 收件方，并批量取回执**
+ * （复审 I3：由每消息 O(M) 查询降为 O(N+M) 内存映射）。未知会话由路由层先 404。
  */
 export function conversationMessages(
   db: Db,
@@ -240,9 +249,14 @@ export function conversationMessages(
   before?: number,
   limit?: number,
 ): readonly ChatMessage[] {
-  return history(db, {
+  const messages = history(db, {
     conversationId,
     ...(before === undefined ? {} : { before }),
     ...(limit === undefined ? {} : { limit }),
-  }).map((message) => chatMessageView(db, conversationId, humanId, message))
+  })
+  const conversation = getConversation(db, conversationId)
+  if (conversation === undefined) return messages.map(bareMessage)
+  const recipients = recipientsOf(db, conversation, humanId)
+  const receiptMap = batchReceiptStates(db, conversationId, messages, recipients)
+  return messages.map((message) => chatMessageView(message, humanId, recipients, receiptMap))
 }
