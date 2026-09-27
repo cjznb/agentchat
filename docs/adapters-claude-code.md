@@ -17,7 +17,7 @@ MCP server 的官方 JSON 位置是 `~/.claude.json`、项目 `.mcp.json`、或 
 | 内容 | 落点 | 片段文件 |
 |---|---|---|
 | **hooks** | `settings.json`（用户级 `~/.claude/settings.json`，或项目 `.claude/settings.json`） | `adapters/claude-code/settings.snippet.json` |
-| **MCP server** | MCP 配置：默认 `~/.claude.json`；项目级用 `--mcp-config .mcp.json` | `adapters/claude-code/mcp.snippet.json` |
+| **MCP server** | MCP 配置：默认 `~/.claude.json`（设 `CLAUDE_CONFIG_DIR` 时为 `$CLAUDE_CONFIG_DIR/.claude.json`）；项目级用 `--mcp-config .mcp.json` | `adapters/claude-code/mcp.snippet.json` |
 
 > 安装器**拒绝**把两处写成同一文件（同一文件 → 报错），从机制上避免 MCP 落在被忽略的位置。
 
@@ -53,11 +53,13 @@ hook 由 Claude Code 进程派生，故 `HUB_TOKEN` 需出现在**启动 `claude
 - **hooks 目标 `settings.json`**：① `--config <path>` → ② `$CLAUDE_SETTINGS`（AgentChat 约定覆盖）→
   ③ `$CLAUDE_CONFIG_DIR/settings.json`（官方配置目录重定位），否则 `~/.claude/settings.json`。
   默认路径不存在 → **报错并提示用 `--config`**（不自动创建；Claude Code settings 为**严格 JSON**）。
-- **MCP 目标**：① `--mcp-config <path>`（如项目 `<repo>/.mcp.json`）→ ② 默认 `~/.claude.json`
-  （不存在则创建，父目录需存在）。
+- **MCP 目标**：① `--mcp-config <path>`（如项目 `<repo>/.mcp.json`）→ ② 设了 `CLAUDE_CONFIG_DIR` 时
+  `$CLAUDE_CONFIG_DIR/.claude.json`（官方：该变量同时重定位 `.claude.json` 与 `settings.json`，两者同目录）
+  → ③ 默认 `~/.claude.json`（不存在则创建，父目录需存在）。
 
-选默认 `~/.claude.json` 的理由：用户级、跨项目生效、**无需项目工作区信任审批**（项目 `.mcp.json`
+选默认用户级 `.claude.json` 的理由：用户级、跨项目生效、**无需项目工作区信任审批**（项目 `.mcp.json`
 在交互会话里要用户逐项目批准）；需要团队共享/版本控制时改用 `--mcp-config <repo>/.mcp.json`。
+`CLAUDE_CONFIG_DIR` 与 settings 的解析优先级一致，避免「MCP 写到别处、Claude Code 读不到」的静默不可见。
 
 写入策略：改动前备份 `<file>.bak`，再以**临时文件 + rename 原子替换**；`--dry-run` 只打印两处目标、不落盘。
 合并语义：`hooks` 下**用户既有条目一律保留**，只追加本适配器条目并按**规范化绝对路径**去重（幂等）；

@@ -30,8 +30,9 @@ hook 由 Claude Code 进程派生，故这些变量需出现在启动 `claude` �
    全部替换为 `adapters/claude-code/` 的**绝对路径**（用正斜杠，Windows 亦可），把 `hooks` 对象并入用户级
    `~/.claude/settings.json`（或项目级 `.claude/settings.json`）；已存在其它 `hooks` 事件时按事件名追加，不要覆盖。
 2. **MCP → MCP 配置**：复制 `mcp.snippet.json` 的内容，替换 `__AGENTCHAT_ADAPTER_DIR__` 后并入用户级
-   `~/.claude.json` 的顶层 `mcpServers`（项目级用 `--mcp-config <repo>/.mcp.json`）。条目用 `headersHelper`
-   指向 `mcp-headers.mjs`——**配置里不含 token**（规避凭据变量被读空）。
+   `~/.claude.json` 的顶层 `mcpServers`（设 `CLAUDE_CONFIG_DIR` 时为 `$CLAUDE_CONFIG_DIR/.claude.json`；
+   项目级用 `--mcp-config <repo>/.mcp.json`）。条目用 `headersHelper` 指向 `mcp-headers.mjs`——
+   **配置里不含 token**（规避凭据变量被读空）。
 3. 确保 `HUB_TOKEN` 对 `claude` 进程可见（hooks 需要）。
 
 安装器用法：`node adapters/claude-code/install.mjs [--config <path>] [--mcp-config <path>] [--dry-run] [--uninstall]`。

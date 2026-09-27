@@ -67,9 +67,17 @@ function seedMcp(path: string): void {
 }
 
 function run(args: readonly string[], env: Record<string, string> = {}): SpawnSyncReturns<string> {
+  // 显式清空可能泄漏的宿主变量（否则 hubUrl / 目标路径会与 snippet、断言不一致）。
   return spawnSync(process.execPath, [INSTALL, ...args], {
     encoding: "utf8",
-    env: { ...process.env, CLAUDE_SETTINGS: "", AGENTCHAT_URL: "", ...env },
+    env: {
+      ...process.env,
+      AGENTCHAT_URL: "",
+      AGENTCHAT_PORT: "",
+      CLAUDE_CONFIG_DIR: "",
+      CLAUDE_SETTINGS: "",
+      ...env,
+    },
   })
 }
 
@@ -283,6 +291,26 @@ describe("install.mjs 幂等安装（hooks→settings，MCP→独立文件）", 
     expect(out).toContain("session-start.mjs")
     expect(out).toContain('"agentchat"')
     expect(out).toContain("headersHelper")
+  })
+
+  it("honors CLAUDE_CONFIG_DIR for both targets, with --mcp-config taking precedence", () => {
+    const dir = tempDir()
+    seedSettings(join(dir, "settings.json"))
+
+    const dry = run(["--dry-run"], { CLAUDE_CONFIG_DIR: dir })
+    expect(dry.status).toBe(0)
+    expect(dry.stdout ?? "").toContain(`# hooks → ${join(dir, "settings.json")}`)
+    expect(dry.stdout ?? "").toContain(`# MCP → ${join(dir, ".claude.json")}`)
+
+    expect(run([], { CLAUDE_CONFIG_DIR: dir }).status).toBe(0)
+    const settings = readConfig(join(dir, "settings.json"))
+    expect(hasOurEntry(arrayAt(nested(settings, "hooks"), "SessionStart"), "session-start.mjs")).toBe(true)
+    expect(mcpEntry(readConfig(join(dir, ".claude.json")), "agentchat")).toBeDefined()
+
+    const explicit = join(tempDir(), "project.mcp.json")
+    writeFileSync(explicit, "{}\n")
+    expect(run(["--mcp-config", explicit], { CLAUDE_CONFIG_DIR: dir }).status).toBe(0)
+    expect(mcpEntry(readConfig(explicit), "agentchat")).toBeDefined()
   })
 
   it("fails with a clear message and non-zero exit on missing paths or a same-file target", () => {

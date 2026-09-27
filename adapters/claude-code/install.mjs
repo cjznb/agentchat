@@ -1,6 +1,7 @@
 /**
  * AgentChat Claude Code 安装器：把 **hooks 事件条目** 并入用户 `settings.json`，
- * 把 **MCP server 条目** 并入 MCP 配置（默认用户级 `~/.claude.json`）。
+ * 把 **MCP server 条目** 并入 MCP 配置（默认用户级 `~/.claude.json`；设 `CLAUDE_CONFIG_DIR` 时为
+ * `$CLAUDE_CONFIG_DIR/.claude.json`）。
  *
  * 用法：
  *   node adapters/claude-code/install.mjs [--config <path>] [--mcp-config <path>]
@@ -10,7 +11,8 @@
  * 静默忽略；官方 MCP JSON 位置为 `~/.claude.json` / `.mcp.json` / `claude mcp add-json`）：
  *   - hooks : `settings.json` —— `--config` → `$CLAUDE_SETTINGS` → `$CLAUDE_CONFIG_DIR/settings.json`
  *             → `~/.claude/settings.json`；不存在 → 报错并提示 `--config`（不自动创建）
- *   - MCP   : `--mcp-config <path>`（如项目 `.mcp.json`）→ 否则用户级 `~/.claude.json`（不存在则创建）
+ *   - MCP   : `--mcp-config <path>`（如项目 `.mcp.json`）→ 否则 `$CLAUDE_CONFIG_DIR/.claude.json`
+ *             （设该变量时）→ 否则用户级 `~/.claude.json`（不存在则创建）
  *   `settings.json` 与 MCP 目标不得为同一文件。
  *
  * 合并语义：`hooks` 各事件下**用户既有条目一律保留**，仅追加/去重本适配器条目——按
@@ -47,18 +49,28 @@ function normalizePath(p) {
   return p.replace(/\\/g, "/").replace(/\/+$/, "")
 }
 
+/** Claude Code 配置目录：`$CLAUDE_CONFIG_DIR`（非空）否则 `~/.claude`。 */
+function claudeConfigDir(env) {
+  return env.CLAUDE_CONFIG_DIR !== undefined && env.CLAUDE_CONFIG_DIR !== ""
+    ? env.CLAUDE_CONFIG_DIR
+    : join(homedir(), ".claude")
+}
+
 function resolveSettingsPath(explicit, env) {
   if (explicit !== undefined && explicit !== "") return explicit
   if (env.CLAUDE_SETTINGS !== undefined && env.CLAUDE_SETTINGS !== "") return env.CLAUDE_SETTINGS
-  const dir =
-    env.CLAUDE_CONFIG_DIR !== undefined && env.CLAUDE_CONFIG_DIR !== ""
-      ? env.CLAUDE_CONFIG_DIR
-      : join(homedir(), ".claude")
-  return join(dir, "settings.json")
+  return join(claudeConfigDir(env), "settings.json")
 }
 
-function resolveMcpPath(explicit) {
-  return explicit !== undefined && explicit !== "" ? explicit : join(homedir(), ".claude.json")
+/**
+ * MCP 目标：`--mcp-config` 显式优先；否则官方用户 scope 文件——**设置了 `CLAUDE_CONFIG_DIR`
+ * 时 Claude Code 从该目录读 `.claude.json`**（与 settings 同目录），否则 `~/.claude.json`。
+ */
+function resolveMcpPath(explicit, env) {
+  if (explicit !== undefined && explicit !== "") return explicit
+  return env.CLAUDE_CONFIG_DIR !== undefined && env.CLAUDE_CONFIG_DIR !== ""
+    ? join(env.CLAUDE_CONFIG_DIR, ".claude.json")
+    : join(homedir(), ".claude.json")
 }
 
 function assertParentExists(path, label) {
@@ -74,10 +86,11 @@ function assertSettingsExists(path) {
 // ── 将写内容 ────────────────────────────────────────────────────────
 
 function hubUrl(env) {
+  const port = env.AGENTCHAT_PORT !== undefined && env.AGENTCHAT_PORT !== "" ? env.AGENTCHAT_PORT : "4646"
   const base =
     env.AGENTCHAT_URL !== undefined && env.AGENTCHAT_URL !== ""
       ? env.AGENTCHAT_URL
-      : `http://127.0.0.1:${env.AGENTCHAT_PORT ?? "4646"}`
+      : `http://127.0.0.1:${port}`
   return `${base.replace(/\/+$/, "")}/mcp`
 }
 
@@ -242,7 +255,7 @@ const HELP =
     "AgentChat Claude Code 安装器",
     "用法：node adapters/claude-code/install.mjs [--config <path>] [--mcp-config <path>] [--dry-run] [--uninstall]",
     "  --config <path>      hooks 目标 settings.json（默认：$CLAUDE_SETTINGS 或 $CLAUDE_CONFIG_DIR/settings.json 或 ~/.claude/settings.json）",
-    "  --mcp-config <path>  MCP 目标（默认：~/.claude.json；项目级可用 <repo>/.mcp.json）",
+    "  --mcp-config <path>  MCP 目标（默认：$CLAUDE_CONFIG_DIR/.claude.json 或 ~/.claude.json；项目级可用 <repo>/.mcp.json）",
     "  --dry-run 只打印不落盘；--uninstall 精确移除两处本适配器条目；--help 显示本帮助",
   ].join("\n") + "\n"
 
@@ -259,7 +272,7 @@ function main() {
   try {
     const env = process.env
     const settingsPath = resolveSettingsPath(args.config, env)
-    const mcpPath = resolveMcpPath(args.mcpConfig)
+    const mcpPath = resolveMcpPath(args.mcpConfig, env)
     if (normalizePath(settingsPath) === normalizePath(mcpPath)) {
       throw new Error("settings 与 MCP 目标不能是同一文件（settings.json 的 mcpServers 会被静默忽略）")
     }

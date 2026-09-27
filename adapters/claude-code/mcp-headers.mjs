@@ -34,4 +34,4 @@ function headers(env) {
   return out
 }
 
-process.stdout.write(JSON.stringify(headers(process.env)))
+process.stdout.write(`${JSON.stringify(headers(process.env))}\n`)
