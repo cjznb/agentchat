@@ -14,9 +14,10 @@
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { loadConfig } from "../../server/config"
 import { registerRoot } from "../../server/core/agents"
+import { sendMessage } from "../../server/core/messaging"
 import {
   APPROVAL_TTL_MS,
   ask,
@@ -45,6 +46,7 @@ import {
   wsApprovalPayloadSchema,
 } from "../../shared/contracts"
 import { framesSince, resetWsHub } from "../../server/ws"
+import * as waitModule from "../../server/core/wait"
 
 let home = ""
 let db: Db
@@ -78,6 +80,10 @@ function errorOf(fn: () => unknown): Error {
     throw error
   }
   throw new Error("expected the call to throw")
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** WS 环形缓冲中最后一条 `approval` 事件的 payload（R1 自校验证据）。 */
@@ -394,6 +400,49 @@ describe("R1: 契约容纳 ask", () => {
     if (parsed.success) {
       expect(parsed.data.approval.action).toBe("ask")
       expect(parsed.data.approval.status).toBe("pending")
+    }
+  })
+})
+
+describe("ask{wait}: 群会话第三方消息不提前解锁、不忙旋（review #2）", () => {
+  it("ignores third-party group messages and still unlocks on the target's answer", async () => {
+    const a = makeRoot("ask-spin-a")
+    const b = makeRoot("ask-spin-b")
+    const c = makeRoot("ask-spin-c")
+    const group = createGroup(db, { name: "批示群", createdBy: a.id, memberIds: [b.id, c.id] })
+    const spy = vi.spyOn(waitModule, "waitFor")
+
+    try {
+      const pending = ask(db, a.id, {
+        to: b.id,
+        question: "走不走",
+        options: ["走", "不走"],
+        wait: { until: "message", timeoutMs: 4000 },
+      })
+
+      // 第三方成员在群内插话：publish 唤醒等待者，但 ask 仍未决 —— 不得提前解锁。
+      sendMessage(db, { from: c.id, to: group.id, body: "我插一句" })
+
+      const raced = await Promise.race([
+        pending.then(() => "resolved" as const),
+        delay(150).then(() => "alive" as const),
+      ])
+      expect(raced).toBe("alive")
+
+      // 忙旋防护：推进基线后，第三方消息不会令 waitFor 以同一 afterSeq 反复重入。
+      // （若 lastAfterSeq 未前进，此处会因紧循环而远超上限。）
+      expect(spy.mock.calls.length).toBeLessThan(5)
+
+      const stored = listApprovals(db, "pending")[0]
+      if (stored === undefined) throw new Error("expected a pending ask")
+      respondAsk(db, stored.id, b.id, { choice: "走" })
+
+      const outcome = await pending
+      expect(outcome.timedOut).toBe(false)
+      expect(outcome.ask.status).toBe("answered")
+      expect(outcome.ask.result).toMatchObject({ choice: "走", responder: b.id })
+    } finally {
+      spy.mockRestore()
     }
   })
 })

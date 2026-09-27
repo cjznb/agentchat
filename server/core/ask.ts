@@ -168,12 +168,9 @@ function cardConversation(db: Db, ask: Approval): Conversation {
 }
 
 function cardBody(question: string, options: readonly string[], allowCustom: boolean): string {
-  const optionText = options.length === 0 ? "" : `（选项：${options.join(" / ")}）`
-  const customText = allowCustom ? "，也可自由答复" : ""
-  return `❓ 请求批示：${question}${optionText}${customText}`
+  const optionsText = options.length === 0 ? "" : `（选项：${options.join(" / ")}）`
+  return `❓ 请求批示：${question}${optionsText}${allowCustom ? "，也可自由答复" : ""}`
 }
-
-const optionsSchema = z.array(z.string())
 
 /** 校验并归一答案：choice 必须 ∈ options；text 仅 `allowCustom`；二者互斥且至少其一。 */
 function resolveAnswer(
@@ -182,11 +179,9 @@ function resolveAnswer(
   allowCustom: boolean,
 ): { readonly choice: string } | { readonly text: string } {
   const { choice, text } = input
-  if (choice !== undefined && text !== undefined) {
-    throw new InvalidChoiceError("choice and text are mutually exclusive")
-  }
+  if (choice !== undefined && text !== undefined) throw new InvalidChoiceError("choice and text are mutually exclusive")
   if (choice !== undefined) {
-    const parsed = optionsSchema.safeParse(rawOptions)
+    const parsed = z.array(z.string()).safeParse(rawOptions)
     const options = parsed.success ? parsed.data : []
     if (!options.includes(choice)) {
       throw new InvalidChoiceError(`choice "${choice}" is not one of the options`)
@@ -250,7 +245,7 @@ export async function awaitAsk(
   conversationId: string,
   wait: WaitOptions,
 ): Promise<AskWaitResult> {
-  const afterSeq = latestInConversation(db, conversationId)?.seq ?? 0
+  let afterSeq = latestInConversation(db, conversationId)?.seq ?? 0
   const deadline = Date.now() + (wait.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS)
   for (;;) {
     const current = getApproval(db, ask.id)
@@ -271,6 +266,9 @@ export async function awaitAsk(
       if (final !== undefined && final.status !== "pending") return { ask: final, timedOut: false }
       return { ask: final ?? ask, timedOut: true }
     }
+    // 非超时唤醒：把基线推进到本次返回消息的最大 seq —— 否则群会话中第三方成员消息会令
+    // `checkMessages` 反复命中同一批消息，外层紧循环忙旋直到 deadline（review #2）。
+    afterSeq = reply.messages.reduce((max, message) => Math.max(max, message.seq), afterSeq)
   }
 }
 

@@ -350,16 +350,6 @@ export function sweepExpired(
 
 // ── 请求批示（ask，Task 2）────────────────────────────────────────
 // 编排实现在 `core/ask.ts`（`permissions.ts` ≤250 纯行红线拆分，controller 授权）；
-// 此处 re-export，令计划约定（及 Task 3 MCP 工具）的 `core/permissions` 导入路径保持不变。
-export {
-  ask,
-  awaitAsk,
-  respondAsk,
-  AskAlreadyAnsweredError,
-  AskForbiddenError,
-  AskNotFoundError,
-  ConversationRequiredError,
-  InvalidChoiceError,
-  SelfAskError,
-} from "./ask"
-export type { AskInput, AskResult, AskWaitResult, RespondAskInput } from "./ask"
+// `export *` 同时转出值（ask/respondAsk/awaitAsk/错误类）与类型，令计划约定
+// （及 Task 3 MCP 工具）的 `core/permissions` 导入路径保持不变。
+export * from "./ask"
