@@ -8,28 +8,23 @@
 import { randomUUID } from "node:crypto"
 import { z } from "zod"
 import {
-  approvalActionSchema,
+  approvalActionValueSchema,
   approvalStatusSchema,
+  ASK_ACTION,
   type ApprovalAction,
+  type ApprovalActionValue,
   type ApprovalStatus,
 } from "../../shared/contracts"
 import type { Db } from "../db"
 
 // 枚举单源在 shared/contracts（Task 9 上移，REST/WS/前端共用）；此处仅再导出既有类型名。
-export type { ApprovalAction, ApprovalStatus }
+export type { ApprovalAction, ApprovalActionValue, ApprovalStatus }
+export { ASK_ACTION }
 
 /** 审批单种类（spec §5.3/§17.2：一套状态机两用）。 */
 export const APPROVAL_KINDS = ["action", "ask"] as const
 export type ApprovalKind = (typeof APPROVAL_KINDS)[number]
 export const approvalKindSchema = z.enum(APPROVAL_KINDS)
-
-/**
- * ask 单的 `action` 占位（列 NOT NULL）。契约锁定枚举 `APPROVAL_ACTIONS` 不含 `ask`
- * （本任务唯一允许的 contracts 触点仅为 `status` 加 `'answered'`），故在 store 层局部放宽。
- */
-export const ASK_ACTION = "ask" as const
-export type ApprovalActionValue = ApprovalAction | typeof ASK_ACTION
-const approvalActionValueSchema = z.union([approvalActionSchema, z.literal(ASK_ACTION)])
 
 const payloadSchema = z.record(z.string(), z.unknown())
 
@@ -250,13 +245,19 @@ export function claimExpired(db: Db, input: ClaimExpiryInput): Approval[] {
 /**
  * 首答落库（spec §17.1：首答生效，同审批幂等）：仅 `pending` 单被改写为 `answered` 并落
  * 答复 `result`（JSON）+ `decided_at`；返回本次是否生效（竞争下第二次为 false，`result` 不被覆盖）。
+ * `now` 可注入（缺省 `Date.now`）—— 令 `decided_at` 与调用方写入 `result.decidedAt` 同源。
  */
-export function markAnswered(db: Db, id: string, result: Record<string, unknown>): boolean {
+export function markAnswered(
+  db: Db,
+  id: string,
+  result: Record<string, unknown>,
+  now: number = Date.now(),
+): boolean {
   const changes = db
     .prepare<{ id: string; result: string; now: number }, void>(
       `UPDATE approvals SET status = 'answered', result = $result, decided_at = $now
         WHERE id = $id AND status = 'pending'`,
     )
-    .run({ id, result: JSON.stringify(result), now: Date.now() }).changes
+    .run({ id, result: JSON.stringify(result), now }).changes
   return changes > 0
 }

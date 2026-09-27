@@ -14,6 +14,7 @@
  * - 时钟可注入（`now` 参数），测试不 `sleep(24h)`。
  */
 import { z } from "zod"
+import { approvalSnapshotSchema } from "../../shared/contracts"
 import type { Db } from "../db"
 import {
   AgentNotFoundError,
@@ -173,7 +174,8 @@ export function approvalChannel(db: Db, requesterId: string): Conversation {
   return createDm(db, requesterId, ensureHuman(db).id)
 }
 
-interface SystemPost {
+/** system 卡/回执的落库入参（`ask.ts` 复用同一形态；审批卡与批示卡同构）。 */
+export interface SystemPost {
   readonly conversationId: string
   readonly fromAgentId: string
   readonly body: string
@@ -182,24 +184,27 @@ interface SystemPost {
 }
 
 /** system 消息落库 + `message publish`（发起方 `wait` 解锁的唯一通道；幂等键按单去重）。 */
-function postSystem(db: Db, post: SystemPost): void {
+export function postSystem(db: Db, post: SystemPost): void {
   send(db, { ...post, kind: "system" })
   publishMessage(db, post.conversationId)
 }
 
-/** `approval` WS 事件发布（Task 9 发布点：审批卡产生/决定/过期处，单据快照）。 */
-function emitApproval(approval: Approval): void {
-  emit("approval", {
-    approval: {
-      id: approval.id,
-      requesterAgentId: approval.requesterAgentId,
-      action: approval.action,
-      payload: approval.payload,
-      status: approval.status,
-      createdAt: approval.createdAt,
-      decidedAt: approval.decidedAt ?? null,
-    },
+/**
+ * `approval` WS 事件发布（Task 9 发布点：审批卡产生/决定/过期处，单据快照）。
+ * 快照经 `approvalSnapshotSchema` 自校验（R1）—— `ask` 行也必须构造成通过该 schema 的 payload，
+ * 契约漂移在发布点即暴露而非静默推给前端。
+ */
+export function emitApproval(approval: Approval): void {
+  const snapshot = approvalSnapshotSchema.parse({
+    id: approval.id,
+    requesterAgentId: approval.requesterAgentId,
+    action: approval.action,
+    payload: approval.payload,
+    status: approval.status,
+    createdAt: approval.createdAt,
+    decidedAt: approval.decidedAt ?? null,
   })
+  emit("approval", { approval: snapshot })
 }
 
 /**
@@ -267,6 +272,12 @@ export function decide(
 }
 
 function receiptBody(approval: DecidedApproval, error?: string): string {
+  // ask 过期语义（R2）：批示过期（非「审批…未执行」），与 action 过期文案分离。
+  if (approval.kind === "ask" && approval.status === "expired") {
+    const question = approval.payload["question"]
+    const asked = typeof question === "string" ? `「${question}」` : ""
+    return `⏳ 批示已过期：请求${asked}满 24 小时未获答复，已关闭。`
+  }
   const label = ACTION_LABEL[approval.action]
   switch (approval.status) {
     case "approved":
@@ -289,16 +300,24 @@ function receiptBody(approval: DecidedApproval, error?: string): string {
  */
 export function postDecision(db: Db, approval: DecidedApproval, error?: string): void {
   const channel = approvalChannel(db, approval.requesterAgentId)
+  // R2：ask 过期回执记 `{expiredAt}`；action 过期保持 `result="expired"` 与既有文案不变。
+  const askExpired = approval.kind === "ask" && approval.status === "expired"
   postSystem(db, {
     conversationId: channel.id,
     fromAgentId: ensureHuman(db).id,
     body: receiptBody(approval, error),
-    meta: {
-      approvalId: approval.id,
-      action: approval.action,
-      result: approval.status,
-      ...(error === undefined ? {} : { error }),
-    },
+    meta: askExpired
+      ? {
+          askId: approval.id,
+          action: approval.action,
+          result: { expiredAt: approval.decidedAt ?? Date.now() },
+        }
+      : {
+          approvalId: approval.id,
+          action: approval.action,
+          result: approval.status,
+          ...(error === undefined ? {} : { error }),
+        },
     idempotencyKey: `approval-receipt:${approval.id}`,
   })
   emitApproval(approval)
@@ -328,3 +347,19 @@ export function sweepExpired(
   }
   return expired.length
 }
+
+// ── 请求批示（ask，Task 2）────────────────────────────────────────
+// 编排实现在 `core/ask.ts`（`permissions.ts` ≤250 纯行红线拆分，controller 授权）；
+// 此处 re-export，令计划约定（及 Task 3 MCP 工具）的 `core/permissions` 导入路径保持不变。
+export {
+  ask,
+  awaitAsk,
+  respondAsk,
+  AskAlreadyAnsweredError,
+  AskForbiddenError,
+  AskNotFoundError,
+  ConversationRequiredError,
+  InvalidChoiceError,
+  SelfAskError,
+} from "./ask"
+export type { AskInput, AskResult, AskWaitResult, RespondAskInput } from "./ask"

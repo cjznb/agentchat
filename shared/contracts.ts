@@ -77,11 +77,20 @@ export type ApprovalStatus = (typeof APPROVAL_STATUS)[number]
 export const approvalActionSchema = z.enum(APPROVAL_ACTIONS)
 export const approvalStatusSchema = z.enum(APPROVAL_STATUS)
 
+/**
+ * ask 单的 `action` 占位（spec §17.2；`approvals.action` 列 NOT NULL）。
+ * `approvalActionSchema` 仍锁定三值审批动作；本值域 = 三值 ∪ `'ask'`，
+ * 供快照/出参容纳两种 kind（R1）。
+ */
+export const ASK_ACTION = "ask" as const
+export const approvalActionValueSchema = z.union([approvalActionSchema, z.literal(ASK_ACTION)])
+export type ApprovalActionValue = z.infer<typeof approvalActionValueSchema>
+
 /** 审批单快照（`approval` WS 事件 payload / `GET /api/approvals` 元素线格式）。 */
 export const approvalSnapshotSchema = z.object({
   id: z.string(),
   requesterAgentId: z.string(),
-  action: approvalActionSchema,
+  action: approvalActionValueSchema,
   payload: z.record(z.string(), z.unknown()),
   status: approvalStatusSchema,
   createdAt: z.number().int().nonnegative(),
@@ -313,7 +322,7 @@ const mcpConversationOutput = z.object({
 const mcpApprovalOutput = z.object({
   id: z.string(),
   requesterAgentId: z.string(),
-  action: approvalActionSchema,
+  action: approvalActionValueSchema,
   payload: z.record(z.string(), z.unknown()),
   status: approvalStatusSchema,
   createdAt: z.number().int().nonnegative(),
