@@ -129,8 +129,10 @@ export default { id: "agentchat", server: AgentChatPlugin }
    响应树中应出现 `vendor` 为 `opencode` 的节点。
 4. **从 UI 或另一节点发消息/ask**：在 Hub Web UI 选中该节点发送，或用另一 agent 的 MCP `send`/`ask` 指向它。
 5. **观察「空闲被唤醒并回信」**：目标空闲（`session.idle`）时插件拉取积压消息并注入会话，节点处理后可
-   经 MCP `send` 回信；同时观察 `/internal/state` 的 `busy`/`idle` 切换与消息的**四级回执**
-   （`sent`→`accepted`→`read`→`delivered`，见 `GET /api/...` 或 `message_status` 工具）。
+   经 MCP `send` 回信。节点的 `busy`/`idle` 经 **`GET /api/roster`** 观测（`/internal/state` 是适配器→Hub
+   的 **POST-only** 上报端点，不能 GET）；消息的**四级回执**为 `queued→sending→delivered→read`
+   （契约 `shared/contracts.ts` / spec §6.3；`read` 仅在收件方显式 `ack` 后触发，失败态
+   `refused`/`expired`/`cancelled` 回落 `queued`；用 `message_status` 工具或 Web UI 气泡下的回执查看）。
 
 ## 排障表
 

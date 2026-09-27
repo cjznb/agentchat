@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * AgentChat OpenCode 安装器：把 **plugin 条目** 与 **MCP server 条目** 并入用户 OpenCode 配置。
  *
@@ -24,29 +23,19 @@ import { fileURLToPath } from "node:url"
 const MCP_KEY = "agentchat"
 const ADAPTER_DIR = dirname(fileURLToPath(import.meta.url))
 
-class CliError extends Error {}
-
 // ── 目标配置解析 ────────────────────────────────────────────────────
 
 function resolveHome(env) {
-  const home = env.AGENTCHAT_HOME
-  return home === undefined || home === "" ? join(homedir(), ".agentchat") : home
+  return env.AGENTCHAT_HOME || join(homedir(), ".agentchat")
 }
 
 function hubUrl(env) {
-  const base =
-    env.AGENTCHAT_URL !== undefined && env.AGENTCHAT_URL !== ""
-      ? env.AGENTCHAT_URL
-      : `http://127.0.0.1:${env.AGENTCHAT_PORT ?? "4646"}`
+  const base = env.AGENTCHAT_URL || `http://127.0.0.1:${env.AGENTCHAT_PORT ?? "4646"}`
   return `${base.replace(/\/+$/, "")}/mcp`
 }
 
 function findDefaultConfig(env) {
-  const base =
-    env.XDG_CONFIG_HOME !== undefined && env.XDG_CONFIG_HOME !== ""
-      ? env.XDG_CONFIG_HOME
-      : join(homedir(), ".config")
-  const dir = join(base, "opencode")
+  const dir = join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode")
   for (const name of ["opencode.jsonc", "opencode.json"]) {
     const candidate = join(dir, name)
     if (existsSync(candidate)) return candidate
@@ -59,15 +48,15 @@ function resolveConfigPath(explicit, env) {
   if (env.OPENCODE_CONFIG !== undefined && env.OPENCODE_CONFIG !== "") return env.OPENCODE_CONFIG
   const found = findDefaultConfig(env)
   if (found !== undefined) return found
-  throw new CliError(
+  throw new Error(
     "找不到 OpenCode 配置（已查 $OPENCODE_CONFIG 与 ~/.config/opencode/opencode.jsonc|json）；请用 --config <path> 指定",
   )
 }
 
 function assertConfigExists(path) {
   const dir = dirname(path)
-  if (!existsSync(dir)) throw new CliError(`配置父目录不存在：${dir}`)
-  if (!existsSync(path)) throw new CliError(`配置文件不存在：${path}`)
+  if (!existsSync(dir)) throw new Error(`配置父目录不存在：${dir}`)
+  if (!existsSync(path)) throw new Error(`配置文件不存在：${path}`)
 }
 
 // ── 将写内容 ────────────────────────────────────────────────────────
@@ -166,7 +155,7 @@ function parseConfig(text) {
   try {
     return JSON.parse(stripJsonc(text))
   } catch (error) {
-    throw new CliError(`目标配置不是合法 JSON/JSONC：${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`目标配置不是合法 JSON/JSONC：${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -188,7 +177,7 @@ function install(config, entries) {
     config.plugin = []
     changed = true
   } else if (!Array.isArray(config.plugin)) {
-    throw new CliError("目标配置的 plugin 字段不是数组，拒绝改写")
+    throw new Error("目标配置的 plugin 字段不是数组，拒绝改写")
   }
   if (!config.plugin.some((entry) => pluginSpec(entry) === entries.pluginPath)) {
     config.plugin.push(entries.pluginPath)
@@ -198,7 +187,7 @@ function install(config, entries) {
     config.mcp = {}
     changed = true
   } else if (!isRecord(config.mcp)) {
-    throw new CliError("目标配置的 mcp 字段不是对象，拒绝改写")
+    throw new Error("目标配置的 mcp 字段不是对象，拒绝改写")
   }
   if (JSON.stringify(config.mcp[MCP_KEY]) !== JSON.stringify(entries.mcp)) {
     config.mcp[MCP_KEY] = entries.mcp
@@ -248,14 +237,12 @@ function parseArgs(argv) {
   return args
 }
 
-const HELP = `AgentChat OpenCode 安装器
-用法：node adapters/opencode/install.mjs [--config <path>] [--dry-run] [--uninstall]
-
-  --config <path>   目标 OpenCode 配置（默认：$OPENCODE_CONFIG 或 ~/.config/opencode/opencode.jsonc|json）
-  --dry-run         只打印将写内容，不落盘
-  --uninstall       精确移除本适配器的 plugin 与 MCP 条目
-  --help            显示本帮助
-`
+const HELP = [
+  "AgentChat OpenCode 安装器",
+  "用法：node adapters/opencode/install.mjs [--config <path>] [--dry-run] [--uninstall]",
+  "  --config <path>   目标 OpenCode 配置（默认：$OPENCODE_CONFIG 或 ~/.config/opencode/opencode.jsonc|json）",
+  "  --dry-run 只打印不落盘；--uninstall 精确移除本适配器条目；--help 显示本帮助",
+].join("\n") + "\n"
 
 function main() {
   const args = parseArgs(process.argv.slice(2))
