@@ -15,7 +15,14 @@ import {
 import type { Db } from "../db"
 import { listAgents } from "../store/agents"
 import type { Approval } from "../store/approvals"
-import { getConversation, isParticipant, listConversations, SHOUT_KEY } from "../store/conversations"
+import {
+  getConversation,
+  isParticipant,
+  listConversations,
+  listParticipants,
+  SHOUT_KEY,
+  type Conversation,
+} from "../store/conversations"
 import { findCardMessage, history, latestInConversation, type Message } from "../store/messages"
 import { listNotifications, type NotificationScope } from "../store/notifications"
 import { rosterTree, type RosterNode } from "./agents"
@@ -47,10 +54,13 @@ export interface ConversationListResult {
 
 export interface GroupEntry {
   readonly id: string
+  readonly kind: Conversation["kind"]
   readonly name: string | null
   readonly key: string
   readonly createdBy: string
   readonly createdAt: number
+  /** 参与者 agent id（含 human 创建者）；Plan 3 T7 群资料页成员树数据源。 */
+  readonly members: readonly string[]
 }
 
 /** 某会话内 human 的未读数（未过 human 位点且非 human 自发的消息）。 */
@@ -106,10 +116,12 @@ export function groupList(db: Db): readonly GroupEntry[] {
     .filter((conversation) => conversation.kind === "group")
     .map((conversation) => ({
       id: conversation.id,
+      kind: conversation.kind,
       name: conversation.name ?? null,
       key: conversation.key,
       createdBy: conversation.createdBy,
       createdAt: conversation.createdAt,
+      members: listParticipants(db, conversation.id).map((participant) => participant.agentId),
     }))
 }
 

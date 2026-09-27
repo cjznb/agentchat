@@ -203,7 +203,12 @@ function RootItem({
   )
 }
 
-export function ConversationList() {
+export interface ConversationListProps {
+  /** 建群入口（Plan 3 T7）；缺省不渲染（组织树等复用场景）。 */
+  readonly onCreateGroup?: () => void
+}
+
+export function ConversationList({ onCreateGroup }: ConversationListProps = {}) {
   const { state, openAndRead } = useStore()
   const [expanded, setExpanded] = useState<readonly string[]>(() => loadExpandedRoots(safeStorage()))
 
@@ -227,19 +232,42 @@ export function ConversationList() {
 
   return (
     <ul className="conversation-list" data-testid="conversation-list">
-      {rows.map((row) =>
-        row.kind === "root" ? (
-          <RootItem
-            key={row.id}
-            row={row}
-            expanded={expanded.includes(row.id)}
-            activeId={state.openConversationId}
-            onToggle={toggle}
-            onOpen={open}
-          />
-        ) : (
-          <FlatItem key={row.id} row={row} activeId={state.openConversationId} onOpen={open} />
-        ),
+      {rows.length === 0 ? (
+        <li className="list-empty" data-testid="conversation-empty">
+          <span aria-hidden="true">—</span>
+          <p>还没有会话</p>
+          <small>从通讯录发起对话，或新建群聊</small>
+        </li>
+      ) : (
+        rows.map((row) =>
+          row.kind === "root" ? (
+            <RootItem
+              key={row.id}
+              row={row}
+              expanded={expanded.includes(row.id)}
+              activeId={state.openConversationId}
+              onToggle={toggle}
+              onOpen={open}
+            />
+          ) : (
+            <FlatItem key={row.id} row={row} activeId={state.openConversationId} onOpen={open} />
+          ),
+        )
+      )}
+      {onCreateGroup === undefined ? null : (
+        <li className="conversation-create">
+          <button
+            className="conversation-create-button"
+            data-testid="create-group"
+            onClick={onCreateGroup}
+            type="button"
+          >
+            <span className="conversation-create-glyph" aria-hidden="true">
+              ＋
+            </span>
+            新建群聊
+          </button>
+        </li>
       )}
     </ul>
   )

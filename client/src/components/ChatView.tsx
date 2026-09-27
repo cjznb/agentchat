@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import type { ChatMessage } from "../../../shared/contracts"
 import { buildRosterView, conversationTitle } from "../chat"
 import { useStore } from "../store"
+import { GroupInfo } from "./GroupInfo"
 import { MessageBubble } from "./MessageBubble"
 
 /** 分页页大小（与服务端 `DEFAULT_HISTORY_LIMIT` 对齐）。 */
@@ -33,6 +34,7 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
   const conversation = state.conversations.find((item) => item.id === conversationId)
   const title = conversationTitle(conversation, rosterView)
   const isGroup = conversation?.kind === "group"
+  const isGroupChat = isGroup && conversation?.key !== "shout"
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const loadingRef = useRef(false)
@@ -45,6 +47,7 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [highlightId, setHighlightId] = useState<string | null>(null)
+  const [showGroupInfo, setShowGroupInfo] = useState(false)
 
   const scrollToBottom = useCallback((): void => {
     const node = scrollRef.current
@@ -59,6 +62,7 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
     setDraft("")
     setError(null)
     setHighlightId(null)
+    setShowGroupInfo(false)
     scrollToBottom()
     return () => {
       if (highlightTimerRef.current !== undefined) {
@@ -159,9 +163,22 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
           <p>{isGroup ? "群聊" : "私聊"}</p>
           <h1 id="view-title">{title}</h1>
         </div>
-        <span className="chat-count" data-testid="message-count">
-          {messages.length}
-        </span>
+        <div className="chat-header-actions">
+          {isGroupChat ? (
+            <button
+              className="chat-group-info-toggle"
+              data-testid="group-info-toggle"
+              aria-pressed={showGroupInfo}
+              onClick={() => setShowGroupInfo((value) => !value)}
+              type="button"
+            >
+              群资料
+            </button>
+          ) : null}
+          <span className="chat-count" data-testid="message-count">
+            {messages.length}
+          </span>
+        </div>
       </header>
       <div className="chat-scroll" data-testid="chat-scroll" ref={scrollRef} onScroll={onScroll}>
         {loading ? (
@@ -213,6 +230,9 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
           </p>
         ) : null}
       </form>
+      {isGroupChat && showGroupInfo ? (
+        <GroupInfo conversationId={conversationId} onClose={() => setShowGroupInfo(false)} />
+      ) : null}
     </section>
   )
 }

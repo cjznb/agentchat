@@ -592,8 +592,16 @@ export const ensureDmResultSchema = z.object({
 })
 export type EnsureDmResult = z.infer<typeof ensureDmResultSchema>
 
-/** 群列表元素（`GET /api/groups`）。 */
-export const groupEntrySchema = conversationSchema
+/**
+ * 群列表元素（`GET /api/groups`）——会话资料 + 成员 id 列表。
+ *
+ * `members` 为 Plan 3 T7 追加：群资料页需树状展示成员（成员 → 所属根），
+ * 而会话核心资料（`conversationSchema`）本身不含成员表；服务端 `groupList`
+ * 已随会话返回参与者 id（与 MCP `group list` 出参同口径）。
+ */
+export const groupEntrySchema = conversationSchema.extend({
+  members: z.array(z.string()),
+})
 export type GroupEntry = z.infer<typeof groupEntrySchema>
 export const groupListSchema = z.object({ groups: z.array(groupEntrySchema) })
 

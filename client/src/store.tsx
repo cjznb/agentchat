@@ -22,8 +22,10 @@ import {
   loadReload,
   markConversationRead as postConversationRead,
   sendMessage as postMessage,
+  shout as postShout,
   type ReloadPlan,
 } from "./api"
+import type { ShoutResult } from "../../shared/contracts"
 import { initialState, planReload, reducer, type AppState } from "./reducers"
 import { browserSocketFactory, currentWsUrl, WsClient, type ConnectionStatus } from "./ws"
 
@@ -37,6 +39,8 @@ export interface StoreValue {
   openDm(nodeId: string): Promise<void>
   reload(plan: ReloadPlan): void
   sendMessage(conversationId: string, body: string): Promise<void>
+  /** 喊话频道发送（`POST /api/shout`，human 即时执行）；成功后消息入桶并重拉会话/回执。 */
+  shoutBroadcast(body: string): Promise<ShoutResult>
   /** 上翻分页：拉取 `beforeSeq` 之前一页并入会话；返回本页条数（< 页大小 = 无更多）。 */
   loadOlder(conversationId: string, beforeSeq: number): Promise<number>
   markConversationRead(conversationId: string): Promise<void>
@@ -112,6 +116,25 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
     [dispatch],
   )
 
+  const shoutBroadcast = useCallback(
+    async (body: string): Promise<ShoutResult> => {
+      const result = await postShout(body)
+      if ("message" in result) {
+        // 乐观入桶 + 重拉回执：投递汇总由最新己方消息的逐收件方回执派生。
+        dispatch({ type: "message", chat: result.message })
+        reload({
+          roster: false,
+          conversations: true,
+          notifications: false,
+          approvals: false,
+          messages: [result.message.conversationId],
+        })
+      }
+      return result
+    },
+    [dispatch, reload],
+  )
+
   const loadOlder = useCallback(
     async (conversationId: string, beforeSeq: number): Promise<number> => {
       const page = await loadMessages(conversationId, beforeSeq)
@@ -181,10 +204,21 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
       openDm,
       reload,
       sendMessage,
+      shoutBroadcast,
       loadOlder,
       markConversationRead,
     }),
-    [state, openConversation, openAndRead, openDm, reload, sendMessage, loadOlder, markConversationRead],
+    [
+      state,
+      openConversation,
+      openAndRead,
+      openDm,
+      reload,
+      sendMessage,
+      shoutBroadcast,
+      loadOlder,
+      markConversationRead,
+    ],
   )
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>
