@@ -5,7 +5,9 @@
  * - resync：游标超前进程计数（重启不匹配）/ 早于环形缓冲最老
  * Node 内建 `WebSocket` 客户端；每个用例独立临时 $AGENTCHAT_HOME，真实监听 `start({port:0})`。
  */
+import { randomBytes } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
+import { connect, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -17,7 +19,7 @@ import { openDb, type Db } from "../../server/db"
 import { start, type RunningServer } from "../../server/index"
 import { applyAgentState } from "../../server/routes/internal"
 import { insertAgent } from "../../server/store/agents"
-import { currentWsSeq, resetWsHub } from "../../server/ws"
+import { activeWsClients, currentWsSeq, MAX_CLIENT_FRAME_BYTES, resetWsHub } from "../../server/ws"
 
 let home = ""
 let db: Db
@@ -190,5 +192,101 @@ describe("/api/ws ?since 补推与重连", () => {
     const frames = await stream.next(1)
     expect(wsResyncSchema.safeParse(frames[0]).success).toBe(true)
     await closeWs(socket)
+  })
+})
+
+// ── 裸 socket 握手（Node WebSocket 客户端不会构造非法帧，故手写握手发原始帧） ──
+
+function readUntil(socket: Socket, delimiter: string, timeoutMs = 3000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let buffer = Buffer.alloc(0)
+    const onData = (chunk: Buffer): void => {
+      buffer = Buffer.concat([buffer, chunk])
+      const text = buffer.toString("latin1")
+      if (text.includes(delimiter)) {
+        clearTimeout(timer)
+        socket.off("data", onData)
+        resolve(text)
+      }
+    }
+    const timer = setTimeout(() => {
+      socket.off("data", onData)
+      reject(new Error("timeout waiting for handshake response"))
+    }, timeoutMs)
+    socket.on("data", onData)
+  })
+}
+
+async function rawUpgrade(url: string): Promise<Socket> {
+  const target = new URL(url)
+  const socket = connect(Number(target.port), target.hostname)
+  await new Promise<void>((resolve, reject) => {
+    socket.once("connect", () => resolve())
+    socket.once("error", reject)
+  })
+  socket.write(
+    `GET ${target.pathname} HTTP/1.1\r\nHost: ${target.host}\r\nUpgrade: websocket\r\n` +
+      `Connection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString("base64")}\r\n` +
+      `Sec-WebSocket-Version: 13\r\n\r\n`,
+  )
+  const response = await readUntil(socket, "\r\n\r\n")
+  expect(response).toContain("101")
+  return socket
+}
+
+/** 读取服务端首个 close 帧的 close code（服务端帧不带掩码，code 在 payload 前 2 字节）。 */
+function nextCloseCode(socket: Socket, timeoutMs = 3000): Promise<number> {
+  return new Promise((resolve, reject) => {
+    let buffer = Buffer.alloc(0)
+    const onData = (chunk: Buffer): void => {
+      buffer = Buffer.concat([buffer, chunk])
+      if (buffer.length >= 4) {
+        clearTimeout(timer)
+        socket.off("data", onData)
+        resolve(buffer.readUInt16BE(2))
+      }
+    }
+    const timer = setTimeout(() => {
+      socket.off("data", onData)
+      reject(new Error("timeout waiting for close frame"))
+    }, timeoutMs)
+    socket.on("data", onData)
+  })
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("waitFor timed out")
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
+describe("/api/ws 帧上限与掩码强制（DoS 加固）", () => {
+  it("closes with 1009 and recycles the client when a frame declares an oversized length", async () => {
+    const socket = await rawUpgrade(wsUrl(running.url))
+    await waitFor(() => activeWsClients() === 1)
+
+    // FIN+text, MASK, 64-bit length = 上限 + 1；仅发头部（不含 4 字节掩码键之外的载荷）。
+    const header = Buffer.alloc(14)
+    header[0] = 0x82
+    header[1] = 0x80 | 0x7f
+    header.writeBigUInt64BE(BigInt(MAX_CLIENT_FRAME_BYTES + 1), 2)
+    socket.write(header)
+
+    expect(await nextCloseCode(socket)).toBe(1009)
+    await waitFor(() => activeWsClients() === 0)
+    socket.destroy()
+  })
+
+  it("closes with 1002 and recycles the client when a client frame is not masked", async () => {
+    const socket = await rawUpgrade(wsUrl(running.url))
+    await waitFor(() => activeWsClients() === 1)
+
+    socket.write(Buffer.from([0x81, 0x01, 0x41])) // 未掩码文本帧：「A」
+
+    expect(await nextCloseCode(socket)).toBe(1002)
+    await waitFor(() => activeWsClients() === 0)
+    socket.destroy()
   })
 })

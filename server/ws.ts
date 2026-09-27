@@ -15,6 +15,14 @@ import { WS_RESYNC_TYPE, type WsEvent, type WsEventType } from "../shared/contra
 /** 环形缓冲容量（裁定 1：最近 1000 条事件）。 */
 export const WS_RING_CAPACITY = 1000
 
+/** 单客户端帧长上限（1 MiB）：超限即按 RFC6455 close 1009 断开，防未鉴权内存/CPU DoS。 */
+export const MAX_CLIENT_FRAME_BYTES = 1_048_576
+/** 客户端 socket 写缓冲上限（1 MiB）：广播时超限即断开慢客户端，防写缓冲无限累积。 */
+const MAX_SOCKET_BUFFER_BYTES = 1_048_576
+/** RFC6455 close code（协议错误 / 消息过大）。 */
+const CLOSE_PROTOCOL_ERROR = 1002
+const CLOSE_MESSAGE_TOO_BIG = 1009
+
 let capacity = WS_RING_CAPACITY
 let seq = 0
 const ring: WsEvent[] = []
@@ -53,21 +61,33 @@ function encodeFrame(opcode: number, payload: Buffer): Buffer {
   return Buffer.concat([header, payload])
 }
 
-/** 增量帧解析器：TCP 分片到达时保留残帧，逐条吐完整帧。 */
+/** 客户端帧协议违规（触发关闭）：`too_large`=帧长超限（1009）/ `unmasked`=未掩码（1002）。 */
+type FrameViolation = "too_large" | "unmasked"
+
+interface ReadOutcome {
+  readonly frames: readonly ParsedFrame[]
+  readonly violation?: FrameViolation
+}
+
+/**
+ * 增量帧解析器：TCP 分片到达时保留残帧，逐条吐完整帧。
+ * 越界（声明长度超 `MAX_CLIENT_FRAME_BYTES`）与未掩码立即返回违规，不再累积缓冲。
+ */
 class FrameReader {
   private buffer: Buffer = Buffer.alloc(0)
 
-  push(chunk: Buffer): readonly ParsedFrame[] {
+  push(chunk: Buffer): ReadOutcome {
     this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk])
     const frames: ParsedFrame[] = []
     for (;;) {
-      const frame = this.next()
-      if (frame === undefined) return frames
-      frames.push(frame)
+      const result = this.next()
+      if (result === undefined) return { frames }
+      if (result === "too_large" || result === "unmasked") return { frames, violation: result }
+      frames.push(result)
     }
   }
 
-  private next(): ParsedFrame | undefined {
+  private next(): ParsedFrame | FrameViolation | undefined {
     const buf = this.buffer
     if (buf.length < 2) return undefined
     const first = buf[0] ?? 0
@@ -81,21 +101,22 @@ class FrameReader {
       offset = 4
     } else if (length === 127) {
       if (buf.length < 10) return undefined
-      length = Number(buf.readBigUInt64BE(2))
+      const declared = buf.readBigUInt64BE(2)
+      // 超上限立即拒绝，不再等待/累积巨型载荷（防「声明巨大长度再滴字节」DoS）。
+      if (declared > BigInt(MAX_CLIENT_FRAME_BYTES)) return "too_large"
+      length = Number(declared)
       offset = 10
     }
-    let mask: Buffer | undefined
-    if (masked) {
-      if (buf.length < offset + 4) return undefined
-      mask = buf.subarray(offset, offset + 4)
-      offset += 4
-    }
+    if (length > MAX_CLIENT_FRAME_BYTES) return "too_large"
+    // RFC6455 §5.1：客户端 → 服务端帧必须掩码（否则协议错误 1002）。
+    if (!masked) return "unmasked"
+    if (buf.length < offset + 4) return undefined
+    const mask = buf.subarray(offset, offset + 4)
+    offset += 4
     if (buf.length < offset + length) return undefined
     const payload = Buffer.from(buf.subarray(offset, offset + length))
-    if (mask !== undefined) {
-      for (let i = 0; i < payload.length; i += 1) {
-        payload[i] = (payload[i] ?? 0) ^ (mask[i % 4] ?? 0)
-      }
+    for (let i = 0; i < payload.length; i += 1) {
+      payload[i] = (payload[i] ?? 0) ^ (mask[i % 4] ?? 0)
     }
     this.buffer = buf.subarray(offset + length)
     return { opcode: first & 0x0f, payload }
@@ -155,7 +176,34 @@ export function framesSince(since: number | undefined): readonly unknown[] {
   return ring.filter((event) => event.seq > since)
 }
 
+function encodeCloseFrame(code: number): Buffer {
+  const payload = Buffer.alloc(2)
+  payload.writeUInt16BE(code, 0)
+  return encodeFrame(OPCODE.close, payload)
+}
+
+/** 关闭并清理：先移出广播集合，再尽力下发 close 帧（失败则直接销毁）。 */
+function closeClient(client: Client, code: number): void {
+  clients.delete(client)
+  try {
+    client.socket.end(encodeCloseFrame(code))
+  } catch {
+    client.socket.destroy()
+  }
+}
+
+/** 当前在线客户端数（测试：连接清理/回收断言）。 */
+export function activeWsClients(): number {
+  return clients.size
+}
+
 function sendFrame(client: Client, frame: unknown): void {
+  // 背压防护（轻量）：慢客户端写缓冲超限 → 立即断开，防广播累积。
+  if (client.socket.writableLength > MAX_SOCKET_BUFFER_BYTES) {
+    clients.delete(client)
+    client.socket.destroy()
+    return
+  }
   try {
     client.socket.write(encodeFrame(OPCODE.text, Buffer.from(JSON.stringify(frame), "utf8")))
   } catch {
@@ -166,8 +214,7 @@ function sendFrame(client: Client, frame: unknown): void {
 function handleClientFrame(client: Client, frame: ParsedFrame): void {
   switch (frame.opcode) {
     case OPCODE.close:
-      client.socket.end(encodeFrame(OPCODE.close, Buffer.alloc(0)))
-      clients.delete(client)
+      closeClient(client, 1000)
       return
     case OPCODE.ping:
       client.socket.write(encodeFrame(OPCODE.pong, frame.payload))
@@ -178,17 +225,21 @@ function handleClientFrame(client: Client, frame: ParsedFrame): void {
   }
 }
 
+function feed(client: Client, chunk: Buffer): void {
+  if (!clients.has(client)) return // 已因违规/背压关闭：忽略续到的字节
+  const outcome = client.reader.push(chunk)
+  for (const frame of outcome.frames) handleClientFrame(client, frame)
+  if (outcome.violation === "too_large") closeClient(client, CLOSE_MESSAGE_TOO_BIG)
+  else if (outcome.violation === "unmasked") closeClient(client, CLOSE_PROTOCOL_ERROR)
+}
+
 function handleSocket(socket: Duplex, head: Buffer, since: number | undefined): void {
   const client: Client = { socket, reader: new FrameReader() }
   clients.add(client)
   socket.on("close", () => clients.delete(client))
   socket.on("error", () => clients.delete(client))
-  socket.on("data", (chunk: Buffer) => {
-    for (const frame of client.reader.push(chunk)) handleClientFrame(client, frame)
-  })
-  if (head.length > 0) {
-    for (const frame of client.reader.push(head)) handleClientFrame(client, frame)
-  }
+  socket.on("data", (chunk: Buffer) => feed(client, chunk))
+  if (head.length > 0) feed(client, head)
   for (const frame of framesSince(since)) sendFrame(client, frame)
 }
 
