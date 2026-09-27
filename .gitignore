@@ -10,6 +10,8 @@ dist/
 .superpowers/
 .omo/
 .codegraph/
+# 面向 AI 代理的仓库约定（本地保留，不入库）
+AGENTS.md
 # 适配器与应用日志
 *.log
 logs/
