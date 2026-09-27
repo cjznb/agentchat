@@ -1,0 +1,19 @@
+{
+  "name": "@agentchat/opencode-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AgentChat OpenCode 插件（进程外适配器）：注册节点、上报状态、空闲取件注入",
+  "main": "plugin.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ../../tsconfig.json"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.18"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    }
+  }
+}

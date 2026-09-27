@@ -23,6 +23,6 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["server", "shared", "tests", "vitest.config.ts"],
+  "include": ["server", "shared", "tests", "adapters", "vitest.config.ts"],
   "exclude": ["node_modules", "dist"]
 }
