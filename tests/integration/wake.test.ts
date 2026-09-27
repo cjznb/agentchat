@@ -25,6 +25,7 @@ import { openDb, type Db } from "../../server/db"
 import { registerRoot, retire } from "../../server/core/agents"
 import { DISPATCHER_INTERVAL_MS, Dispatcher } from "../../server/core/dispatcher"
 import { ensureHuman, inbox, receiptState, sendMessage, shout } from "../../server/core/messaging"
+import type { Gated } from "../../server/core/permissions"
 import { createApp } from "../../server/index"
 import { applyAgentState, ensureHubToken } from "../../server/routes/internal"
 import { getAgent, insertAgent, type Agent } from "../../server/store/agents"
@@ -68,6 +69,12 @@ function makeAgent(name: string, parentId?: string): Agent {
     vendor: "opencode",
     ...(parentId === undefined ? {} : { parentId }),
   })
+}
+
+/** 从闸门判别联合中取出即时执行结果（`"approved" in result` 正向判别）。 */
+function approved<T>(result: Gated<T>): T {
+  if (!("approved" in result)) throw new Error("expected an approved outcome")
+  return result.approved
 }
 
 function expectJob(messageSeq: number, agentId: string): WakeJob {
@@ -355,7 +362,7 @@ describe("wake job eligibility", () => {
     const dm = sendMessage(db, { from: sender.id, to: board.id, body: "留言" }).message
     expect(getWakeJob(db, dm.seq, board.id)).toBeUndefined()
 
-    const shouted = shout(db, sender.id, "全员注意").message
+    const shouted = approved(shout(db, sender.id, "全员注意")).message
     expect(getWakeJob(db, shouted.seq, peer.id)).toBeDefined() // runtime+online+适配器 → 有 job
     expect(getWakeJob(db, shouted.seq, board.id)).toBeUndefined()
     expect(getWakeJob(db, shouted.seq, human.id)).toBeUndefined()

@@ -83,6 +83,11 @@ function executeApproved(db: Db, approval: Approval): void {
       })
       return
     }
+    default: {
+      // 穷尽保护：ApprovalAction 增变体而漏处理时显式失败，而非静默不执行。
+      const unreachable: never = approval.action
+      throw new Error(`unhandled approval action: ${String(unreachable)}`)
+    }
   }
 }
 
@@ -154,31 +159,37 @@ export function uiRoutes(db?: Db): Hono {
       const database = resolveDb(db)
       const parsed = groupBodySchema.safeParse(await c.req.json().catch(() => undefined))
       if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
-      const group = gatedCreateGroup(database, {
+      const outcome = gatedCreateGroup(database, {
         name: parsed.data.name,
         createdBy: ensureHuman(database).id,
         ...(parsed.data.memberIds === undefined ? {} : { memberIds: parsed.data.memberIds }),
       })
-      return c.json({ ok: true, group })
+      return "approved" in outcome
+        ? c.json({ ok: true, group: outcome.approved })
+        : c.json({ ok: true, approval: outcome.approval })
     })
     .post("/api/groups/:id/members", async (c) => {
       const database = resolveDb(db)
       const parsed = memberBodySchema.safeParse(await c.req.json().catch(() => undefined))
       if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
-      gatedAddParticipant(database, {
+      const outcome = gatedAddParticipant(database, {
         conversationId: c.req.param("id"),
         agentId: parsed.data.agentId,
         invitedBy: ensureHuman(database).id,
       })
-      return c.json({ ok: true })
+      return "approved" in outcome
+        ? c.json({ ok: true })
+        : c.json({ ok: true, approval: outcome.approval })
     })
     // Task 9：全员喊话（human → gate 即时执行）。
     .post("/api/shout", async (c) => {
       const database = resolveDb(db)
       const parsed = sendBodySchema.safeParse(await c.req.json().catch(() => undefined))
       if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
-      const result = shout(database, ensureHuman(database).id, parsed.data.body)
-      return c.json({ ok: true, ...result })
+      const outcome = shout(database, ensureHuman(database).id, parsed.data.body)
+      return "approved" in outcome
+        ? c.json({ ok: true, ...outcome.approved })
+        : c.json({ ok: true, approval: outcome.approval })
     })
     // Task 9：资料卡（roster 节点 + 参与会话入口）。
     .get("/api/agents/:id", (c) => {

@@ -275,3 +275,109 @@ export const MCP_TOOL_INPUTS = {
 } as const satisfies Record<McpToolName, z.ZodType>
 
 export type McpToolInput<N extends McpToolName> = z.infer<(typeof MCP_TOOL_INPUTS)[N]>
+
+// ── MCP 十工具 output schema（spec §13.5：契约防漂移；金样例见 tests/integration/mcp.test.ts） ──
+// 处理器侧不强制二次校验（保持轻）：本组 schema 供契约测试校验金样例出参形状，
+// 字段为「实际出参的子集」（zod object 默认 strip 未列字段），避免与内部域对象逐字耦合。
+
+const mcpAgentOutput = z.object({
+  id: z.string(),
+  name: z.string(),
+  kind: agentKindSchema,
+  vendor: z.string(),
+  model: z.string(),
+  status: agentStatusSchema,
+})
+
+const mcpMessageOutput = z.object({
+  seq: z.number().int().nonnegative(),
+  id: z.string(),
+  conversationId: z.string(),
+  fromAgentId: z.string(),
+  body: z.string(),
+  kind: z.enum(["text", "system"]),
+})
+
+const mcpReceiptOutput = z.object({ agentId: z.string(), stage: receiptStageSchema })
+
+const mcpConversationOutput = z.object({
+  id: z.string(),
+  kind: z.enum(["dm", "group"]),
+  key: z.string(),
+  name: z.string().nullable().optional(),
+  createdBy: z.string(),
+  createdAt: z.number().int().nonnegative(),
+})
+
+/** 审批单出参（内部 `Approval.decidedAt` 为 `undefined`，JSON 中缺省 → optional 而非 nullable）。 */
+const mcpApprovalOutput = z.object({
+  id: z.string(),
+  requesterAgentId: z.string(),
+  action: approvalActionSchema,
+  payload: z.record(z.string(), z.unknown()),
+  status: approvalStatusSchema,
+  createdAt: z.number().int().nonnegative(),
+  decidedAt: z.number().int().nonnegative().optional(),
+})
+
+const mcpSendOutput = z.object({
+  message: mcpMessageOutput,
+  receipts: z.array(mcpReceiptOutput),
+  readReceipts: z.array(mcpReceiptOutput),
+  reply: z
+    .object({
+      timedOut: z.boolean(),
+      messages: z.array(mcpMessageOutput),
+      receipts: z.array(mcpReceiptOutput),
+    })
+    .optional(),
+})
+
+/** `shout` 出参：即时投递（同 `send`）| 审批语义（可带 `timedOut` 表示闸后等待超时）。 */
+const mcpShoutOutput = z.union([
+  mcpSendOutput,
+  z.object({ approval: mcpApprovalOutput, timedOut: z.literal(true).optional() }),
+])
+
+/** `group` 出参：create → 群资料；add → ok / 审批；list → 群数组（snake_case 线格式）。 */
+const mcpGroupOutput = z.union([
+  z.object({ group: mcpConversationOutput }),
+  z.object({
+    groups: z.array(
+      z.object({
+        id: z.string(),
+        name: z.string().nullable(),
+        created_by: z.string(),
+        members: z.array(z.string()),
+      }),
+    ),
+  }),
+  z.object({ ok: z.literal(true) }),
+  z.object({ approval: mcpApprovalOutput }),
+])
+
+/** 十工具出参（键恰为 MCP_TOOLS；spec §9 返回列的 zod 化）。 */
+export const MCP_TOOL_OUTPUTS = {
+  register: z.object({
+    agent: mcpAgentOutput,
+    unread: z.number().int().nonnegative(),
+    join_token: z.string().optional(),
+  }),
+  send: mcpSendOutput,
+  inbox: z.object({
+    messages: z.array(mcpMessageOutput),
+    unread: z.number().int().nonnegative(),
+    timedOut: z.boolean().optional(),
+  }),
+  ack: z.object({ confirmed: z.number().int().nonnegative() }),
+  roster: rosterTreeSchema,
+  conversation: z.object({ messages: z.array(mcpMessageOutput) }),
+  group: mcpGroupOutput,
+  shout: mcpShoutOutput,
+  status: z.object({ id: z.string(), status_text: z.string().nullable() }),
+  message_status: z.array(
+    z.object({ id: z.string(), receipts: z.array(mcpReceiptOutput) }),
+  ),
+} as const satisfies Record<McpToolName, z.ZodType>
+
+export type McpToolOutput<N extends McpToolName> = z.infer<(typeof MCP_TOOL_OUTPUTS)[N]>

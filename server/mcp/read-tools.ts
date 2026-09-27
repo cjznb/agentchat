@@ -4,11 +4,16 @@
  */
 import type { McpToolInput } from "../../shared/contracts"
 import { rosterTree, type RosterNode } from "../core/agents"
-import { addParticipant, createGroup, history, shout } from "../core/messaging"
+import {
+  addParticipant,
+  createGroup,
+  history,
+  shout,
+  type ShoutApprovalWaitResult,
+} from "../core/messaging"
 import type { ApprovalRequested } from "../core/permissions"
 import { listConversations, listParticipants, SHOUT_KEY } from "../store/conversations"
 import {
-  isApproval,
   requireIdentity,
   sendView,
   type SendResultView,
@@ -47,7 +52,7 @@ export function runGroup(ctx: ToolContext, input: McpToolInput<"group">): unknow
         createdBy: actor,
         ...(input.member_ids === undefined ? {} : { memberIds: input.member_ids }),
       })
-      return isApproval(result) ? { approval: result.approval } : { group: result }
+      return "approved" in result ? { group: result.approved } : { approval: result.approval }
     }
     case "add": {
       const result = addParticipant(ctx.db, {
@@ -55,7 +60,7 @@ export function runGroup(ctx: ToolContext, input: McpToolInput<"group">): unknow
         agentId: input.member,
         invitedBy: actor,
       })
-      return result === undefined ? { ok: true } : { approval: result.approval }
+      return "approved" in result ? { ok: true } : { approval: result.approval }
     }
     case "list": {
       const groups = listConversations(ctx.db)
@@ -71,13 +76,29 @@ export function runGroup(ctx: ToolContext, input: McpToolInput<"group">): unknow
   }
 }
 
+/**
+ * `shout` 结果渲染（裁决 D2 反向判别）：`{approved}` 即时投递 / `{approval}` 审批语义
+ * （可带 `timedOut` 表示闸后等待超时）。
+ */
+function renderShout(
+  resolved:
+    | SendResultView
+    | { readonly approved: SendResultView }
+    | ApprovalRequested
+    | ShoutApprovalWaitResult,
+): Record<string, unknown> {
+  if ("approved" in resolved) return sendView(resolved.approved)
+  if ("message" in resolved) return sendView(resolved)
+  return "timedOut" in resolved
+    ? { approval: resolved.approval, timedOut: true }
+    : { approval: resolved.approval }
+}
+
 export function runShout(ctx: ToolContext, input: McpToolInput<"shout">): Promise<unknown> | unknown {
   const from = requireIdentity(ctx)
   const result =
     input.wait === undefined
       ? shout(ctx.db, from, input.body)
       : shout(ctx.db, from, input.body, { until: input.wait.until, timeoutMs: input.wait.timeoutMs })
-  const render = (resolved: SendResultView | ApprovalRequested): Record<string, unknown> =>
-    isApproval(resolved) ? { approval: resolved.approval } : sendView(resolved)
-  return result instanceof Promise ? result.then(render) : render(result)
+  return result instanceof Promise ? result.then(renderShout) : renderShout(result)
 }

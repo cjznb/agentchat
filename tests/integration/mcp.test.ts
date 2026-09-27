@@ -14,29 +14,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { z } from "zod"
-import { MCP_TOOLS, type McpToolName } from "../../shared/contracts"
+import { MCP_TOOLS, MCP_TOOL_OUTPUTS, type McpToolName } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
 import { openDb, type Db } from "../../server/db"
 import { inbox, sendMessage } from "../../server/core/messaging"
 import { start, type RunningServer } from "../../server/index"
 import { applyAgentState, ensureHubToken } from "../../server/routes/internal"
 import { getAgent, insertAgent, type Agent } from "../../server/store/agents"
-
-const agentSchema = z.object({ id: z.string(), name: z.string() })
-const receiptSchema = z.object({ agentId: z.string(), stage: z.string() })
-const messageSchema = z.object({ body: z.string() })
-const registerOutput = z.object({
-  agent: agentSchema,
-  unread: z.number(),
-  join_token: z.string().optional(),
-})
-const sendOutput = z.object({
-  message: messageSchema,
-  receipts: z.array(receiptSchema),
-  readReceipts: z.array(receiptSchema),
-  reply: z.object({ timedOut: z.boolean(), messages: z.array(messageSchema) }).optional(),
-})
 
 /** 十工具金样例（运行时注入真实 peer id；键集合即「接线错误」检测基准）。 */
 function goldenInputs(peerId: string): Record<McpToolName, Record<string, unknown>> {
@@ -198,10 +182,15 @@ describe("tools/list 与十工具金样例端到端（DoD ①，Important #1）"
       // 真正的联合校验由下面 `op:"create"` 正向 + 非法 `op` 反向调用端到端证明。
       expect(Object.keys(byName.get("group")?.inputSchema.properties ?? {})).toEqual([])
 
-      // 逐一用金样例真调：任一 schema 接线错误或工具未执行都会在此暴露。
+      // 逐一用金样例真调：任一 schema 接线错误或工具未执行都会在此暴露；
+      // 出参一律过 `MCP_TOOL_OUTPUTS`（spec §13.5：出参契约集中在 shared/contracts）。
       for (const name of MCP_TOOLS) {
         const result = await callTool(client, name, golden[name])
         if (toolFailed(result)) throw new Error(`${name} rejected golden input: ${textOf(result)}`)
+        const parsed = MCP_TOOL_OUTPUTS[name].safeParse(JSON.parse(textOf(result)))
+        if (!parsed.success) {
+          throw new Error(`${name} output violates the contract: ${parsed.error.message}`)
+        }
       }
     } finally {
       await client.close()
@@ -237,7 +226,7 @@ describe("send{wait} 端到端（DoD ②）", () => {
 
       const result = await pending
       expect(toolFailed(result)).toBe(false)
-      const parsed = sendOutput.parse(JSON.parse(textOf(result)))
+      const parsed = MCP_TOOL_OUTPUTS.send.parse(JSON.parse(textOf(result)))
       expect(parsed.reply?.timedOut).toBe(false)
       expect(parsed.reply?.messages.map((m) => m.body)).toEqual(["pong"])
       expect(parsed.readReceipts).toEqual([])
@@ -315,7 +304,7 @@ describe("register 首次与认领（DoD ④）", () => {
   it("registers a root, returns a join_token, then claims the same id back to online", async () => {
     const client = await connect()
     try {
-      const first = registerOutput.parse(
+      const first = MCP_TOOL_OUTPUTS.register.parse(
         JSON.parse(
           textOf(
             await callTool(client, "register", { name: "mcp-first-root", vendor: "opencode" }),
@@ -326,7 +315,7 @@ describe("register 首次与认领（DoD ④）", () => {
       expect(applyAgentState(db, { agentId: first.agent.id, state: "offline" })).toEqual({ ok: true })
       expect(getAgent(db, first.agent.id)?.status).toBe("offline")
 
-      const second = registerOutput.parse(
+      const second = MCP_TOOL_OUTPUTS.register.parse(
         JSON.parse(
           textOf(
             await callTool(client, "register", {

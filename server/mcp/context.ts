@@ -4,7 +4,6 @@
  */
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 import type { SendMessageResult } from "../core/messaging"
-import type { ApprovalRequested } from "../core/permissions"
 import type { Db } from "../db"
 
 /** MCP 会话上下文：共享库句柄 + join_token 落盘目录 + 可选已识别身份（`x-agent-id`，register 起可写）。 */
@@ -39,10 +38,6 @@ export function errorResult(error: unknown): CallToolResult {
   const code = errorCode(err)
   const suffix = code === undefined ? "" : ` [${code}]`
   return { content: [{ type: "text", text: `${err.name}: ${err.message}${suffix}` }], isError: true }
-}
-
-export function isApproval(value: object): value is ApprovalRequested {
-  return "approval" in value
 }
 
 /** 除 `register` 外全部工具要求已识别身份（`x-agent-id`）。 */

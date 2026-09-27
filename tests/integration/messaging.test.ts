@@ -35,6 +35,7 @@ import {
   listAgents,
   type Agent,
 } from "../../server/store/agents"
+import type { Gated } from "../../server/core/permissions"
 import {
   createDm,
   getConversationByKey,
@@ -57,6 +58,12 @@ function makeAgent(name: string, parentId?: string): Agent {
     model: "test-model",
     ...(parentId === undefined ? {} : { parentId }),
   })
+}
+
+/** 从闸门判别联合中取出即时执行结果（`"approved" in result` 正向判别）。 */
+function approved<T>(result: Gated<T>): T {
+  if (!("approved" in result)) throw new Error("expected an approved outcome")
+  return result.approved
 }
 
 /** wake_jobs 行手工落库（Task 6 才提供 store）——证明回执派生透传。 */
@@ -129,7 +136,7 @@ describe("group create/add", () => {
     const a = makeAgent("grp-a")
     const b = makeAgent("grp-b")
     const c = makeAgent("grp-c")
-    const group = createGroup(db, { name: "攻坚组", createdBy: a.id, memberIds: [b.id] })
+    const group = approved(createGroup(db, { name: "攻坚组", createdBy: a.id, memberIds: [b.id] }))
     addParticipant(db, { conversationId: group.id, agentId: c.id, invitedBy: a.id })
 
     const fromB = sendMessage(db, { from: b.id, to: group.id, body: "进度 50%" })
@@ -149,7 +156,7 @@ describe("group create/add", () => {
     const a = makeAgent("gate-a")
     const b = makeAgent("gate-b")
     const outsider = makeAgent("gate-outsider")
-    const group = createGroup(db, { name: "内群", createdBy: a.id, memberIds: [b.id] })
+    const group = approved(createGroup(db, { name: "内群", createdBy: a.id, memberIds: [b.id] }))
     const human = ensureHuman(db)
 
     expect(() => sendMessage(db, { from: outsider.id, to: group.id, body: "蹭一下" })).toThrow(
@@ -168,7 +175,7 @@ describe("shout", () => {
     const board = insertAgent(db, { name: "shout-board", kind: "logical", status: "offline", vendor: "—" })
     const human = ensureHuman(db)
 
-    const result = shout(db, human.id, "全员注意")
+    const result = approved(shout(db, human.id, "全员注意"))
 
     // 喊话 = 系统广播会话：key=shout、kind=group、无 participants 行
     const conversation = getConversationByKey(db, "shout")
@@ -194,7 +201,7 @@ describe("shout", () => {
     expect(result.receipts.every((r) => r.stage === "queued")).toBe(true)
 
     // 幂等：再次喊话复用同一广播会话
-    const again = shout(db, human.id, "再喊一次")
+    const again = approved(shout(db, human.id, "再喊一次"))
     expect(again.message.conversationId).toBe(result.message.conversationId)
   })
 })
@@ -227,7 +234,7 @@ describe("ack and receipts", () => {
     const a = makeAgent("rc-a")
     const b = makeAgent("rc-b")
     const c = makeAgent("rc-c")
-    const group = createGroup(db, { name: "回执群", createdBy: a.id, memberIds: [b.id, c.id] })
+    const group = approved(createGroup(db, { name: "回执群", createdBy: a.id, memberIds: [b.id, c.id] }))
 
     const { message, receipts } = sendMessage(db, { from: a.id, to: group.id, body: "开工" })
     expect(receipts).toHaveLength(2)
@@ -297,13 +304,34 @@ describe("unreadFor", () => {
       expect(unreadFor(db, node.id)).toBe(1)
     }
   })
+
+  it("counts a shared group message once across a root's subtree (dedup by message seq)", () => {
+    const root = makeAgent("dedup-root")
+    const child = makeAgent("dedup-child", root.id)
+    const sender = makeAgent("dedup-sender")
+    const group = approved(
+      createGroup(db, {
+        name: "共享群",
+        createdBy: sender.id,
+        memberIds: [root.id, child.id],
+      }),
+    )
+    // 同一会话内、非自发的一条消息 → root 与 child 各自直达未读该 seq
+    sendMessage(db, { from: sender.id, to: group.id, body: "同一条" })
+
+    expect(unreadFor(db, child.id)).toBe(1)
+    // 裁决：子树内按 message seq 去重 —— 同一消息被父子同时未读只计一次
+    expect(unreadFor(db, root.id)).toBe(1)
+    // 自发消息排除不变
+    expect(unreadFor(db, sender.id)).toBe(0)
+  })
 })
 
 describe("human super-observer (read side, 复审 Important #1)", () => {
   it("receives and reads group messages without any participants row", () => {
     const a = makeAgent("so-a")
     const b = makeAgent("so-b")
-    const group = createGroup(db, { name: "观察组", createdBy: a.id, memberIds: [b.id] })
+    const group = approved(createGroup(db, { name: "观察组", createdBy: a.id, memberIds: [b.id] }))
     const human = ensureHuman(db)
     expect(isParticipant(db, group.id, human.id)).toBe(false)
 

@@ -104,10 +104,10 @@ export interface ApprovalRequested {
 export type GateOutcome<T> = { readonly approved: T } | ApprovalRequested
 
 /**
- * 受限入口的对外返回兼容类型：即时执行的原结果 + 可能的 `approval`
- * （运行时以 `"approval" in result` 判别；见 task-7-report 关于既有 99 测试类型兼容的说明）。
+ * 受限入口的对外返回（裁决 D2 收敛）：与 `GateOutcome<T>` 同构的判别联合 ——
+ * `{approved}` 即时执行 / `{approval}` 待审批。调用方以 `"approved" in result` 判别。
  */
-export type Gated<T> = T & Partial<ApprovalRequested>
+export type Gated<T> = { readonly approved: T } | ApprovalRequested
 
 /** 已决议的审批单（`decide`/`sweepExpired` 的返回，供 `postDecision` 按状态发回执）。 */
 export type DecidedApproval = Approval & {
@@ -163,8 +163,11 @@ export function parseApprovalPayload(
   return result.data
 }
 
-/** 审批通道 = 发起方↔用户 DM（决议 3：不存在则建）。 */
-function approvalChannel(db: Db, requesterId: string): Conversation {
+/**
+ * 审批通道 = 发起方↔用户 DM（决议 3：不存在则建）。导出供 messaging 定位 `shout.wait`
+ * 的闸后等待会话（审批卡与结果回执同落此 DM）。
+ */
+export function approvalChannel(db: Db, requesterId: string): Conversation {
   return createDm(db, requesterId, ensureHuman(db).id)
 }
 

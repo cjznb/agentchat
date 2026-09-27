@@ -229,6 +229,11 @@ export class Dispatcher {
     void this.tick()
   }
 
+  /** 循环是否在跑（`start()` 已调用且未 `stop()`）；供生产入口与测试观察。 */
+  get isRunning(): boolean {
+    return this.timer !== undefined
+  }
+
   stop(): void {
     if (this.timer !== undefined) clearInterval(this.timer)
     this.timer = undefined

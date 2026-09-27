@@ -34,6 +34,7 @@ import {
   Forbidden,
   InvalidApprovalPayloadError,
   sweepExpired,
+  type Gated,
 } from "../../server/core/permissions"
 import { createApp } from "../../server/index"
 import { getApproval, listApprovals, type Approval } from "../../server/store/approvals"
@@ -64,12 +65,18 @@ function makeRoot(name: string): Agent {
   return registerRoot(db, home, { name, vendor: "opencode" }).agent
 }
 
-/** 从闸门兼容返回（`Gated<T>` / `ApprovalRequested | void`）中取出 pending 审批单。 */
-function approvalOf(result: { readonly approval?: Approval } | void): Approval {
-  if (result === undefined || result.approval === undefined) {
+/** 从闸门判别联合（`Gated<T>`）中取出 pending 审批单。 */
+function approvalOf(result: Gated<unknown> | void): Approval {
+  if (result === undefined || !("approval" in result)) {
     throw new Error("expected a pending approval")
   }
   return result.approval
+}
+
+/** 从闸门判别联合中取出即时执行结果（`"approved" in result` 正向判别）。 */
+function approved<T>(result: Gated<T>): T {
+  if (!("approved" in result)) throw new Error("expected an approved outcome")
+  return result.approved
 }
 
 async function post(path: string, body: unknown): Promise<Response> {
@@ -78,6 +85,10 @@ async function post(path: string, body: unknown): Promise<Response> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   })
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 describe("gate: 根 agent 发起受限操作 → pending 审批单 + 审批卡", () => {
@@ -118,7 +129,7 @@ describe("gate: 根 agent 发起受限操作 → pending 审批单 + 审批卡",
     expect(approvalOf(created)).toMatchObject({ action: "group_create", status: "pending" })
     expect(listConversations(db).filter((c) => c.kind === "group")).toHaveLength(0)
 
-    const group = createGroup(db, { name: "人的基群", createdBy: human.id })
+    const group = approved(createGroup(db, { name: "人的基群", createdBy: human.id }))
     const added = addParticipant(db, {
       conversationId: group.id,
       agentId: peer.id,
@@ -190,6 +201,107 @@ describe("reject: 回执且不执行", () => {
   })
 })
 
+describe("shout{wait} 闸后阻塞（spec §9：I2 修复）", () => {
+  it("blocks a gated root shout until the route approves, then returns the decided approval", async () => {
+    const root = makeRoot("waitshout-ok-root")
+    ensureHuman(db)
+
+    // 带 wait 且被闸：返回挂起的 Promise（审批卡已同步落库）
+    const pending = shout(db, root.id, "批准后才发", { until: "message", timeoutMs: 3000 })
+    const approval = listApprovals(db, "pending")[0]
+    if (approval === undefined) throw new Error("expected a pending approval")
+
+    // 未决时等待者仍挂起（不 resolve）
+    const raced = await Promise.race([
+      pending.then(() => "resolved" as const),
+      delay(50).then(() => "pending" as const),
+    ])
+    expect(raced).toBe("pending")
+
+    const res = await post(`/api/approvals/${approval.id}`, { decision: "approve" })
+    expect(res.status).toBe(200)
+
+    const outcome = await pending
+    if (!("approval" in outcome)) throw new Error("expected the approval-wait result")
+    expect(outcome.approval.status).toBe("approved")
+    expect(outcome.timedOut).toBeUndefined()
+    // 解锁后喊话实际发出
+    expect(getConversationByKey(db, "shout")).toBeDefined()
+  })
+
+  it("returns the decided approval with status rejected when the route rejects", async () => {
+    const root = makeRoot("waitshout-rej-root")
+    ensureHuman(db)
+
+    const pending = shout(db, root.id, "别发", { until: "message", timeoutMs: 3000 })
+    const approval = listApprovals(db, "pending")[0]
+    if (approval === undefined) throw new Error("expected a pending approval")
+
+    const res = await post(`/api/approvals/${approval.id}`, { decision: "reject" })
+    expect(res.status).toBe(200)
+
+    const outcome = await pending
+    if (!("approval" in outcome)) throw new Error("expected the approval-wait result")
+    expect(outcome.approval.status).toBe("rejected")
+    expect(getConversationByKey(db, "shout")).toBeUndefined()
+  })
+
+  it("times out to pending + timedOut when nobody decides within the wait budget", async () => {
+    const root = makeRoot("waitshout-to-root")
+    ensureHuman(db)
+
+    const pending = shout(db, root.id, "没人理", { until: "message", timeoutMs: 120 })
+    const approval = listApprovals(db, "pending")[0]
+    if (approval === undefined) throw new Error("expected a pending approval")
+
+    const outcome = await pending
+    if (!("approval" in outcome)) throw new Error("expected the approval-wait result")
+    expect(outcome.approval.status).toBe("pending")
+    expect(outcome.timedOut).toBe(true)
+    expect(getConversationByKey(db, "shout")).toBeUndefined()
+  })
+})
+
+describe("group 批准执行（裁决：group 批准分支覆盖）", () => {
+  it("creates the group and delivers the approved receipt when the route approves group_create", async () => {
+    const root = makeRoot("gate-gc-root")
+    ensureHuman(db)
+    const approval = approvalOf(createGroup(db, { name: "批准的群", createdBy: root.id }))
+    expect(listConversations(db).filter((c) => c.kind === "group")).toHaveLength(0)
+
+    const res = await post(`/api/approvals/${approval.id}`, { decision: "approve" })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ ok: true, approval: { status: "approved" } })
+
+    const groups = listConversations(db).filter((c) => c.kind === "group")
+    expect(groups).toHaveLength(1)
+    expect(groups[0]?.name).toBe("批准的群")
+    const receipts = inbox(db, root.id).filter(
+      (m) => m.meta?.["approvalId"] === approval.id && m.meta?.["result"] === "approved",
+    )
+    expect(receipts).toHaveLength(1)
+  })
+
+  it("adds the member and delivers the approved receipt when the route approves group_add", async () => {
+    const root = makeRoot("gate-ga-root")
+    const peer = makeRoot("gate-ga-peer")
+    const human = ensureHuman(db)
+    const group = approved(createGroup(db, { name: "被拉人的群", createdBy: human.id }))
+    const approval = approvalOf(
+      addParticipant(db, { conversationId: group.id, agentId: peer.id, invitedBy: root.id }),
+    )
+    expect(isParticipant(db, group.id, peer.id)).toBe(false)
+
+    const res = await post(`/api/approvals/${approval.id}`, { decision: "approve" })
+    expect(res.status).toBe(200)
+    expect(isParticipant(db, group.id, peer.id)).toBe(true)
+    const receipts = inbox(db, root.id).filter(
+      (m) => m.meta?.["approvalId"] === approval.id && m.meta?.["result"] === "approved",
+    )
+    expect(receipts).toHaveLength(1)
+  })
+})
+
 describe("权限矩阵（spec §8）", () => {
   it("throws Forbidden for child agents and logical nodes without creating any approval", () => {
     const root = makeRoot("gate-mx-root")
@@ -200,7 +312,7 @@ describe("权限矩阵（spec §8）", () => {
     })
     const board = registerLogical(db, { name: "gate-mx-board", parentId: root.id })
     const human = ensureHuman(db)
-    const group = createGroup(db, { name: "基群", createdBy: human.id })
+    const group = approved(createGroup(db, { name: "基群", createdBy: human.id }))
 
     expect(() => shout(db, child.id, "我也要喊")).toThrow(Forbidden)
     expect(() => createGroup(db, { name: "子的群", createdBy: child.id })).toThrow(Forbidden)
@@ -216,10 +328,12 @@ describe("权限矩阵（spec §8）", () => {
     const peer = makeRoot("gate-hu-peer")
     const second = makeRoot("gate-hu-second")
 
-    const shoutResult = shout(db, human.id, "我直接喊")
+    const shoutResult = approved(shout(db, human.id, "我直接喊"))
     expect(shoutResult.message.body).toBe("我直接喊")
 
-    const group = createGroup(db, { name: "人的群", createdBy: human.id, memberIds: [peer.id] })
+    const group = approved(
+      createGroup(db, { name: "人的群", createdBy: human.id, memberIds: [peer.id] }),
+    )
     expect(isParticipant(db, group.id, peer.id)).toBe(true)
     addParticipant(db, { conversationId: group.id, agentId: second.id, invitedBy: human.id })
     expect(isParticipant(db, group.id, second.id)).toBe(true)
@@ -235,7 +349,7 @@ describe("权限矩阵（spec §8）", () => {
       vendor: "opencode",
     })
 
-    const result = shout(db, bare.id, "裸根直发")
+    const result = approved(shout(db, bare.id, "裸根直发"))
 
     expect(result.message.body).toBe("裸根直发")
     expect(listApprovals(db)).toHaveLength(0)

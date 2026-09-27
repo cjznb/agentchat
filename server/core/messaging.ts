@@ -22,7 +22,7 @@ import {
   addParticipant as storeAddParticipant,
   createDm,
   createGroup as storeCreateGroup,
-  directUnreadCounts,
+  directUnreadSeqs,
   ensureShoutConversation,
   getConversation,
   getConversationByKey,
@@ -38,14 +38,17 @@ import {
   getById,
   history as storeHistory,
   inboxMessages,
+  latestInConversation,
   send,
   type Message,
 } from "../store/messages"
 import { markRead } from "../store/read_states"
 import { enqueueWakeJobs } from "../store/wake"
-import { gate, type ApprovalRequested, type Gated } from "./permissions"
+import { getApproval, type Approval } from "../store/approvals"
+import { approvalChannel, gate, type Gated } from "./permissions"
 import { publishMessage, publishReceipt, receiptState } from "./publish"
 import {
+  DEFAULT_WAIT_TIMEOUT_MS,
   INBOX_WAIT_CONVERSATION,
   messagesSince,
   waitFor,
@@ -59,19 +62,17 @@ export { receiptState }
 // 此处保持既有导入路径（`core/messaging.ensureHuman`）不变。
 export { ensureHuman } from "./permissions"
 
-// 群原语（决议 6 → Task 7）：建群/拉人入口在此套审批闸门（`gate` 单点执法）。
-export function createGroup(db: Db, input: CreateGroupInput): Gated<Conversation>
-export function createGroup(db: Db, input: CreateGroupInput): Conversation | ApprovalRequested {
+// 群原语（决议 6 → Task 7）：建群/拉人入口在此套审批闸门（`gate` 单点执法）；
+// 返回与 `GateOutcome` 同构的判别联合（裁决 D2），调用方以 `"approved" in result` 解包。
+export function createGroup(db: Db, input: CreateGroupInput): Gated<Conversation> {
   const payload = { name: input.name, memberIds: input.memberIds ?? [] }
-  const outcome = gate(db, "group_create", input.createdBy, payload, () => storeCreateGroup(db, input))
-  return "approval" in outcome ? outcome : outcome.approved
+  return gate(db, "group_create", input.createdBy, payload, () => storeCreateGroup(db, input))
 }
 
-export function addParticipant(db: Db, input: AddParticipantInput): ApprovalRequested | void {
+export function addParticipant(db: Db, input: AddParticipantInput): Gated<void> {
   const actorId = input.invitedBy ?? getConversation(db, input.conversationId)?.createdBy ?? ""
   const payload = { conversationId: input.conversationId, agentId: input.agentId, role: input.role }
-  const outcome = gate(db, "group_add", actorId, payload, () => storeAddParticipant(db, input))
-  return "approval" in outcome ? outcome : undefined
+  return gate(db, "group_add", actorId, payload, () => storeAddParticipant(db, input))
 }
 
 /** `to` 解析失败：既非 `*`、也找不到会话或节点（brief：未知 id → RecipientNotFound）。 */
@@ -213,6 +214,50 @@ export interface ShoutWaitResult extends SendMessageResult {
   readonly reply: WaitResult<Receipt>
 }
 
+/** 喊话带 `wait` 且被闸时的返回：阻塞至审批出结果（spec §9 `shout.wait` 忠实语义）。 */
+export interface ShoutApprovalWaitResult {
+  readonly approval: Approval
+  /** 等待超时（单仍 `pending`）时为 true；已决不带此字段。 */
+  readonly timedOut?: boolean
+}
+
+/**
+ * 闸后阻塞（spec §9 `shout.wait` 对根的忠实语义）：等待发起方↔用户审批通道的结果消息
+ * （`postDecision` 已 publish，复用 `wait.ts` 消息通道），解锁即查审批状态；无结果则超时
+ * 返回 `pending` + `timedOut`。
+ */
+async function awaitShoutApproval(
+  db: Db,
+  from: string,
+  approval: Approval,
+  wait: WaitOptions,
+): Promise<ShoutApprovalWaitResult> {
+  const channelId = approvalChannel(db, from).id
+  const afterSeq = latestInConversation(db, channelId)?.seq ?? 0
+  const deadline = Date.now() + (wait.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS)
+  for (;;) {
+    const decided = getApproval(db, approval.id)
+    if (decided !== undefined && decided.status !== "pending") return { approval: decided }
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return { approval: decided ?? approval, timedOut: true }
+    const reply = await waitFor<never>(
+      {
+        conversationId: channelId,
+        waiterId: from,
+        checkMessages: () =>
+          messagesSince(db, { conversationId: channelId, waiterId: from, afterSeq }),
+        checkReceipts: () => [],
+      },
+      { until: "message", timeoutMs: remaining },
+    )
+    if (reply.timedOut) {
+      const final = getApproval(db, approval.id)
+      if (final !== undefined && final.status !== "pending") return { approval: final }
+      return { approval: final ?? approval, timedOut: true }
+    }
+  }
+}
+
 /** 喊话（`to='*'`）：写入唯一广播会话，全部节点收件箱可见（决议 3）；入口经 `gate`（Task 7）。 */
 export function shout(db: Db, from: string, body: string): Gated<SendMessageResult>
 export function shout(
@@ -220,27 +265,26 @@ export function shout(
   from: string,
   body: string,
   wait: WaitOptions,
-): Promise<ShoutWaitResult> | ApprovalRequested
+): Promise<ShoutWaitResult | ShoutApprovalWaitResult>
 export function shout(
   db: Db,
   from: string,
   body: string,
   wait?: WaitOptions,
-): SendMessageResult | ApprovalRequested | Promise<ShoutWaitResult> {
-  const execute = (): SendMessageResult | Promise<ShoutWaitResult> => {
-    if (wait === undefined) return sendMessage(db, { from, to: "*", body })
-    return sendMessage(db, {
-      from,
-      to: "*",
-      body,
-      wait: {
-        ...(wait.until === undefined ? {} : { until: wait.until }),
-        ...(wait.timeoutMs === undefined ? {} : { timeoutMs: wait.timeoutMs }),
-      },
-    })
+): Gated<SendMessageResult> | Promise<ShoutWaitResult | ShoutApprovalWaitResult> {
+  if (wait === undefined) {
+    return gate(db, "shout", from, { body }, () => sendMessage(db, { from, to: "*", body }))
   }
-  const outcome = gate(db, "shout", from, { body }, execute)
-  return "approval" in outcome ? outcome : outcome.approved
+  const bounded: WaitOptions = {
+    ...(wait.until === undefined ? {} : { until: wait.until }),
+    ...(wait.timeoutMs === undefined ? {} : { timeoutMs: wait.timeoutMs }),
+  }
+  const outcome = gate(db, "shout", from, { body }, () =>
+    sendMessage(db, { from, to: "*", body, wait: bounded }),
+  )
+  return "approved" in outcome
+    ? outcome.approved
+    : awaitShoutApproval(db, from, outcome.approval, bounded)
 }
 
 export interface InboxOptions {
@@ -312,11 +356,13 @@ export function ack(db: Db, agentId: string, ids: readonly string[]): number {
 }
 
 /**
- * 未读双层聚合（决议 5）：自身全部会话（含喊话广播）+ **全部后代**递归求和；
- * spec §11.3「根行徽标 = 根自身 + 嵌套子会话」即本递归的两层用例。
+ * 未读双层聚合（决议 5 + 裁决）：自身全部会话（含喊话广播）+ **全部后代**递归；
+ * 子树内**按 message seq 去重** —— 同一条消息被多名子树成员未读只计一次，
+ * 任一成员未读即计、多成员未读不重复计（自发消息排除不变）。
+ * spec §11.3「根行徽标 = 根自身 + 嵌套子会话」即本聚合的两层用例。
  */
 export function unreadFor(db: Db, agentId: string): number {
-  const direct = directUnreadCounts(db, shoutConversationId(db))
+  const direct = directUnreadSeqs(db, shoutConversationId(db))
   const childrenByParent = new Map<string, string[]>()
   for (const agent of listAgents(db)) {
     if (agent.parentId === undefined) continue
@@ -324,10 +370,13 @@ export function unreadFor(db: Db, agentId: string): number {
     if (siblings === undefined) childrenByParent.set(agent.parentId, [agent.id])
     else siblings.push(agent.id)
   }
-  const walk = (id: string): number =>
-    (direct.get(id) ?? 0) +
-    (childrenByParent.get(id) ?? []).reduce((sum, childId) => sum + walk(childId), 0)
-  return walk(agentId)
+  const collected = new Set<number>()
+  const walk = (id: string): void => {
+    for (const seq of direct.get(id) ?? []) collected.add(seq)
+    for (const childId of childrenByParent.get(id) ?? []) walk(childId)
+  }
+  walk(agentId)
+  return collected.size
 }
 
 /** 会话历史分页（spec §9 `conversation`）：`before`（seq，不含）向上翻页，缺省最新一页。 */
