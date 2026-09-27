@@ -75,6 +75,7 @@ export function ShoutView({ conversationId }: ShoutViewProps) {
   const messages =
     activeId === null ? EMPTY_MESSAGES : (state.messages.get(activeId) ?? EMPTY_MESSAGES)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const sendingRef = useRef(false)
 
   const summary = useMemo(() => {
     const latest = [...messages]
@@ -101,7 +102,9 @@ export function ShoutView({ conversationId }: ShoutViewProps) {
   }, [messages.length, summary])
 
   const submit = useCallback(() => {
-    if (draft.trim().length === 0 || sending) return
+    // 同步 ref 锁（F4②）：异步 state 更新前的同帧双击不得重复提交。
+    if (draft.trim().length === 0 || sendingRef.current) return
+    sendingRef.current = true
     setSending(true)
     setError(null)
     void shoutBroadcast(draft)
@@ -114,11 +117,16 @@ export function ShoutView({ conversationId }: ShoutViewProps) {
         setSentId(result.message.conversationId)
       })
       .catch(() => setError("发送失败，请重试。"))
-      .finally(() => setSending(false))
-  }, [draft, sending, shoutBroadcast])
+      .finally(() => {
+        sendingRef.current = false
+        setSending(false)
+      })
+  }, [draft, shoutBroadcast])
 
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      // CJK 输入法选词回车不发送（F4①）。
+      if (event.nativeEvent.isComposing) return
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault()
         submit()

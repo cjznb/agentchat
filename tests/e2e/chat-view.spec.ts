@@ -7,6 +7,7 @@
 import { rmSync } from "node:fs"
 import { join } from "node:path"
 import { expect, test, type Page } from "@playwright/test"
+import { registerChild } from "../../server/core/agents"
 import { ack, sendMessage } from "../../server/core/messaging"
 import { start } from "../../server/index"
 import { send as storeSend } from "../../server/store/messages"
@@ -156,6 +157,105 @@ test("deep link opens the conversation, scrolls to the message, highlights then 
     await expect(receipt).toHaveAttribute("data-stage", "read")
     // 有界轮询：捕获「永不清理」的回归；窗口放宽以容忍 CI 负载下的计时器调度延迟。
     await expect.poll(async () => target.getAttribute("data-highlight"), { timeout: 6000 }).toBeNull()
+  } finally {
+    await teardown(page, seeded, running)
+  }
+})
+
+test("deep link pages back beyond the first page; a malformed msg shows a notice without crashing", async ({ page }) => {
+  resetWsHub()
+  const seeded = seedBase("agentchat-chat-deeplink2-")
+  const running = await start({ port: 0, db: seeded.db, home: seeded.home, hubTokenPath: join(seeded.home, "hub_token") })
+  try {
+    // 目标落在第 2 页（首屏仅最新 50；目标 seq≈2）。
+    const targetId = sendMessage(seeded.db, {
+      from: seeded.humanId,
+      to: seeded.rootId,
+      body: "page2-target",
+    }).message.id
+    for (let index = 0; index < 60; index += 1) {
+      sendMessage(seeded.db, { from: seeded.humanId, to: seeded.rootId, body: `old-${index}` })
+    }
+
+    await page.goto(`${running.url}/?conversation=${seeded.dmId}&msg=${targetId}`)
+    const target = page.locator(`[data-message-id="${targetId}"]`)
+    await expect(target).toHaveClass(/is-highlighted/, { timeout: 6000 })
+    await expect(target).toBeInViewport()
+
+    // F2③：非法 msg（含引号，曾是 `querySelector` 注入面）→ 不崩，显式「消息不可定位」。
+    await page.goto(`${running.url}/?conversation=${seeded.dmId}&msg=${encodeURIComponent('"')}`)
+    await expect(page.getByTestId("focus-missing")).toBeVisible({ timeout: 6000 })
+  } finally {
+    await teardown(page, seeded, running)
+  }
+})
+
+test("submits once on a rapid double submit and rolls back the optimistic bubble on failure", async ({ page }) => {
+  resetWsHub()
+  const seeded = seedBase("agentchat-chat-lock-")
+  const running = await start({ port: 0, db: seeded.db, home: seeded.home, hubTokenPath: join(seeded.home, "hub_token") })
+  try {
+    let posts = 0
+    let failPosts = false
+    await page.route("**/api/conversations/*/messages", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue()
+        return
+      }
+      posts += 1
+      if (failPosts) {
+        await route.fulfill({ status: 500, contentType: "application/json", body: "{}" })
+        return
+      }
+      await route.continue()
+    })
+    await page.goto(`${running.url}/`)
+    await page.getByTestId("conversation-item").first().click()
+
+    const input = page.getByTestId("composer-input")
+    const own = page.locator('[data-testid="message-row"][data-own="true"]')
+    await input.fill("once-only")
+    // 同帧连续两次 submit：同步 ref 锁须令第二次短路（只发一条）。
+    await page.getByTestId("composer").evaluate((form) => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }))
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }))
+    })
+    await expect(own.filter({ hasText: "once-only" })).toHaveCount(1)
+    await expect.poll(() => posts).toBe(1)
+
+    // F4③：失败 → 乐观气泡回滚、草稿保留、错误提示可见。
+    failPosts = true
+    await input.fill("will-fail")
+    await input.press("Enter")
+    await expect(page.getByTestId("composer-error")).toBeVisible()
+    await expect(input).toHaveValue("will-fail")
+    await expect(own.filter({ hasText: "will-fail" })).toHaveCount(0)
+  } finally {
+    await teardown(page, seeded, running)
+  }
+})
+
+test("shows the [子·根名] badge for a child sender in a direct message", async ({ page }) => {
+  resetWsHub()
+  const seeded = seedBase("agentchat-chat-badge-")
+  const running = await start({ port: 0, db: seeded.db, home: seeded.home, hubTokenPath: join(seeded.home, "hub_token") })
+  try {
+    const child = registerChild(seeded.db, {
+      name: "chat-child",
+      parentId: seeded.rootId,
+      taskRef: "chat-child",
+      vendor: "opencode",
+    })
+    sendMessage(seeded.db, { from: child.id, to: seeded.humanId, body: "child-hello" })
+
+    await page.goto(`${running.url}/`)
+    const rootRow = page.locator('[data-testid="root-row"]', { hasText: "chat-root" })
+    await rootRow.getByTestId("fold-toggle").click()
+    await page.getByTestId("conversation-item").filter({ hasText: "chat-child" }).click()
+    // 私聊（非群）也显示子徽标（spec §11.4 未限定群聊）。
+    await expect(
+      page.locator('[data-testid="message-row"][data-own="false"]').getByTestId("child-badge"),
+    ).toHaveText("[子·chat-root]")
   } finally {
     await teardown(page, seeded, running)
   }

@@ -57,14 +57,22 @@ test("org tree: collapsed default, summary+badge, accordion, retired grey, live 
     // 摘要 `N子·M忙` + 聚合未读徽标（root1=1，root2=0 无徽标）。
     await expect(rowOf(page, seed.root1).getByTestId("org-summary").first()).toHaveText("3子·1忙")
     await expect(rowOf(page, seed.root2).getByTestId("org-summary").first()).toHaveText("1子·0忙")
-    await expect(rowOf(page, seed.root1).getByTestId("unread-badge").first()).toHaveText("1")
+    // F1：树行徽标为 human 观察者全子树口径（root1 = child1 的两条 DM 各 1 未读 = 2）。
+    await expect(rowOf(page, seed.root1).getByTestId("unread-badge").first()).toHaveText("2")
     await expect(rowOf(page, seed.root2).getByTestId("unread-badge")).toHaveCount(0)
 
-    // 展开 root1：子行可见；退役子行灰显、留原位、不可点。
+    // 展开 root1：子行可见；child1 折叠徽标 = 其子树（自身两条 DM = 2）。
     await rowOf(page, seed.root1).getByTestId("org-toggle").first().click()
     await expect(nodeOf(page, seed.child1)).toBeVisible()
+    await expect(rowOf(page, seed.child1).getByTestId("unread-badge").first()).toHaveText("2")
+
+    // 退役子节点：灰显、留原位、**仍可点开资料卡**（仅「发消息」禁用）；退役父节点仍可展开。
     await expect(nodeOf(page, seed.child3)).toHaveAttribute("data-retired", "true")
-    await expect(nodeOf(page, seed.child3)).toBeDisabled()
+    await expect(nodeOf(page, seed.child3)).toBeEnabled()
+    await nodeOf(page, seed.child3).click()
+    await expect(page.getByTestId("contact-card")).toBeVisible()
+    await expect(page.getByTestId("contact-message")).toBeDisabled()
+    await page.getByTestId("contact-close").click()
 
     // busy 状态点 + 状态文字；role 彩色标签。
     await expect(nodeOf(page, seed.child2).locator(".node-dot")).toHaveText("🟠")

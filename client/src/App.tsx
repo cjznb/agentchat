@@ -78,6 +78,7 @@ export function App() {
   const { state, openConversation, openAndRead, openDm, reload, retry } = useStore()
   const [activeMode, setActiveMode] = useState<ModeId>("chat")
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null)
+  const [contactActionError, setContactActionError] = useState<string | null>(null)
   const [composeGroup, setComposeGroup] = useState(false)
   const active = modes.find((mode) => mode.id === activeMode) ?? modes[0]
   const list = listCopy[activeMode]
@@ -126,13 +127,22 @@ export function App() {
     [openAndRead],
   )
 
-  // 资料卡「发消息」：确保 DM 后切到聊天视图。
+  // 选中/关闭资料卡：同步清掉上次的操作错误。
+  const selectContact = useCallback((id: string | null) => {
+    setContactActionError(null)
+    setSelectedContactId(id)
+  }, [])
+
+  // 资料卡「发消息」：确保 DM 后切到聊天视图；失败（含退役目标 409）显示错误且不切视图（F3③）。
   const handleMessage = useCallback(
     (nodeId: string) => {
-      void openDm(nodeId).then(() => {
-        setActiveMode("chat")
-        setSelectedContactId(null)
-      })
+      setContactActionError(null)
+      void openDm(nodeId)
+        .then(() => {
+          setActiveMode("chat")
+          setSelectedContactId(null)
+        })
+        .catch(() => setContactActionError("无法发起会话，对方可能已退役或连接失败。"))
     },
     [openDm],
   )
@@ -187,7 +197,7 @@ export function App() {
       <aside className="context-list" aria-labelledby="context-title" data-testid="middle-list">
         <header><p>AGENTCHAT</p><h1 id="context-title">{list.title}</h1></header>
         {activeMode === "contacts" ? (
-          <OrgTree selectedId={selectedContactId} onSelect={setSelectedContactId} />
+          <OrgTree selectedId={selectedContactId} onSelect={selectContact} />
         ) : activeMode === "chat" ? (
           <ConversationList onCreateGroup={() => setComposeGroup(true)} />
         ) : activeMode === "notifications" ? (
@@ -217,9 +227,10 @@ export function App() {
               {activeMode === "contacts" && selectedContact !== null ? (
                 <ContactCard
                   node={selectedContact}
-                  onClose={() => setSelectedContactId(null)}
+                  onClose={() => selectContact(null)}
                   onMessage={handleMessage}
                   onOpenConversation={handleOpenConversation}
+                  actionError={contactActionError}
                 />
               ) : (
                 <StatePanel state={contentState} title={active.title} hint={active.hint} onRetry={retry} />

@@ -3,7 +3,8 @@
  * 点击已读 + 深链跳转到卡消息、条目内联回复（复用 `CardActions`，与聊天卡同一提交逻辑）。
  *
  * 两 tab 直接映射 REST `scope`；未读 = `readAt` 为空；卡片/跳转锚点来自 `NotificationEntry`
- * （`cardMessageId` + `conversationId`）。点击事件先乐观置已读（不阻塞跳转），再交给 App 定位。
+ * （`cardMessageId` + `conversationId`）。点击事件先**发出**已读请求（不阻塞跳转），
+ * 响应成功后再更新本地未读点（`markNotificationRead` 非乐观，见 `actions.ts`），随后交给 App 定位。
  */
 import { useCallback, useMemo, useState } from "react"
 import type { NotificationEntry } from "../../../shared/contracts"
@@ -124,10 +125,12 @@ export function NotificationsView({ onJump }: NotificationsViewProps) {
         <button
           type="button"
           role="tab"
+          id="notif-tab-actionable"
           className="notif-tab"
           data-testid="notif-tab-actionable"
           data-active={tab === "actionable"}
           aria-selected={tab === "actionable"}
+          aria-controls="notif-panel"
           onClick={() => setTab("actionable")}
         >
           需我处理 <b>{state.notifications.length}</b>
@@ -135,31 +138,40 @@ export function NotificationsView({ onJump }: NotificationsViewProps) {
         <button
           type="button"
           role="tab"
+          id="notif-tab-all"
           className="notif-tab"
           data-testid="notif-tab-all"
           data-active={tab === "all"}
           aria-selected={tab === "all"}
+          aria-controls="notif-panel"
           onClick={() => setTab("all")}
         >
           全部 <b>{state.notificationsAll.length}</b>
         </button>
       </div>
-      {entries.length === 0 ? (
-        <p className="notif-empty" data-testid="notifications-empty">
-          {tab === "actionable" ? "没有需要你处理的单据。" : "还没有任何通知。"}
-        </p>
-      ) : (
-        <ul className="notif-list" data-testid="notifications-list">
-          {entries.map((entry) => (
-            <NotificationItem
-              key={entry.id}
-              entry={entry}
-              names={names}
-              onOpen={() => open(entry)}
-            />
-          ))}
-        </ul>
-      )}
+      <div
+        id="notif-panel"
+        role="tabpanel"
+        className="notif-panel"
+        aria-labelledby={tab === "actionable" ? "notif-tab-actionable" : "notif-tab-all"}
+      >
+        {entries.length === 0 ? (
+          <p className="notif-empty" data-testid="notifications-empty">
+            {tab === "actionable" ? "没有需要你处理的单据。" : "还没有任何通知。"}
+          </p>
+        ) : (
+          <ul className="notif-list" data-testid="notifications-list">
+            {entries.map((entry) => (
+              <NotificationItem
+                key={entry.id}
+                entry={entry}
+                names={names}
+                onOpen={() => open(entry)}
+              />
+            ))}
+          </ul>
+        )}
+      </div>
     </section>
   )
 }

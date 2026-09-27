@@ -19,6 +19,8 @@ export interface ContactCardProps {
   readonly onClose: () => void
   readonly onMessage: (nodeId: string) => void
   readonly onOpenConversation: (conversationId: string) => void
+  /** 「发消息」失败（含退役目标 409）时的错误文案；不切空视图，仅就地提示（F3）。 */
+  readonly actionError?: string | null
 }
 
 function Field({ label, children }: { readonly label: string; readonly children: React.ReactNode }) {
@@ -30,7 +32,13 @@ function Field({ label, children }: { readonly label: string; readonly children:
   )
 }
 
-export function ContactCard({ node, onClose, onMessage, onOpenConversation }: ContactCardProps) {
+export function ContactCard({
+  node,
+  onClose,
+  onMessage,
+  onOpenConversation,
+  actionError = null,
+}: ContactCardProps) {
   const [showConversations, setShowConversations] = useState(false)
   const [conversations, setConversations] = useState<readonly ContactConversation[] | null>(null)
   const [loading, setLoading] = useState(false)
@@ -66,7 +74,7 @@ export function ContactCard({ node, onClose, onMessage, onOpenConversation }: Co
   const toggleConversations = useCallback(() => setShowConversations((value) => !value), [])
   const retired = node.status === "retired"
   const role = roleTone(node.role_tag)
-  const skills = node.skills ?? []
+  const skills = node.skills
 
   return (
     <aside
@@ -168,6 +176,12 @@ export function ContactCard({ node, onClose, onMessage, onOpenConversation }: Co
           查看它的会话
         </button>
       </div>
+
+      {actionError !== null ? (
+        <p className="contact-error" role="alert" data-testid="contact-action-error">
+          {actionError}
+        </p>
+      ) : null}
 
       {showConversations ? (
         <section className="contact-conversations" data-testid="contact-conversation-list">

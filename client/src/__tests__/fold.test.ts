@@ -36,6 +36,7 @@ function node(
     purpose: null,
     role_tag: null,
     remark: null,
+    skills: [],
     unread: 0,
     children: opts.children ?? [],
   }
@@ -104,10 +105,11 @@ function conversationSet(): readonly ConversationSummary[] {
 
 describe("foldConversations", () => {
   it("根容器聚合未读取 unreadByRoot，子行取自身 unread；嵌套深层后代归入同根", () => {
-    const rows = foldConversations(conversationSet(), { root1: 7, root2: 2 }, roster)
+    const rows = foldConversations(conversationSet(), roster)
     const root1 = rows.find((row) => row.id === "root1")
     expect(root1?.kind).toBe("root")
-    expect(root1?.unread).toBe(7)
+    // human 观察者全子树口径：root1 自身(0) + child1(3) + child2(1) + grand1(0) = 4。
+    expect(root1?.unread).toBe(4)
     expect(root1?.conversation?.id).toBe("c-root1")
     expect(root1?.children.map((child) => child.conversation.id)).toEqual(["c-child1", "c-child2", "c-grand1"])
     expect(root1?.children.find((child) => child.conversation.id === "c-child1")?.conversation.unread).toBe(3)
@@ -116,7 +118,7 @@ describe("foldConversations", () => {
   })
 
   it("排序：喊话置顶；其余（群/逻辑/根容器）按最后消息时间倒序", () => {
-    const rows = foldConversations(conversationSet(), {}, roster)
+    const rows = foldConversations(conversationSet(), roster)
     expect(rows[0]?.kind).toBe("shout")
     const rest = rows.slice(1).map((row) => row.id)
     // logi(at 70) → group(60) → root1(max: child1 40) → root2(child3 5)
@@ -129,7 +131,7 @@ describe("foldConversations", () => {
       conv("c-newgroup", "group:c-newgroup", { kind: "group", createdAt: 999, name: "新群" }),
       conv("c-root1", "dm:human_root1", { at: 10 }),
     ]
-    const rows = foldConversations(conversations, {}, roster)
+    const rows = foldConversations(conversations, roster)
     expect(rows[0]?.kind).toBe("shout")
     // 空群 createdAt=999 高于 root1 的 lastMessage(10) → 非 shout 首位。
     expect(rows[1]?.id).toBe("c-newgroup")
@@ -141,7 +143,7 @@ describe("foldConversations", () => {
       conv("c-old-msg-new-conv", "group:gA", { kind: "group", createdAt: 999, at: 10 }),
       conv("c-new-msg-old-conv", "group:gB", { kind: "group", createdAt: 1, at: 50 }),
     ]
-    const rows = foldConversations(conversations, {}, roster)
+    const rows = foldConversations(conversations, roster)
     expect(rows.map((row) => row.id)).toEqual(["c-new-msg-old-conv", "c-old-msg-new-conv"])
   })
 
@@ -150,13 +152,13 @@ describe("foldConversations", () => {
       conv("c-shout", "shout", { kind: "group", createdAt: 1, name: "全员喊话" }),
       conv("c-brandnew", "group:c-brandnew", { kind: "group", createdAt: 999 }),
     ]
-    const rows = foldConversations(conversations, {}, roster)
+    const rows = foldConversations(conversations, roster)
     expect(rows[0]?.kind).toBe("shout")
     expect(rows[1]?.id).toBe("c-brandnew")
   })
 
   it("human 节点与 human 会话完全过滤：human 根不成容器、不出现在子行", () => {
-    const rows = foldConversations(conversationSet(), {}, roster)
+    const rows = foldConversations(conversationSet(), roster)
     expect(rows.some((row) => row.id === "human")).toBe(false)
     const nodeIds = rows.flatMap((row) => [
       row.node?.id,
@@ -166,7 +168,7 @@ describe("foldConversations", () => {
   })
 
   it("逻辑节点私聊为顶层 logical 行，且退役子行标记 retired", () => {
-    const rows = foldConversations(conversationSet(), {}, roster)
+    const rows = foldConversations(conversationSet(), roster)
     const logi = rows.find((row) => row.id === "c-logi")
     expect(logi?.kind).toBe("logical")
     expect(logi?.node?.id).toBe("logi")
@@ -176,14 +178,14 @@ describe("foldConversations", () => {
   })
 
   it("根容器无自有 DM 时 conversation 为 null，仅承载子会话", () => {
-    const rows = foldConversations([conv("c-child3", "dm:child3_human", { at: 1 })], {}, roster)
+    const rows = foldConversations([conv("c-child3", "dm:child3_human", { at: 1 })], roster)
     const root2 = rows.find((row) => row.id === "root2")
     expect(root2?.conversation).toBeNull()
     expect(root2?.children.map((child) => child.conversation.id)).toEqual(["c-child3"])
   })
 
   it("无法归属的会话（不在 roster）被跳过", () => {
-    const rows = foldConversations([conv("c-x", "dm:ghost_human", { at: 1 })], {}, roster)
+    const rows = foldConversations([conv("c-x", "dm:ghost_human", { at: 1 })], roster)
     expect(rows).toEqual([])
   })
 })
@@ -194,7 +196,7 @@ describe("foldConversations：同一根多会话零丢行（Important #1）", ()
       conv("c-root1", "dm:human_root1", { at: 10 }),
       conv("c-rootlogi", "dm:root1_zlogi", { at: 90 }),
     ]
-    const rows = foldConversations(conversations, {}, roster)
+    const rows = foldConversations(conversations, roster)
     const root1 = rows.find((row) => row.id === "root1")
     // header 优先 human↔root，尽管 root↔逻辑节点会话更近。
     expect(root1?.conversation?.id).toBe("c-root1")
@@ -209,7 +211,7 @@ describe("foldConversations：同一根多会话零丢行（Important #1）", ()
       conv("c-human1", "dm:human_root1", { at: 10 }),
       conv("c-r1r2", "dm:root1_root2", { at: 99 }),
     ]
-    const rows = foldConversations(conversations, {}, roster)
+    const rows = foldConversations(conversations, roster)
     const root1 = rows.find((row) => row.id === "root1")
     expect(root1?.conversation?.id).toBe("c-human1")
     expect(root1?.children.map((child) => child.conversation.id)).toContain("c-r1r2")
@@ -222,7 +224,7 @@ describe("foldConversations：同一根多会话零丢行（Important #1）", ()
       conv("c-old", "dm:root1_root2", { at: 10 }),
       conv("c-new", "dm:root1_zlogi", { at: 80 }),
     ]
-    const rows = foldConversations(conversations, {}, roster)
+    const rows = foldConversations(conversations, roster)
     const root1 = rows.find((row) => row.id === "root1")
     // 两条均为 root1 自有（root2/zlogi 平级且 id 更大）；header = 更近的 c-new。
     expect(root1?.conversation?.id).toBe("c-new")
@@ -231,23 +233,23 @@ describe("foldConversations：同一根多会话零丢行（Important #1）", ()
   })
 
   it("DM key 段数≠2（未来 id 含 `_`）判为不可归属，不错拆丢行", () => {
-    expect(foldConversations([conv("c-bad", "dm:root1_a_b", { at: 1 })], {}, roster)).toEqual([])
-    expect(foldConversations([conv("c-bad2", "dm:root1_", { at: 1 })], {}, roster)).toEqual([])
-    expect(foldConversations([conv("c-bad3", "dm:root1", { at: 1 })], {}, roster)).toEqual([])
+    expect(foldConversations([conv("c-bad", "dm:root1_a_b", { at: 1 })], roster)).toEqual([])
+    expect(foldConversations([conv("c-bad2", "dm:root1_", { at: 1 })], roster)).toEqual([])
+    expect(foldConversations([conv("c-bad3", "dm:root1", { at: 1 })], roster)).toEqual([])
   })
 
-  it("根聚合徽标恒等于 unreadByRoot 入参，纯函数不做 human 侧扣减（Important #2 锁定）", () => {
+  it("根徽标 = human 观察者全子树聚合（自身 + 后代会话 human 未读，F1 统一口径）", () => {
     const conversations = [
-      conv("c-root1", "dm:human_root1", { at: 10, unread: 0 }),
+      conv("c-root1", "dm:human_root1", { at: 10, unread: 2 }),
       conv("c-child1", "dm:child1_human", { at: 40, unread: 9 }),
     ]
-    const unreadOfRoot = (input: Readonly<Record<string, number>>): number | undefined =>
-      foldConversations(conversations, input, roster).find((row) => row.id === "root1")?.unread
-    // 与子行 human 未读（9）无关：根徽标只取服务端 unreadByRoot。
-    expect(unreadOfRoot({ root1: 5 })).toBe(5)
-    // 复算（模拟 human 打开根 DM 后重拉）仍等于服务端入参；human 已读不清零/不扣减根聚合。
-    expect(unreadOfRoot({ root1: 5 })).toBe(5)
-    expect(unreadOfRoot({ root1: 0 })).toBe(0)
+    const rootUnread = (input: readonly ConversationSummary[]): number | undefined =>
+      foldConversations(input, roster).find((row) => row.id === "root1")?.unread
+    // 根自身 2 + 子 9 = 11（与旧 agent 侧 unreadByRoot 无关）。
+    expect(rootUnread(conversations)).toBe(11)
+    // 打开子会话标已读（human 未读 → 0）后，根徽标同步下降，展开前/后恒一致（纯函数无隐藏态）。
+    const readChild = conversations.map((c) => (c.id === "c-child1" ? { ...c, unread: 0 } : c))
+    expect(rootUnread(readChild)).toBe(2)
   })
 })
 

@@ -5,7 +5,7 @@
  * 退役标记），带手风琴展开（独立持久化键，不与会话列表/组织树展开态串扰）。
  * human 由 `foldTree` 完全过滤 → 天然不可选；退役节点灰显且 checkbox 禁用。
  */
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { loadExpanded, saveExpanded, toggleExpanded, type StorageLike } from "../accordion"
 import { vendorBadge } from "../chat"
 import { useStore } from "../store"
@@ -126,13 +126,19 @@ export function MemberPicker({ selected, onToggle }: MemberPickerProps) {
   )
   const rows = useMemo(() => foldTree(state.roster), [state.roster])
 
+  // 展开态持久化移入 effect（F6）：updater 保持纯函数。
   const expand = useCallback((nodeId: string) => {
-    setExpanded((previous) => {
-      const next = toggleExpanded(previous, nodeId)
-      saveExpanded(safeStorage(), PICKER_TREE_KEY, next)
-      return next
-    })
+    setExpanded((previous) => toggleExpanded(previous, nodeId))
   }, [])
+
+  // 值未变不重复持久化（StrictMode 双挂载同值幂等）。
+  const persistedRef = useRef("")
+  useEffect(() => {
+    const serialized = JSON.stringify(expanded)
+    if (persistedRef.current === serialized) return
+    persistedRef.current = serialized
+    saveExpanded(safeStorage(), PICKER_TREE_KEY, expanded)
+  }, [expanded])
 
   if (rows.length === 0) {
     return (

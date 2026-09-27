@@ -149,8 +149,12 @@ export interface RosterNode {
   readonly purpose: string | null
   readonly role_tag: string | null
   readonly remark: string | null
-  /** 技能 chips（spec §11.1 联系人信息卡）；Plan 3 T6 补入线格式（旧出参无此字段亦兼容）。 */
-  readonly skills?: readonly string[]
+  /**
+   * 技能 chips（spec §11.1 联系人信息卡）；Plan 3 T6 补入线格式。
+   * Plan 3 终审 L-cheap：由可选改为**必填**——schema `skills` 已有 `default([])`，
+   * 解析缺失即得空数组，客户端不再需要 `?? []` 兜底（服务端 `rosterTree` 恒产出）。
+   */
+  readonly skills: readonly string[]
   readonly unread: number
   readonly children: readonly RosterNode[]
 }

@@ -78,3 +78,35 @@ test("folds conversations: shout pinned, human hidden, accordion, badge clears o
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+test("root badge aggregates the subtree human unread and drops when a child is opened", async ({ page }) => {
+  resetWsHub()
+  const home = mkdtempSync(join(tmpdir(), "agentchat-list-badge-e2e-"))
+  const db = openDb(loadConfig({ AGENTCHAT_HOME: home }).dbPath)
+  const running = await start({ port: 0, db, home, hubTokenPath: join(home, "hub_token") })
+  try {
+    seedList(db, home)
+    await page.goto(`${running.url}/`)
+    const root1 = page.locator('[data-testid="root-row"]', { hasText: "cl-root1" })
+
+    // F1：根徽标 = 全子树 human 侧未读（child1 1 + child2 1 = 2；根自身 DM 为 human 自发 0）。
+    await expect(root1.getByTestId("unread-badge").first()).toHaveText("2")
+
+    // 展开前后一致（聚合纯函数无隐藏状态）。
+    await root1.getByTestId("fold-toggle").click()
+    await expect(root1.getByTestId("unread-badge").first()).toHaveText("2")
+
+    // 打开 child1（human 阅读）→ 子行徽标清零、根徽标同步下降为 1（child2 仍 1）。
+    const child1 = page.getByTestId("conversation-item").filter({ hasText: "cl-child1" })
+    await expect(child1.getByTestId("unread-badge")).toHaveText("1")
+    await child1.click()
+    await expect(child1.getByTestId("unread-badge")).toHaveCount(0)
+    await expect(root1.getByTestId("unread-badge").first()).toHaveText("1")
+  } finally {
+    await page.close()
+    resetWsHub()
+    await running.close()
+    db.close()
+    rmSync(home, { recursive: true, force: true })
+  }
+})

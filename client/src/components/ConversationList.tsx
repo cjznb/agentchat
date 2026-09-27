@@ -6,7 +6,7 @@
  * - 点击行：`openAndRead`（打开会话 + 按需载入消息 + `POST .../read` 标已读）
  * - 退役子行：灰显 + `disabled`（不可开聊），仍在原位
  */
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { AgentStatus, ConversationSummary } from "../../../shared/contracts"
 import {
   foldConversations,
@@ -213,17 +213,24 @@ export function ConversationList({ onCreateGroup }: ConversationListProps = {}) 
   const [expanded, setExpanded] = useState<readonly string[]>(() => loadExpandedRoots(safeStorage()))
 
   const rows = useMemo(
-    () => foldConversations(state.conversations, state.unreadByRoot, state.roster),
-    [state.conversations, state.unreadByRoot, state.roster],
+    () => foldConversations(state.conversations, state.roster),
+    [state.conversations, state.roster],
   )
 
+  // 展开态持久化移入 effect（Plan 3 终审 F6）：updater 保持纯函数，
+  // StrictMode 双挂载只做幂等重写（同值），不再在 updater 内触发副作用。
   const toggle = useCallback((rootId: string) => {
-    setExpanded((previous) => {
-      const next = toggleExpandedRoot(previous, rootId)
-      saveExpandedRoots(safeStorage(), next)
-      return next
-    })
+    setExpanded((previous) => toggleExpandedRoot(previous, rootId))
   }, [])
+
+  // 值未变不重复持久化（StrictMode 双挂载同值幂等）。
+  const persistedRef = useRef("")
+  useEffect(() => {
+    const serialized = JSON.stringify(expanded)
+    if (persistedRef.current === serialized) return
+    persistedRef.current = serialized
+    saveExpandedRoots(safeStorage(), expanded)
+  }, [expanded])
 
   const open = useCallback(
     (conversationId: string) => openAndRead(conversationId),

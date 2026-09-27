@@ -17,11 +17,16 @@ AgentChat is a quiet dispatch desk for supervising many agents: compact, legible
 | Muted | `--color-muted` | `#63666f` | Secondary text |
 | Rail ink | `--color-rail-ink` | `#c8cad2` | Rail labels |
 | Hairline | `--color-hairline` | `#dfe1e7` | Dividers |
-| Jade | `--color-jade` | `#19a974` | Selection, focus, own bubbles |
-| Jade soft | `--color-jade-soft` | `#dff5ec` | Selected list item |
-| Error | `--color-error` | `#b83b4b` | Error state |
+| Jade | `--color-jade` | `#0f7a52` | Selection, focus, own bubbles, approve |
+| Jade soft | `--color-jade-soft` | `#dff5ec` | Selected list item, answered status |
+| Amber | `--color-amber` | `#9a5b00` | Busy / queued / pending, approval accent |
+| Retired | `--color-retired` | `#a9acb5` | Retired & left (delivery) tones |
+| Role supervisor | `--color-role-supervisor` | `#4453c4` | `role_tag="监管者"` label |
+| Error | `--color-error` | `#b83b4b` | Error state, unread dot, reject |
 
-Only jade indicates selection or positive action. No decorative gradients. Body contrast meets WCAG AA.
+Only jade indicates selection or positive action. No decorative gradients. Body contrast meets WCAG AA
+(jade/amber/supervisor were deepened from `#19a974`/`#e08a1e`/`#5b6ee1` to clear 4.5:1; see task-9 report).
+The retired/pill/overlay tokens exist so cards, badges and the one raised overlay stay consistent.
 
 ## 3. Typography
 
@@ -62,4 +67,4 @@ Desktop grid: 76px rail, 300px list, flexible view. Tablet narrows the list to 2
 
 ## 7. Depth & Surface
 
-**Borders-only.** The three work zones are separated by hairlines and tonal changes. No box shadows. Radius tokens: `--radius-small` 6px, `--radius-medium` 10px, `--radius-large` 18px, used by target size rather than decoration.
+**Borders-only, with one raised overlay.** The three work zones are separated by hairlines and tonal changes; cards, badges and notification rows express state with `inset` accent lines (jade / amber / retired), **not** drop shadows. The single exception is the contact card, the one floating overlay, which uses `--shadow-overlay` (`0 20px 48px`, canvas-tinted). Radius tokens: `--radius-small` 6px, `--radius-medium` 10px, `--radius-large` 18px, `--radius-pill` 999px, used by target size rather than decoration.

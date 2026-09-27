@@ -42,6 +42,7 @@ function node(
     purpose: null,
     role_tag: opts.role ?? null,
     remark: null,
+    skills: [],
     unread: opts.unread ?? 0,
     children: opts.children ?? [],
   }
@@ -77,13 +78,18 @@ describe("foldTree", () => {
     expect(foldTree([withHumanChild])[0]?.children.map((row) => row.node.id)).toEqual(["a", "b"])
   })
 
-  it("行徽标取该节点 roster unread；逻辑节点行 logical 标记", () => {
-    const rows = foldTree(roster)
+  it("行徽标取传入的全子树聚合表（缺省 0）；逻辑节点行 logical 标记", () => {
+    // F1：树行徽标由调用方传入 aggregateUnread 结果（human 观察者全子树口径），不再取 node.unread。
+    const unread = new Map<string, number>([["root1", 5], ["child1", 2]])
+    const rows = foldTree(roster, unread)
     const root1 = rows.find((row) => row.node.id === "root1")
     expect(root1?.unread).toBe(5)
-    expect(root1?.children[0]?.unread).toBe(0)
+    expect(root1?.children[0]?.unread).toBe(2)
+    expect(rows.find((row) => row.node.id === "logi")?.unread).toBe(0)
     expect(rows.find((row) => row.node.id === "logi")?.logical).toBe(true)
     expect(rows.find((row) => row.node.id === "logi")?.retired).toBe(false)
+    // 缺省表 → 无徽标（MemberPicker 等不展示未读的场景）。
+    expect(foldTree(roster).find((row) => row.node.id === "root1")?.unread).toBe(0)
   })
 
   it("退役子级仍留原位（retired 标记）", () => {

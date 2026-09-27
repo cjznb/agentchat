@@ -5,13 +5,15 @@
  * - 默认折叠：第一层仅根主 agent（+ 逻辑节点），子级折叠在根行下，`▸` 原地展开
  * - 折叠行摘要 `N子·M忙` + 聚合未读徽标（随 WS `agent` 事件重拉 roster 实时刷新）
  * - 节点视觉：状态点/厂商徽标/role 彩色标签；逻辑节点特殊图标
- * - 退役节点灰显、留原位、不可点（不可开聊/开卡）
+ * - 退役节点灰显、留原位、**仍可点开资料卡**（仅「发消息」禁用）；退役父节点仍可展开看后代
  * - human 节点经 `foldTree` 完全过滤
+ * - 行徽标 = human 观察者全子树聚合未读（`unread.ts`，与会话列表同口径）
  */
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { RosterNode } from "../../../shared/contracts"
 import { vendorBadge } from "../chat"
 import { useStore } from "../store"
+import { aggregateUnread } from "../unread"
 import {
   foldTree,
   loadExpandedTree,
@@ -91,7 +93,8 @@ function NodeRow({
 }) {
   const { node, summary, children, retired, logical } = row
   const expanded = expandedIds.includes(node.id)
-  const expandable = children.length > 0 && !retired
+  // 退役父节点仍可展开（F3：灰显保留但保留查看后代的能力）。
+  const expandable = children.length > 0
   return (
     <li className="org-row" data-testid="org-row" data-node-id={node.id}>
       <div className="org-head" data-expanded={expanded} data-retired={retired}>
@@ -117,7 +120,6 @@ function NodeRow({
           data-status={node.status}
           data-retired={retired}
           data-selected={node.id === selectedId}
-          disabled={retired}
           aria-label={`查看 ${node.name} 资料卡`}
           onClick={() => onSelect(node.id)}
           type="button"
@@ -168,15 +170,24 @@ function NodeRow({
 export function OrgTree({ selectedId, onSelect }: OrgTreeProps) {
   const { state } = useStore()
   const [expanded, setExpanded] = useState<readonly string[]>(() => loadExpandedTree(safeStorage()))
-  const rows = useMemo(() => foldTree(state.roster), [state.roster])
+  const rows = useMemo(
+    () => foldTree(state.roster, aggregateUnread(state.conversations, state.roster)),
+    [state.roster, state.conversations],
+  )
 
+  // 展开态持久化移入 effect（F6）：updater 保持纯函数，StrictMode 双挂载仅幂等重写。
   const toggle = useCallback((nodeId: string) => {
-    setExpanded((previous) => {
-      const next = toggleTreeRow(previous, nodeId)
-      saveExpandedTree(safeStorage(), next)
-      return next
-    })
+    setExpanded((previous) => toggleTreeRow(previous, nodeId))
   }, [])
+
+  // 值未变不重复持久化（StrictMode 双挂载同值幂等）。
+  const persistedRef = useRef("")
+  useEffect(() => {
+    const serialized = JSON.stringify(expanded)
+    if (persistedRef.current === serialized) return
+    persistedRef.current = serialized
+    saveExpandedTree(safeStorage(), expanded)
+  }, [expanded])
 
   if (rows.length === 0) {
     return (

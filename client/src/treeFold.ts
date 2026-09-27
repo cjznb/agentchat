@@ -6,8 +6,9 @@
  * - 第一层仅根主 agent（+ 逻辑节点）；子级默认折叠在根行下
  * - human 节点完全过滤（树与资料卡可达集一致，spec §11.2「human 不出现在树」）
  * - 折叠行摘要 `N子·M忙`（直接可见子级数量 + busy 数）
- * - 行徽标 = 该节点 roster `unread`（根行即 spec §11.2 聚合徽标口径；与列表 `unreadByRoot`
- *   的读者差异见 task-6 报告「已知差异」）
+ * - 行徽标 = **human 观察者口径的全子树聚合未读**（`unread.ts` `aggregateUnread`，spec §11.2
+ *   「聚合未读徽标 = 全树未读，展开后子行各显各的」）——由调用方传入（缺省空表 = 无徽标）。
+ *   与 `fold.ts` 会话根行**同口径**（Plan 3 终审 F1 统一，取代旧的 roster agent 侧 `unread`）。
  *
  * 展开态持久化复用 `accordion.ts` 原语，键独立（`agentchat:expandedTree`）。
  */
@@ -52,20 +53,26 @@ export interface TreeRow {
   readonly children: readonly TreeRow[]
 }
 
-function toRow(node: RosterNode): TreeRow {
+function toRow(node: RosterNode, unread: ReadonlyMap<string, number>): TreeRow {
   return {
     node,
     logical: node.kind === "logical",
     retired: node.status === "retired",
     summary: summarize(node),
-    unread: node.unread,
-    children: visibleChildren(node).map(toRow),
+    unread: unread.get(node.id) ?? 0,
+    children: visibleChildren(node).map((child) => toRow(child, unread)),
   }
 }
 
-/** 折叠 roster 森林为组织树行（第一层：根主 agent + 逻辑节点；human 过滤）。 */
-export function foldTree(roster: readonly RosterNode[]): readonly TreeRow[] {
-  return roster.filter((node) => !isHuman(node)).map(toRow)
+/**
+ * 折叠 roster 森林为组织树行（第一层：根主 agent + 逻辑节点；human 过滤）。
+ * `unread` 为 human 观察者全子树聚合表（`aggregateUnread` 产出）；缺省空表 → 各行为 0。
+ */
+export function foldTree(
+  roster: readonly RosterNode[],
+  unread: ReadonlyMap<string, number> = new Map(),
+): readonly TreeRow[] {
+  return roster.filter((node) => !isHuman(node)).map((node) => toRow(node, unread))
 }
 
 // ── 视觉纯映射：role 标签颜色 / 状态点（spec §11.2） ───────────────────

@@ -82,6 +82,7 @@ function rosterNode(id: string): RosterNode {
     purpose: null,
     role_tag: null,
     remark: null,
+    skills: [],
     unread: 0,
     children: [],
   }

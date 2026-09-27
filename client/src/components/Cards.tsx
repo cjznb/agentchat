@@ -42,13 +42,18 @@ export function CardActions({ card, entry }: CardActionsProps) {
   const outcome = cardOutcome(card, submitted ?? entry)
   const kind: ApprovalKind = card.kind === "ask" ? "ask" : "action"
 
+  // F6：任务体只做异步请求（纯 promise），状态更新一律在 `.then` 解析回调里发生——
+  // 不在 updater / render 期产生副作用；`onSuccess` 承载提交成功后的本地清理（如清空自定义输入）。
   const run = useCallback(
-    (task: () => Promise<ApprovalEntry>): void => {
+    (task: () => Promise<ApprovalEntry>, onSuccess?: () => void): void => {
       if (busy) return
       setBusy(true)
       setError(null)
       void task()
-        .then((approval) => setSubmitted(approval))
+        .then((approval) => {
+          setSubmitted(approval)
+          onSuccess?.()
+        })
         .catch((cause: unknown) => setError(cardErrorText(kind, errorStatus(cause))))
         .finally(() => setBusy(false))
     },
@@ -95,11 +100,7 @@ export function CardActions({ card, entry }: CardActionsProps) {
 
   const respond = (answer: { readonly choice?: string; readonly text?: string }): void => {
     if (outcome.ended) return
-    run(async () => {
-      const approval = await respondAsk(card.id, answer)
-      setCustom("")
-      return approval
-    })
+    run(() => respondAsk(card.id, answer), () => setCustom(""))
   }
 
   const submitCustom = (event: FormEvent<HTMLFormElement>): void => {

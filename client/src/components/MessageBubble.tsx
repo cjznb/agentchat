@@ -59,6 +59,8 @@ export function MessageBubble({ message, own, sender, showSender, highlighted, c
       ? receiptGlyph(message.receiptStage)
       : null
   const showIdentity = showSender && !own && sender !== undefined
+  // spec §11.4：子消息带 `[子·根名]` 徽标（不限群聊）；私聊亦显示，仅身份行（头像/名字/厂商）随 showSender。
+  const childBadge = !own && sender !== undefined && sender.rootName !== null ? sender.rootName : null
 
   return (
     <li
@@ -74,15 +76,19 @@ export function MessageBubble({ message, own, sender, showSender, highlighted, c
         </span>
       ) : null}
       <div className="bubble-col">
-        {showIdentity ? (
+        {showIdentity || childBadge !== null ? (
           <header className="bubble-head">
-            <span className="sender-name">{sender.name}</span>
-            <span className="vendor-badge" data-testid="vendor-badge">
-              {vendorBadge(sender.vendor)}
-            </span>
-            {sender.rootName !== null ? (
+            {showIdentity ? (
+              <>
+                <span className="sender-name">{sender.name}</span>
+                <span className="vendor-badge" data-testid="vendor-badge">
+                  {vendorBadge(sender.vendor)}
+                </span>
+              </>
+            ) : null}
+            {childBadge !== null ? (
               <span className="child-badge" data-testid="child-badge">
-                [子·{sender.rootName}]
+                [子·{childBadge}]
               </span>
             ) : null}
           </header>

@@ -1,12 +1,19 @@
 /**
- * 会话列表折叠纯函数（spec §11.3；Plan 3 T4）。输入 `(conversations, unreadByRoot, roster)`
+ * 会话列表折叠纯函数（spec §11.3；Plan 3 T4）。输入 `(conversations, roster)`
  * → 顶层行数组：① 喊话置顶；② 群聊/逻辑节点私聊顶层；③ runtime 根私聊=折叠容器（同根子树
  * 全部子私聊嵌套其内）；④ human 节点与 human 会话完全过滤；⑤ 其余按最后消息时间倒序。
- * 归属：DM `key`=`dm:<idA>_<idB>`（字典序），取非 human 参与方最深者（同级 id 最小）；
+ * 归属规则单源在 `ownership.ts`（与会话列表/组织树/未读聚合共用）。
  * 展开态走手风琴，持久化键前缀 `agentchat:`，坏 JSON 容错。
  */
 import type { ConversationSummary, RosterNode } from "../../shared/contracts"
 import { loadExpanded, saveExpanded, toggleExpanded, type StorageLike } from "./accordion"
+import {
+  buildRosterIndex,
+  isHumanDm,
+  resolveOwner,
+  type RosterIndex,
+} from "./ownership"
+import { aggregateUnread } from "./unread"
 
 export type { StorageLike }
 /** 嵌套于根容器内的子会话行。 */
@@ -26,56 +33,15 @@ export interface FoldedRow {
   readonly conversation: ConversationSummary | null
   readonly node: RosterNode | undefined
   /**
-   * 容器根 = `unreadByRoot[rootId]`（**root agent 侧**：根自身+后代聚合，服务端 `unreadFor` 口径）；
-   * 其余行 = `conversation.unread`（**human 侧**）。两读者不同：`POST /read` 只推进 human 位点，
-   * 故根聚合**不随 human 阅读减少/清零**——纯函数恒等于入参，不做 human 侧扣减。
+   * 容器根 = **human 观察者口径的全子树聚合未读**（`aggregateUnread`：自身 + 全部后代会话的
+   * 每条会话 human 侧 `unread` 之和，spec §11.3 双层聚合）；子行/扁平行 = `conversation.unread`
+   * 本身。打开子会话标已读后 `conversation.unread` 归零 → 祖先徽标同步下降。
    */
   readonly unread: number
   readonly children: readonly ChildRow[]
   readonly lastActivity: number
 }
-interface NodeInfo {
-  readonly node: RosterNode
-  readonly rootId: string
-  readonly depth: number
-  readonly human: boolean
-  readonly logical: boolean
-}
 
-interface RosterIndex {
-  readonly nodes: ReadonlyMap<string, NodeInfo>
-  readonly roots: ReadonlyMap<string, RosterNode>
-}
-
-function buildIndex(roster: readonly RosterNode[]): RosterIndex {
-  const nodes = new Map<string, NodeInfo>()
-  const roots = new Map<string, RosterNode>()
-  const walk = (node: RosterNode, rootId: string, depth: number): void => {
-    nodes.set(node.id, {
-      node,
-      rootId,
-      depth,
-      human: node.vendor === "human",
-      logical: node.kind === "logical",
-    })
-    for (const child of node.children) walk(child, rootId, depth + 1)
-  }
-  for (const root of roster) {
-    roots.set(root.id, root)
-    walk(root, root.id, 0)
-  }
-  return { nodes, roots }
-}
-
-/**
- * DM `key`（`dm:<idA>_<idB>`，成员字典序）→ 参与方 id；非 DM 或**段数≠2** 返回空
- * （段数校验：未来 id 含 `_` 时宁可判为不可归属，也不静默错拆丢行）。
- */
-function dmParticipants(key: string): readonly string[] {
-  if (!key.startsWith("dm:")) return []
-  const parts = key.slice(3).split("_")
-  return parts.length === 2 && parts.every((id) => id !== "") ? parts : []
-}
 const SHOUT_KEY = "shout"
 /**
  * 会话活动时间：末条消息时间；**无消息的会话回落到会话创建时间**——
@@ -95,17 +61,6 @@ function byRecency<T extends { readonly id: string; readonly lastActivity: numbe
   if (delta !== 0) return delta
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
 }
-/** DM 归属 agent：非 human 参与方中最深者（同级取 id 字典序最小）。 */
-function resolveOwner(key: string, index: RosterIndex): NodeInfo | undefined {
-  let best: NodeInfo | undefined
-  for (const id of dmParticipants(key)) {
-    const info = index.nodes.get(id)
-    if (info === undefined || info.human) continue
-    if (best === undefined || info.depth > best.depth) best = info
-    else if (info.depth === best.depth && id < best.node.id) best = info
-  }
-  return best
-}
 interface RootBucket {
   readonly node: RosterNode
   /** 归属该根的**自有会话**（owner 即根本身）；>1 条时按约定选 header，其余降级为子行。 */
@@ -115,10 +70,6 @@ interface RootBucket {
 
 function childRow(conversation: ConversationSummary, node: RosterNode): ChildRow {
   return { conversation, node, retired: node.status === "retired" }
-}
-/** 该 DM 是否含 human 参与方（用于 header 优先 human↔root 约定）。 */
-function isHumanDm(key: string, index: RosterIndex): boolean {
-  return dmParticipants(key).some((id) => index.nodes.get(id)?.human === true)
 }
 
 /**
@@ -154,13 +105,16 @@ function flatRow(
   }
 }
 
-/** 折叠会话列表为顶层行数组（纯函数，便于单测断言）。 */
+/**
+ * 折叠会话列表为顶层行数组（纯函数）。
+ * 根容器行徽标取 `aggregateUnread`（human 观察者全子树口径）；子行/扁平行取自身 `unread`。
+ */
 export function foldConversations(
   conversations: readonly ConversationSummary[],
-  unreadByRoot: Readonly<Record<string, number>>,
   roster: readonly RosterNode[],
 ): readonly FoldedRow[] {
-  const index = buildIndex(roster)
+  const index = buildRosterIndex(roster)
+  const unreadByOwner = aggregateUnread(conversations, roster)
   const shout: FoldedRow[] = []
   const flat: FoldedRow[] = []
   const buckets = new Map<string, RootBucket>()
@@ -209,7 +163,7 @@ export function foldConversations(
       id: rootId,
       conversation: header,
       node: bucket.node,
-      unread: unreadByRoot[rootId] ?? 0,
+      unread: unreadByOwner.get(rootId) ?? 0,
       children,
       lastActivity,
     })

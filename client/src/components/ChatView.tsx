@@ -1,6 +1,12 @@
 /**
- * 聊天视图（spec §11.4；Plan 3 T5）——消息流 + 滚顶上翻分页 + 深链定位 + 发送。
+ * 聊天视图（spec §11.4/§11.5；Plan 3 T5）——消息流 + 滚顶上翻分页 + 深链定位 + 发送。
  * 派生逻辑在 `chat.ts` / `receipts.ts` / `deeplink.ts` 纯函数；本组件只管交互与滚动。
+ *
+ * 终审修复：
+ * - F2 深链：未命中时**有界向前分页**（复用 `loadOlder`，上限 `MAX_FOCUS_PAGES` 页）；
+ *   历史耗尽仍未命中 → 显式「消息不可定位」（不静默）；DOM 定位按 `dataset.messageId` 集合
+ *   比较（不再把 `msg` 拼进 `querySelector`，含引号不抛 `DOMException`）。
+ * - F4 输入：`isComposing` 期间忽略 Enter（CJK 选词不误发）；同步 ref 锁防同帧双击重复提交。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import type { ChatMessage } from "../../../shared/contracts"
@@ -12,6 +18,8 @@ import { MessageBubble } from "./MessageBubble"
 
 /** 分页页大小（与服务端 `DEFAULT_HISTORY_LIMIT` 对齐）。 */
 const PAGE_SIZE = 50
+/** 深链向前分页上限（页）：最多 5 页 / 250 条，找到即停（F2 有界）。 */
+const MAX_FOCUS_PAGES = 5
 /** 距顶阈值（px）内触发上翻。 */
 const TOP_THRESHOLD = 24
 /** 贴底判定（px）：新消息仅在贴底时跟随滚动，不打断上翻阅读。 */
@@ -24,14 +32,23 @@ const EMPTY_MESSAGES: readonly ChatMessage[] = []
 /** ChatView 入参。 */
 export interface ChatViewProps {
   readonly conversationId: string
-  /** 深链目标消息短 id（`?msg=`）；命中滚动 + 高亮 2s，未命中静默。 */
+  /** 深链目标消息短 id（`?msg=`）；命中滚动 + 高亮 2s，未命中则分页查找，耗尽后显式提示。 */
   readonly focusMessageId: string | null
+}
+
+/** 按 `data-message-id` 集合比较定位目标（不拼接选择器，任何字符都安全）。 */
+function findMessageNode(container: HTMLElement | null, messageId: string): HTMLElement | undefined {
+  if (container === null) return undefined
+  return Array.from(container.querySelectorAll<HTMLElement>("[data-message-id]")).find(
+    (element) => element.dataset["messageId"] === messageId,
+  )
 }
 
 export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
   const { state, loadOlder, sendMessage } = useStore()
   const rosterView = useMemo(() => buildRosterView(state.roster), [state.roster])
   const messages = state.messages.get(conversationId) ?? EMPTY_MESSAGES
+  const messagesLoaded = state.messages.has(conversationId)
   const conversation = state.conversations.find((item) => item.id === conversationId)
   const title = conversationTitle(conversation, rosterView)
   const isGroup = conversation?.kind === "group"
@@ -42,12 +59,15 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
   const hasMoreRef = useRef(true)
   const nearBottomRef = useRef(true)
   const handledFocusRef = useRef<string | null>(null)
+  const focusPagesRef = useRef(0)
   const highlightTimerRef = useRef<number | undefined>(undefined)
+  const sendingRef = useRef(false)
   const [draft, setDraft] = useState("")
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [highlightId, setHighlightId] = useState<string | null>(null)
+  const [focusMiss, setFocusMiss] = useState<string | null>(null)
   const [showGroupInfo, setShowGroupInfo] = useState(false)
 
   const scrollToBottom = useCallback((): void => {
@@ -55,14 +75,17 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
     if (node !== null) node.scrollTop = node.scrollHeight
   }, [])
 
-  // 切换会话：重置分页游标 / 草稿 / 高亮，并滚到底部；卸载/切会话时清掉高亮计时器（复审 I1）。
+  // 切换会话：重置分页游标 / 草稿 / 高亮 / 深链进度，并滚到底部；
+  // 卸载/切会话时清掉高亮计时器（复审 I1）。
   useEffect(() => {
     hasMoreRef.current = true
     nearBottomRef.current = true
     handledFocusRef.current = null
+    focusPagesRef.current = 0
     setDraft("")
     setError(null)
     setHighlightId(null)
+    setFocusMiss(null)
     setShowGroupInfo(false)
     scrollToBottom()
     return () => {
@@ -112,27 +135,50 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
       })
   }, [conversationId, loadOlder, messages])
 
-  // 深链定位：目标载入后滚动 + 高亮 2s；每次会话仅定位一次，未命中静默。
+  // 深链定位（F2）：目标已加载 → 滚动 + 高亮 2s；未加载 → 有界向前分页；
+  // 历史耗尽仍未命中 → 显式提示「消息不可定位」（不静默）。
   // 高亮计时器存 ref 且**不注册 effect cleanup**——2s 窗口内任何 refetch 换了 `messages`
   // 引用都不得取消/延长高亮；清除只由计时器或会话切换/卸载触发（复审 I1）。
   useEffect(() => {
     if (focusMessageId === null || handledFocusRef.current === focusMessageId) return
-    if (!messages.some((message) => message.id === focusMessageId)) return
-    handledFocusRef.current = focusMessageId
-    setHighlightId(focusMessageId)
-    const target = scrollRef.current?.querySelector(`[data-message-id="${focusMessageId}"]`)
-    if (target instanceof HTMLElement) target.scrollIntoView({ block: "center" })
-    if (highlightTimerRef.current !== undefined) window.clearTimeout(highlightTimerRef.current)
-    highlightTimerRef.current = window.setTimeout(() => {
-      setHighlightId(null)
-      highlightTimerRef.current = undefined
-    }, HIGHLIGHT_MS)
-  }, [focusMessageId, messages])
+    if (!messagesLoaded) return // 历史尚未载入：等待，勿误判不可定位
+    if (messages.some((message) => message.id === focusMessageId)) {
+      handledFocusRef.current = focusMessageId
+      setFocusMiss(null)
+      setHighlightId(focusMessageId)
+      const target = findMessageNode(scrollRef.current, focusMessageId)
+      if (target !== undefined) target.scrollIntoView({ block: "center" })
+      if (highlightTimerRef.current !== undefined) window.clearTimeout(highlightTimerRef.current)
+      highlightTimerRef.current = window.setTimeout(() => {
+        setHighlightId(null)
+        highlightTimerRef.current = undefined
+      }, HIGHLIGHT_MS)
+      return
+    }
+    // 未加载：有界向前分页（找到即停；页耗尽或已达上限 → 判定不可定位）。
+    const exhausted = focusPagesRef.current >= MAX_FOCUS_PAGES || !hasMoreRef.current
+    const earliest = messages[0]
+    if (exhausted || messages.length < PAGE_SIZE || earliest === undefined) {
+      handledFocusRef.current = focusMessageId
+      setFocusMiss(focusMessageId)
+      return
+    }
+    focusPagesRef.current += 1
+    void loadOlder(conversationId, earliest.seq)
+      .then((count) => {
+        if (count < PAGE_SIZE) hasMoreRef.current = false
+      })
+      .catch(() => {
+        hasMoreRef.current = false
+      })
+  }, [focusMessageId, messages, messagesLoaded, conversationId, loadOlder])
 
   const canSend = draft.trim().length > 0 && !sending
 
   const submit = useCallback((): void => {
-    if (draft.trim().length === 0 || sending) return
+    // 同步 ref 锁（F4②）：异步 state 更新前的同帧双击不得重复提交。
+    if (draft.trim().length === 0 || sendingRef.current) return
+    sendingRef.current = true
     setSending(true)
     setError(null)
     void sendMessage(conversationId, draft)
@@ -142,13 +188,19 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
         requestAnimationFrame(scrollToBottom)
       })
       .catch(() => {
+        // 失败：乐观气泡已回滚，草稿保留供重试。
         setError("发送失败，请重试。")
       })
-      .finally(() => setSending(false))
-  }, [conversationId, draft, scrollToBottom, sendMessage, sending])
+      .finally(() => {
+        sendingRef.current = false
+        setSending(false)
+      })
+  }, [conversationId, draft, scrollToBottom, sendMessage])
 
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+      // CJK 输入法选词回车不发送（F4①）。
+      if (event.nativeEvent.isComposing) return
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault()
         submit()
@@ -182,6 +234,11 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
         </div>
       </header>
       <div className="chat-scroll" data-testid="chat-scroll" ref={scrollRef} onScroll={onScroll}>
+        {focusMiss !== null && focusMiss === focusMessageId ? (
+          <p className="chat-focus-miss" role="status" data-testid="focus-missing">
+            消息不可定位
+          </p>
+        ) : null}
         {loading ? (
           <p className="chat-loading" data-testid="chat-loading">
             正在载入更早的消息…
