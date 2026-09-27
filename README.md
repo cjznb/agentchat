@@ -4,7 +4,7 @@
 
 ## 状态
 
-Hub 核心 + Web UI 已实现（HTTP/WS/MCP、ask 批示、通知中心、审批闸门，以及聊天软件式三栏 Web 界面）；厂商适配器（OpenCode / Claude Code）待做。spec 见 `docs/superpowers/specs/`。
+Hub 核心 + Web UI + 两个厂商适配器（OpenCode / Claude Code）**均已实现**（Hub：HTTP/WS/MCP、ask 批示、通知中心、审批闸门；Web UI：聊天软件式三栏界面；适配器：进程外插件/hooks + 一键安装器）。spec 见 `docs/superpowers/specs/`。
 
 ## Web UI
 
@@ -37,6 +37,26 @@ npm start        # = tsx server/main.ts：拉起 HTTP 服务 + 2s 唤醒 dispatc
 `npm start` 是生产入口：`server/main.ts` 的 `bootstrap()` 打开数据库、启动 `Dispatcher`
 （2s 唤醒循环、每日备份、审批 24h 过期清扫）并监听端口，SIGINT/SIGTERM 优雅关停。
 dispatcher 不在 `createApp()`/`start()` 内部启动（测试反复调用会把 interval 与备份打进临时库）。
+
+## 适配器
+
+把 OpenCode / Claude Code 接入 Hub —— 两者都是**进程外 pull 适配器**：Hub **不主动推送**，由适配器在 agent
+空闲时**主动拉取**待投递内容（agent 侧无长驻连接可被 Hub 推送）。Hub 侧登记的厂商列表由 `AGENTCHAT_ADAPTERS`
+控制（逗号分隔，如 `AGENTCHAT_ADAPTERS=opencode,claude-code`；空/未设 = 不登记，仅测试用 fake）。
+
+一条命令安装（在**仓库根目录**执行；先 `npm start` 让 Hub 写出 `hub_token`。安装器本身不读 `HUB_TOKEN`，
+但**运行 agent 时**需让 `HUB_TOKEN` 对其进程可见，见各文档）：
+
+| 厂商 | 安装命令（可直接复制） | 详细文档 |
+|---|---|---|
+| OpenCode | `node adapters/opencode/install.mjs` | [docs/adapters-opencode.md](docs/adapters-opencode.md) |
+| Claude Code | `node adapters/claude-code/install.mjs` | [docs/adapters-claude-code.md](docs/adapters-claude-code.md) |
+
+两安装器均**幂等**、改动前自动备份、支持 `--dry-run`（只打印不落盘）与 `--uninstall`（精确移除本适配器条目）。
+
+> **Claude Code 有两个落点（务必区分）**：**hooks 落 `settings.json`**；**MCP 配置落 `~/.claude.json` 顶层
+> `mcpServers`**（或 `--mcp-config` 指向项目 `.mcp.json`；设 `CLAUDE_CONFIG_DIR` 时随其重定位）——**两个不同文件**。
+> 这两个文件的落点是官方事实，安装器从机制上拒绝把二者写成同一文件。
 
 ## MCP 工具面与通知端点
 
