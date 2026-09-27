@@ -22,6 +22,7 @@ import {
   type WsServerFrame,
 } from "../../../shared/contracts"
 import type { ReloadResult } from "../api"
+import { markEntryRead, upsertDecided } from "../cards"
 import type { ConnectionStatus } from "../ws"
 
 /** 前端应用状态（所有 UI 组件订阅的单一来源）。 */
@@ -79,6 +80,10 @@ export type StoreAction =
     }
   | { readonly type: "connection"; readonly status: ConnectionStatus }
   | { readonly type: "open"; readonly conversationId: string | null }
+  /** 卡提交成功：已决单据并入全部列表，并从「需我处理」列表移除（乐观对账）。 */
+  | { readonly type: "notifDecided"; readonly approval: ApprovalEntry }
+  /** 通知已读（乐观；幂等置位 `readAt`）。 */
+  | { readonly type: "notifRead"; readonly id: string; readonly at: number }
   | { readonly type: "hydrate"; readonly patch: ReloadResult }
 
 function warnIgnore(state: AppState, frame: WsServerFrame): AppState {
@@ -292,6 +297,18 @@ export function reducer(state: AppState, action: StoreAction): AppState {
       return { ...state, connection: action.status }
     case "open":
       return { ...state, openConversationId: action.conversationId }
+    case "notifDecided":
+      return {
+        ...state,
+        notifications: state.notifications.filter((entry) => entry.id !== action.approval.id),
+        notificationsAll: upsertDecided(state.notificationsAll, action.approval),
+      }
+    case "notifRead":
+      return {
+        ...state,
+        notifications: markEntryRead(state.notifications, action.id, action.at),
+        notificationsAll: markEntryRead(state.notificationsAll, action.id, action.at),
+      }
     case "hydrate":
       return hydrate(state, action.patch)
   }

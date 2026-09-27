@@ -3,8 +3,10 @@
  * 发送者头像 + 厂商徽标 + 子节点徽标、己方四级回执。纯展示，数据全由 props 注入。
  */
 import type { ChatMessage } from "../../../shared/contracts"
+import type { CardData } from "../cards"
 import { formatClock, initialOf, vendorBadge, type SenderView } from "../chat"
 import { receiptGlyph } from "../receipts"
+import { ChatCard } from "./Cards"
 
 /** MessageBubble 入参。 */
 export interface MessageBubbleProps {
@@ -14,6 +16,8 @@ export interface MessageBubbleProps {
   /** 群聊上下文：展示头像 / 名字 / 徽标（私聊与己方隐藏）。 */
   readonly showSender: boolean
   readonly highlighted: boolean
+  /** 审批/批示卡（`meta` 识别）；非卡系统消息 → null。 */
+  readonly card: CardData | null
 }
 
 function rowClass(highlighted: boolean, extra?: string): string {
@@ -22,10 +26,22 @@ function rowClass(highlighted: boolean, extra?: string): string {
     .join(" ")
 }
 
-export function MessageBubble({ message, own, sender, showSender, highlighted }: MessageBubbleProps) {
+export function MessageBubble({ message, own, sender, showSender, highlighted, card }: MessageBubbleProps) {
   const highlightAttr = highlighted ? "true" : undefined
 
   if (message.kind === "system") {
+    if (card !== null) {
+      return (
+        <li
+          className={rowClass(highlighted, "is-system is-card")}
+          data-testid="message-card"
+          data-message-id={message.id}
+          data-highlight={highlightAttr}
+        >
+          <ChatCard card={card} />
+        </li>
+      )
+    }
     return (
       <li
         className={rowClass(highlighted, "is-system")}

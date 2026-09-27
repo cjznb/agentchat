@@ -4,6 +4,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import type { ChatMessage } from "../../../shared/contracts"
+import { readCardMessage } from "../cards"
 import { buildRosterView, conversationTitle } from "../chat"
 import { useStore } from "../store"
 import { GroupInfo } from "./GroupInfo"
@@ -198,6 +199,7 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
                 sender={rosterView.byId.get(message.fromAgentId)}
                 showSender={isGroup}
                 highlighted={highlightId === message.id}
+                card={readCardMessage(message)}
               />
             ))}
           </ul>

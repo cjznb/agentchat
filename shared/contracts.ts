@@ -116,6 +116,8 @@ export type ApprovalSnapshot = z.infer<typeof approvalSnapshotSchema>
 export const notificationEntrySchema = z.object({
   id: z.string(),
   kind: approvalKindSchema,
+  /** 发起方 agent id（Plan 3 T8：通知页「发起方」列；与 `ApprovalEntry.requesterAgentId` 同源）。 */
+  requesterAgentId: z.string(),
   target: z.string(),
   action: approvalActionValueSchema,
   payload: z.record(z.string(), z.unknown()),

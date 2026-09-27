@@ -180,6 +180,7 @@ function notificationEntry(db: Db, approval: Approval): NotificationEntry {
   return {
     id: approval.id,
     kind: approval.kind,
+    requesterAgentId: approval.requesterAgentId,
     target: approval.target,
     action: approval.action,
     payload: approval.payload,

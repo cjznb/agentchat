@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { RosterNode } from "../../shared/contracts"
+import { unreadCount } from "./cards"
 import { ChatView } from "./components/ChatView"
 import { ContactCard } from "./components/ContactCard"
 import { ConversationList } from "./components/ConversationList"
 import { GroupCreate } from "./components/Groups"
+import { NotificationAside, NotificationsView } from "./components/Notifications"
 import { OrgTree } from "./components/OrgTree"
 import { ShoutView } from "./components/Shout"
 import { parseDeepLink } from "./deeplink"
@@ -13,6 +15,7 @@ import type { ConnectionStatus } from "./ws"
 const modes = [
   { id: "chat", label: "聊天", glyph: "聊", title: "会话", hint: "选择一个 Agent，开始查看消息。" },
   { id: "contacts", label: "通讯录", glyph: "联", title: "Agent 树", hint: "点选节点查看资料卡与参与会话。" },
+  { id: "notifications", label: "通知", glyph: "铃", title: "通知中心", hint: "审批与批示集中在这里。" },
   { id: "shout", label: "喊话", glyph: "播", title: "全员喊话", hint: "面向全部 Agent 发布一条消息。" },
 ] as const
 
@@ -22,6 +25,7 @@ type ContentState = "loading" | "empty" | "error"
 const listCopy = {
   chat: { title: "最近会话", detail: "还没有会话" },
   contacts: { title: "Agent 层级", detail: "等待 Agent 加入" },
+  notifications: { title: "通知中心", detail: "没有需要处理的单据" },
   shout: { title: "广播记录", detail: "还没有喊话" },
 } as const satisfies Record<ModeId, { readonly title: string; readonly detail: string }>
 
@@ -70,7 +74,11 @@ export function App() {
     () => parseDeepLink(typeof window === "undefined" ? "" : window.location.search),
     [],
   )
+  // 通知跳转目标：初值取挂载时深链 `?msg=`，条目标记后由 `handleJump` 改写（ChatView 滚动 + 高亮）。
+  const [focusMessageId, setFocusMessageId] = useState<string | null>(deepLink.messageId)
   const deepLinkApplied = useRef(false)
+  // rail「通知」徽标 = actionable 未读数（未读 = `readAt` 为空）；0 → 隐藏。
+  const notificationBadge = unreadCount(state.notifications)
 
   // 深链入口（spec §11.5）：挂载时带 `?conversation=` 则自动承载该会话（消息由其内部重拉）。
   useEffect(() => {
@@ -78,6 +86,22 @@ export function App() {
     deepLinkApplied.current = true
     if (deepLink.conversationId !== null) openConversation(deepLink.conversationId)
   }, [deepLink.conversationId, openConversation])
+
+  // 通知条目跳转：打开会话（按需载入消息 + 标已读）→ 切聊天视图 → 定位卡消息；并同步地址栏深链。
+  const handleJump = useCallback(
+    (conversationId: string, messageId: string) => {
+      openAndRead(conversationId)
+      setFocusMessageId(messageId)
+      setActiveMode("chat")
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href)
+        url.searchParams.set("conversation", conversationId)
+        url.searchParams.set("msg", messageId)
+        window.history.replaceState(null, "", url.toString())
+      }
+    },
+    [openAndRead],
+  )
 
   // 资料卡「发消息」：确保 DM 后切到聊天视图。
   const handleMessage = useCallback(
@@ -126,6 +150,9 @@ export function App() {
             <button className="rail-button" data-active={mode.id === activeMode} aria-pressed={mode.id === activeMode} key={mode.id} onClick={() => { setActiveMode(mode.id); if (mode.id !== "chat") setComposeGroup(false) }} type="button">
               <span className="rail-glyph" aria-hidden="true">{mode.glyph}</span>
               <span>{mode.label}</span>
+              {mode.id === "notifications" && notificationBadge > 0 ? (
+                <span className="rail-badge" data-testid="notification-badge">{notificationBadge}</span>
+              ) : null}
             </button>
           ))}
         </div>
@@ -140,13 +167,17 @@ export function App() {
           <OrgTree selectedId={selectedContactId} onSelect={setSelectedContactId} />
         ) : activeMode === "chat" ? (
           <ConversationList onCreateGroup={() => setComposeGroup(true)} />
+        ) : activeMode === "notifications" ? (
+          <NotificationAside />
         ) : (
           <div className="list-empty"><span aria-hidden="true">—</span><p>{list.detail}</p><small>数据接入将在后续任务完成</small></div>
         )}
       </aside>
 
       <section className="work-view" aria-labelledby="view-title" data-testid="right-view">
-        {activeMode === "shout" ? (
+        {activeMode === "notifications" ? (
+          <NotificationsView onJump={handleJump} />
+        ) : activeMode === "shout" ? (
           <ShoutView conversationId={shoutConversationId} />
         ) : activeMode === "chat" && composeGroup ? (
           <GroupCreate onCancel={() => setComposeGroup(false)} onCreated={handleGroupCreated} />
@@ -154,7 +185,7 @@ export function App() {
           openSummary?.key === "shout" ? (
             <ShoutView conversationId={openId} />
           ) : (
-            <ChatView conversationId={openId} focusMessageId={deepLink.messageId} />
+            <ChatView conversationId={openId} focusMessageId={focusMessageId} />
           )
         ) : (
           <>

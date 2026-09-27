@@ -151,6 +151,7 @@ export function ShoutView({ conversationId }: ShoutViewProps) {
                 sender={rosterView.byId.get(message.fromAgentId)}
                 showSender
                 highlighted={false}
+                card={null}
               />
             ))}
           </ul>

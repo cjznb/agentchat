@@ -17,15 +17,23 @@ import {
 } from "react"
 import {
   INITIAL_RELOAD_PLAN,
+  decideApproval as postDecision,
   ensureDm,
   loadMessages,
   loadReload,
   markConversationRead as postConversationRead,
+  markNotificationRead as postNotificationRead,
+  respondAsk as postRespondAsk,
   sendMessage as postMessage,
   shout as postShout,
   type ReloadPlan,
 } from "./api"
-import type { ShoutResult } from "../../shared/contracts"
+import type {
+  ApprovalDecision,
+  ApprovalEntry,
+  RespondAskInput,
+  ShoutResult,
+} from "../../shared/contracts"
 import { initialState, planReload, reducer, type AppState } from "./reducers"
 import { browserSocketFactory, currentWsUrl, WsClient, type ConnectionStatus } from "./ws"
 
@@ -44,6 +52,12 @@ export interface StoreValue {
   /** 上翻分页：拉取 `beforeSeq` 之前一页并入会话；返回本页条数（< 页大小 = 无更多）。 */
   loadOlder(conversationId: string, beforeSeq: number): Promise<number>
   markConversationRead(conversationId: string): Promise<void>
+  /** 审批决议（卡内/通知页共用）：成功乐观置已决并重拉对账；失败重拉后抛出（不改本地已决态）。 */
+  decideApproval(approvalId: string, decision: ApprovalDecision): Promise<ApprovalEntry>
+  /** 批示答复（卡内/通知页共用）：首答生效；409/400 抛出且重拉对账。 */
+  respondAsk(askId: string, answer: RespondAskInput): Promise<ApprovalEntry>
+  /** 通知标记已读（幂等，乐观清未读点）：不阻塞跳转。 */
+  markNotificationRead(id: string): Promise<void>
 }
 
 const StoreContext = createContext<StoreValue | undefined>(undefined)
@@ -176,6 +190,49 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
     [dispatch, reload, markConversationRead],
   )
 
+  const decideApproval = useCallback(
+    async (approvalId: string, decision: ApprovalDecision): Promise<ApprovalEntry> => {
+      try {
+        const { approval } = await postDecision(approvalId, decision)
+        dispatch({ type: "notifDecided", approval })
+        reload({ roster: false, conversations: false, notifications: true, approvals: true, messages: [] })
+        return approval
+      } catch (error) {
+        // 409/404：本地已决态不变；重拉通知/审批列表与服务端对齐（对账式恢复）。
+        reload({ roster: false, conversations: false, notifications: true, approvals: true, messages: [] })
+        throw error
+      }
+    },
+    [dispatch, reload],
+  )
+
+  const respondAsk = useCallback(
+    async (askId: string, answer: RespondAskInput): Promise<ApprovalEntry> => {
+      try {
+        const { ask } = await postRespondAsk(askId, answer)
+        dispatch({ type: "notifDecided", approval: ask })
+        reload({ roster: false, conversations: false, notifications: true, approvals: true, messages: [] })
+        return ask
+      } catch (error) {
+        reload({ roster: false, conversations: false, notifications: true, approvals: true, messages: [] })
+        throw error
+      }
+    },
+    [dispatch, reload],
+  )
+
+  const markNotificationRead = useCallback(
+    async (id: string): Promise<void> => {
+      try {
+        const result = await postNotificationRead(id)
+        if (result.read) dispatch({ type: "notifRead", id, at: Date.now() })
+      } catch (error) {
+        console.warn("mark notification read failed", error)
+      }
+    },
+    [dispatch],
+  )
+
   const openDm = useCallback(
     async (nodeId: string): Promise<void> => {
       try {
@@ -207,6 +264,9 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
       shoutBroadcast,
       loadOlder,
       markConversationRead,
+      decideApproval,
+      respondAsk,
+      markNotificationRead,
     }),
     [
       state,
@@ -218,6 +278,9 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
       shoutBroadcast,
       loadOlder,
       markConversationRead,
+      decideApproval,
+      respondAsk,
+      markNotificationRead,
     ],
   )
 
