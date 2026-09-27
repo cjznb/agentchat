@@ -37,6 +37,10 @@
   401/404 等确定性错误不重试，记录并降级。
 - 所有事件处理入队即返回（fire-and-forget，串行保序），网络重试在后台推进，**不阻塞宿主事件循环**。
 - token 写失败仅记录、不中断（尽力而为）。
+- 陈旧 `join_token`（Hub DB 重置/切换后）→ `invalid_join_token`：清空本地 token 后按「无 token 首次注册」
+  重新注册为根并写回新 token（此路径不可能产生重复根），日志给明确 warn。
+- 未映射会话（自身尚未注册的子会话）的 `session.status`/`session.idle` 一律跳过并 warn，
+  **不回落根节点**（避免「给根取件、往子会话注入」错配）；该子会话注册后自然恢复。
 - Windows 上 `chmod 0600` 调用成功但权限位可能不生效（与 Hub 侧 token 同策略）。
 
 ## 安装
@@ -48,7 +52,9 @@
 | 文件 | 职责 |
 |---|---|
 | `plugin.ts` | 插件入口（`AgentChatPlugin`）；事件映射与队列调度 |
-| `hub.ts` | Hub HTTP 客户端（MCP `register` 握手 + `/internal/*`），超时/退避 |
-| `token.ts` | `join_token` 文件读写（0600 尽力而为） |
+| `hub.ts` | 客户端门面：组合传输层与 MCP，暴露 `register` + `/internal/*` |
+| `transport.ts` | 传输层：HTTP POST、3s 超时、指数退避重试、`HubError` |
+| `mcp.ts` | MCP `register` 握手与 SSE/工具结果解析、`HubToolError` |
+| `token.ts` | `join_token` 文件读写/清除（0600 尽力而为） |
 | `types.ts` | OpenCode 插件 API 最小本地类型声明（实测 1.18.32） |
 | `util.ts` | 类型守卫 + 串行任务队列 |

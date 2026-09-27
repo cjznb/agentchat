@@ -5,7 +5,7 @@
  * `writeTokenFile` 同策略，见 task-3 报告）。读失败（不存在/不可读）一律视为「无 token」，
  * 写失败返回 `{ok:false}` 由调用方报告后继续（不得因此中断注册）。
  */
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -39,6 +39,16 @@ export function writeToken(path: string, token: string): WriteTokenResult {
     mkdirSync(dirname(path), { recursive: true })
     writeFileSync(path, token, { mode: 0o600 })
     chmodSync(path, 0o600)
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/** 清除陈旧 token（文件不存在视为成功）；供 `invalid_join_token` 回退路径使用。 */
+export function clearToken(path: string): WriteTokenResult {
+  try {
+    rmSync(path, { force: true })
     return { ok: true }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }

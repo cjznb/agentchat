@@ -250,6 +250,35 @@ describe("根会话注册与 join_token 落盘", () => {
     expect(harness.logs.some((line) => line.includes("root register failed"))).toBe(true)
     expect(harness.kit.internalCalls).toHaveLength(0)
   })
+
+  it("recovers from a stale join_token by clearing it and re-registering as root", async () => {
+    const home = tempHome()
+    const path = join(home, "agents", "opencode.token")
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, "stale-token")
+    let calls = 0
+    const harness = setup({
+      home,
+      overrides: {
+        toolsCall: () => {
+          calls += 1
+          return calls === 1
+            ? toolReply("RegistrationError: unknown join_token [invalid_join_token]", true)
+            : toolReply(registerText("agent-new", "jt-new"))
+        },
+      },
+    })
+    await emit(harness, rootCreated(), sessionStatus("root-sess", "busy"))
+    expect(harness.kit.toolCalls[0]).toEqual({
+      vendor: "opencode",
+      purpose: "coding-agent",
+      join_token: "stale-token",
+    })
+    expect(harness.kit.toolCalls[1]).toEqual({ vendor: "opencode", purpose: "coding-agent" })
+    expect(readFileSync(path, "utf8")).toBe("jt-new")
+    expect(harness.logs.some((line) => line.includes("stale join_token rejected"))).toBe(true)
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-new", state: "busy" }])
+  })
 })
 
 // ── 子注册 ──────────────────────────────────────────────────────────
@@ -317,6 +346,34 @@ describe("状态上报", () => {
       (body) => isRecord(body) && body["state"] === "offline",
     )
     expect(offline).toEqual([{ agentId: "agent-1", state: "offline" }])
+  })
+})
+
+describe("会话映射与状态归属", () => {
+  it("skips state and wake for unmapped sessions instead of falling back to the root", async () => {
+    const home = tempHome()
+    const harness = setup({
+      home,
+      overrides: {
+        internal: (path) =>
+          path === "/internal/wake"
+            ? jsonResponse({
+                messages: [{ id: "m1", fromAgentId: "peer", conversationId: "c1", body: "hi" }],
+                receipts: [],
+              })
+            : undefined,
+      },
+    })
+    await emit(
+      harness,
+      rootCreated(),
+      sessionStatus("ghost-sess", "busy"),
+      sessionIdle("ghost-sess"),
+    )
+    expect(stateCalls(harness.kit)).toEqual([])
+    expect(harness.kit.internalCalls.some((call) => call.path === "/internal/wake")).toBe(false)
+    expect(harness.client.texts).toEqual([])
+    expect(harness.logs.filter((line) => line.includes("unmapped session"))).toHaveLength(2)
   })
 })
 

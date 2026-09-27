@@ -16,13 +16,15 @@
 import {
   createHubClient,
   HubError,
+  HubToolError,
   type AdapterState,
   type Hub,
   type RegisterArgs,
+  type RegisterResult,
   type ResultItem,
   type WakeMessage,
 } from "./hub"
-import { readToken, resolveHome, tokenPath, writeToken } from "./token"
+import { clearToken, readToken, resolveHome, tokenPath, writeToken } from "./token"
 import type { Hooks, OpencodeEvent, OpencodeSession, Plugin, PluginInput } from "./types"
 import { createTaskQueue, type TaskQueue } from "./util"
 
@@ -85,15 +87,41 @@ function createRuntime(
     }
   }
 
+  const registerArgs = (joinToken: string | undefined): RegisterArgs => ({
+    vendor: ADAPTER_VENDOR,
+    purpose: "coding-agent",
+    ...(joinToken === undefined ? {} : { join_token: joinToken }),
+  })
+
+  /**
+   * 陈旧 token（Hub DB 重置/切换）→ `invalid_join_token`（语义：`getAgentByTokenHash` 查无此人）
+   * 安全回退：清空本地 token 后按「无 token 首次注册」重新注册为根；此时不存在可重复的根。
+   */
+  const registerRootAgent = async (existing: string | undefined): Promise<RegisterResult> => {
+    try {
+      return await hub.register(registerArgs(existing))
+    } catch (error) {
+      if (
+        existing === undefined ||
+        !(error instanceof HubToolError) ||
+        error.code !== "invalid_join_token"
+      ) {
+        throw error
+      }
+      const cleared = clearToken(path)
+      log(
+        `stale join_token rejected; re-registering as a new root${
+          cleared.ok ? "" : ` (token clear failed: ${cleared.error ?? "unknown"})`
+        }`,
+      )
+      return hub.register(registerArgs(undefined))
+    }
+  }
+
   const rootRegister = async (session: OpencodeSession): Promise<void> => {
     const existing = readToken(path)
-    const args: RegisterArgs = {
-      vendor: ADAPTER_VENDOR,
-      purpose: "coding-agent",
-      ...(existing === undefined ? {} : { join_token: existing }),
-    }
     try {
-      const result = await hub.register(args)
+      const result = await registerRootAgent(existing)
       state.agentId = result.agentId
       state.sessionToAgent.set(session.id, result.agentId)
       if (result.joinToken !== undefined) {
@@ -135,14 +163,22 @@ function createRuntime(
   }
 
   const onStatus = async (sessionID: string, status: "idle" | "busy" | "retry"): Promise<void> => {
-    const agentId = state.sessionToAgent.get(sessionID) ?? state.agentId
-    if (agentId === undefined) return
+    // 不回落根：未映射会话的状态若记到根会错配；跳过并 warn，待该子会话注册后自然恢复。
+    const agentId = state.sessionToAgent.get(sessionID)
+    if (agentId === undefined) {
+      log(`status for unmapped session ${sessionID}; skipped`)
+      return
+    }
     await reportState(agentId, status === "idle" ? "idle" : "busy")
   }
 
   const onIdle = async (sessionID: string): Promise<void> => {
-    const agentId = state.sessionToAgent.get(sessionID) ?? state.agentId
-    if (agentId === undefined) return
+    // 不回落根：否则会「给根取件、往子会话注入」；未映射即跳过并 warn。
+    const agentId = state.sessionToAgent.get(sessionID)
+    if (agentId === undefined) {
+      log(`idle for unmapped session ${sessionID}; skipped`)
+      return
+    }
     // 回合末兜底：即使宿主只发 `session.idle`（未发 `session.status`），也保证报 idle。
     await reportState(agentId, "idle")
     let messages: readonly WakeMessage[]
