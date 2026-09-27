@@ -123,6 +123,16 @@ export function getById(db: Db, id: string): Message | undefined {
   return row === undefined ? undefined : toMessage(row)
 }
 
+/** 会话内最新一条消息（WS `message`/`receipt` 事件与 UI 预览的载荷来源；空会话 → undefined）。 */
+export function latestInConversation(db: Db, conversationId: string): Message | undefined {
+  const row = db
+    .prepare<[string], MessageRow>(
+      "SELECT * FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT 1",
+    )
+    .get(conversationId)
+  return row === undefined ? undefined : toMessage(row)
+}
+
 /**
  * 会话历史：默认返回最新一页（seq 升序）；
  * 给 `before`（seq，不含）则返回紧邻其前的一页，供客户端向上翻页。

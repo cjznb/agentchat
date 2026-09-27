@@ -6,15 +6,18 @@
  */
 import { randomUUID } from "node:crypto"
 import { z } from "zod"
+import {
+  approvalActionSchema,
+  approvalStatusSchema,
+  type ApprovalAction,
+  type ApprovalStatus,
+} from "../../shared/contracts"
 import type { Db } from "../db"
 
-// spec §8 的受限动作（与 messaging 三入口一一对应）；Task 8 收敛 io 契约时再并入 shared/contracts.ts。
-const approvalActionSchema = z.enum(["shout", "group_create", "group_add"])
-// schema.sql approvals.status 的 CHECK 镜像（SQL 无法 import，此处锁定取值）。
-const approvalStatusSchema = z.enum(["pending", "approved", "rejected", "expired"])
+// 枚举单源在 shared/contracts（Task 9 上移，REST/WS/前端共用）；此处仅再导出既有类型名。
+export type { ApprovalAction, ApprovalStatus }
+
 const payloadSchema = z.record(z.string(), z.unknown())
-export type ApprovalAction = z.infer<typeof approvalActionSchema>
-export type ApprovalStatus = z.infer<typeof approvalStatusSchema>
 
 export interface Approval {
   readonly id: string

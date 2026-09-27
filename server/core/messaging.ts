@@ -197,7 +197,7 @@ function deliver(db: Db, input: SendMessageInput): SendMessageResult {
     body: input.body,
     ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
   })
-  publishMessage(conversation.id)
+  publishMessage(db, conversation.id)
   const recipientIds = recipientsOf(db, conversation, input.from)
   // 发送即生成唤醒任务（Task 6；资格与适配器门控见 store/wake.enqueueWakeJobs）。
   enqueueWakeJobs(db, { messageId: message.seq, recipientIds })
@@ -307,7 +307,7 @@ export function ack(db: Db, agentId: string, ids: readonly string[]): number {
     }
   }).immediate()
   // 回执事件发布（决议 5 发布点 2：ack 之后，事务提交、复查可见）。
-  for (const conversationId of latestByConversation.keys()) publishReceipt(conversationId)
+  for (const conversationId of latestByConversation.keys()) publishReceipt(db, conversationId)
   return confirmed
 }
 

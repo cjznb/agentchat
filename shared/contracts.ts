@@ -64,6 +64,129 @@ export const wsEventSchema = z.object({
 
 export type WsEvent = z.infer<typeof wsEventSchema>
 
+// ── 审批枚举与快照（spec §8；Task 9 自 store/approvals 上移，供 REST/WS/前端共用） ──
+
+/** 受限动作（spec §8 三入口，与 messaging 三入口一一对应）。 */
+export const APPROVAL_ACTIONS = ["shout", "group_create", "group_add"] as const
+export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number]
+
+/** 审批单状态（schema.sql `approvals.status` 的 CHECK 镜像）。 */
+export const APPROVAL_STATUS = ["pending", "approved", "rejected", "expired"] as const
+export type ApprovalStatus = (typeof APPROVAL_STATUS)[number]
+
+export const approvalActionSchema = z.enum(APPROVAL_ACTIONS)
+export const approvalStatusSchema = z.enum(APPROVAL_STATUS)
+
+/** 审批单快照（`approval` WS 事件 payload / `GET /api/approvals` 元素线格式）。 */
+export const approvalSnapshotSchema = z.object({
+  id: z.string(),
+  requesterAgentId: z.string(),
+  action: approvalActionSchema,
+  payload: z.record(z.string(), z.unknown()),
+  status: approvalStatusSchema,
+  createdAt: z.number().int().nonnegative(),
+  decidedAt: z.number().int().nonnegative().nullable(),
+})
+export type ApprovalSnapshot = z.infer<typeof approvalSnapshotSchema>
+
+// ── roster 线格式（spec §5.1/§9；Task 9 自 core/agents 上移，供 REST/WS/前端共用） ──
+
+/** roster 节点卡（字段名对齐 spec 的 snake_case）。 */
+export interface RosterNode {
+  readonly id: string
+  readonly name: string
+  readonly kind: AgentKind
+  readonly parent_id: string | null
+  readonly vendor: string
+  readonly model: string
+  readonly status: AgentStatus
+  readonly status_text: string | null
+  readonly purpose: string | null
+  readonly role_tag: string | null
+  readonly remark: string | null
+  readonly unread: number
+  readonly children: readonly RosterNode[]
+}
+
+const rosterNodeSchema: z.ZodType<RosterNode> = z.lazy(() =>
+  z.object({
+    id: z.string(),
+    name: z.string(),
+    kind: agentKindSchema,
+    parent_id: z.string().nullable(),
+    vendor: z.string(),
+    model: z.string(),
+    status: agentStatusSchema,
+    status_text: z.string().nullable(),
+    purpose: z.string().nullable(),
+    role_tag: z.string().nullable(),
+    remark: z.string().nullable(),
+    unread: z.number().int().nonnegative(),
+    children: z.array(rosterNodeSchema),
+  }),
+)
+
+/** `GET /api/roster` 响应体（森林根数组）。 */
+export const rosterTreeSchema = z.array(rosterNodeSchema)
+
+// ── WS 事件 payload（spec §Global：`{type, seq, payload}`；Task 9） ──
+
+/** `message`：新消息（会话 id + 消息短 id + 全局 seq）。 */
+export const wsMessagePayloadSchema = z.object({
+  conversationId: z.string(),
+  messageId: z.string(),
+  seq: z.number().int().nonnegative(),
+  from: z.string(),
+  body: z.string(),
+  kind: z.enum(["text", "system"]),
+  createdAt: z.number().int().nonnegative(),
+})
+export type WsMessagePayload = z.infer<typeof wsMessagePayloadSchema>
+
+/** `receipt`：回执变化（消息 id + 各收件方当前 stage）。 */
+export const wsReceiptPayloadSchema = z.object({
+  conversationId: z.string(),
+  messageId: z.string(),
+  seq: z.number().int().nonnegative(),
+  receipts: z.array(z.object({ agentId: z.string(), stage: receiptStageSchema })),
+})
+export type WsReceiptPayload = z.infer<typeof wsReceiptPayloadSchema>
+
+/** `agent`：节点变化（roster 全树快照；节点数小，整树最简单可用）。 */
+export const wsAgentPayloadSchema = z.object({ tree: rosterTreeSchema })
+export type WsAgentPayload = z.infer<typeof wsAgentPayloadSchema>
+
+/** `approval`：审批单变化（单据快照）。 */
+export const wsApprovalPayloadSchema = z.object({ approval: approvalSnapshotSchema })
+export type WsApprovalPayload = z.infer<typeof wsApprovalPayloadSchema>
+
+/** 四类事件 payload schema（键恰为 WS_EVENT_TYPES，Plan 2 前端复用）。 */
+export const WS_PAYLOAD_SCHEMAS = {
+  message: wsMessagePayloadSchema,
+  receipt: wsReceiptPayloadSchema,
+  agent: wsAgentPayloadSchema,
+  approval: wsApprovalPayloadSchema,
+} as const satisfies Record<WsEventType, z.ZodType>
+
+export type WsEventPayload<T extends WsEventType> = z.infer<(typeof WS_PAYLOAD_SCHEMAS)[T]>
+
+/**
+ * `resync` 首帧（独立于信封，`type` 不在锁集 `WS_EVENT_TYPES`）：客户端收到即
+ * **丢弃本地状态、整页重拉 REST** —— 触发条件为 `?since` 早于环形缓冲最老事件，
+ * 或进程重启后计数不匹配（`since` 大于当前计数）。
+ */
+export const WS_RESYNC_TYPE = "resync" as const
+export const wsResyncSchema = z.object({
+  type: z.literal(WS_RESYNC_TYPE),
+  seq: z.number().int().nonnegative(),
+  payload: z.object({}),
+})
+export type WsResync = z.infer<typeof wsResyncSchema>
+
+/** 服务端出帧：信封事件 ∪ `resync` 首帧。 */
+export const wsServerFrameSchema = z.union([wsEventSchema, wsResyncSchema])
+export type WsServerFrame = z.infer<typeof wsServerFrameSchema>
+
 // ── MCP 十工具 input schema（spec §9；Task 8） ──────────────────────
 // 路由层零手写类型：server/routes/mcp.ts 全部经 `MCP_TOOL_INPUTS[name]`
 // 校验入参后 `z.infer` 派生类型调 core。金样例见 tests/integration/mcp.test.ts。

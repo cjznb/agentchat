@@ -245,14 +245,14 @@ export class Dispatcher {
     try {
       backupIfDue(this.db, this.home, now)
       sweepExpired(this.db, now) // 审批 24h 过期（Task 7；brief 授权每轮顺带调用）
-      for (const conversationId of expireBusyJobs(this.db, now)) publishReceipt(conversationId)
-      for (const conversationId of rependStuckSending(this.db, now)) publishReceipt(conversationId)
+      for (const conversationId of expireBusyJobs(this.db, now)) publishReceipt(this.db, conversationId)
+      for (const conversationId of rependStuckSending(this.db, now)) publishReceipt(this.db, conversationId)
       await this.dispatchDue(now)
       for (let i = 0; i < MAX_JOBS_PER_TICK; i += 1) {
         const failed = claimFailedNotice(this.db, now)
         if (failed === undefined) break
         const conversationId = sendFailureNotice(this.db, failed, now)
-        if (conversationId !== undefined) publishMessage(conversationId)
+        if (conversationId !== undefined) publishMessage(this.db, conversationId)
       }
     } catch (error) {
       try {
@@ -274,8 +274,8 @@ export class Dispatcher {
       if (job.recipientStatus === "retired") {
         // 竞态兜底：retire 已在退役时取消，此处覆盖认领窗口内退役的残留。
         for (const conversationId of retireWakeJobs(this.db, job.agentId)) {
-          publishMessage(conversationId)
-          publishReceipt(conversationId)
+          publishMessage(this.db, conversationId)
+          publishReceipt(this.db, conversationId)
         }
         continue
       }
@@ -288,7 +288,7 @@ export class Dispatcher {
       if (claimed === undefined) continue
       const message = getBySeq(this.db, claimed.messageId)
       if (message === undefined) continue // FK 保证不可达；防呆留空
-      publishReceipt(message.conversationId)
+      publishReceipt(this.db, message.conversationId)
       // 注入（适配器抛错按拒收计，计入连续拒收；失败不打断本轮其余 job）。
       let result: DeliveryResult
       try {
@@ -303,7 +303,7 @@ export class Dispatcher {
         now,
       })
       if (applied.stateChanged && applied.conversationId !== undefined) {
-        publishReceipt(applied.conversationId)
+        publishReceipt(this.db, applied.conversationId)
       }
     }
   }

@@ -33,6 +33,7 @@ import {
 } from "../store/approvals"
 import { createDm, type Conversation } from "../store/conversations"
 import { send } from "../store/messages"
+import { emit } from "../ws"
 import { publishMessage } from "./publish"
 
 /** 审批 TTL（spec §8/§12 锁定 24h；Global Constraints）。 */
@@ -178,7 +179,22 @@ interface SystemPost {
 /** system 消息落库 + `message publish`（发起方 `wait` 解锁的唯一通道；幂等键按单去重）。 */
 function postSystem(db: Db, post: SystemPost): void {
   send(db, { ...post, kind: "system" })
-  publishMessage(post.conversationId)
+  publishMessage(db, post.conversationId)
+}
+
+/** `approval` WS 事件发布（Task 9 发布点：审批卡产生/决定/过期处，单据快照）。 */
+function emitApproval(approval: Approval): void {
+  emit("approval", {
+    approval: {
+      id: approval.id,
+      requesterAgentId: approval.requesterAgentId,
+      action: approval.action,
+      payload: approval.payload,
+      status: approval.status,
+      createdAt: approval.createdAt,
+      decidedAt: approval.decidedAt ?? null,
+    },
+  })
 }
 
 /**
@@ -220,6 +236,7 @@ export function gate<T>(
     meta: { approvalId: approval.id, action, payload },
     idempotencyKey: `approval-card:${approval.id}`,
   })
+  emitApproval(approval)
   return { approval }
 }
 
@@ -279,6 +296,7 @@ export function postDecision(db: Db, approval: DecidedApproval, error?: string):
     },
     idempotencyKey: `approval-receipt:${approval.id}`,
   })
+  emitApproval(approval)
 }
 
 /**

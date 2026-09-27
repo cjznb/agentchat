@@ -7,6 +7,7 @@
  */
 import type { ServerType } from "@hono/node-server"
 import { serve } from "@hono/node-server"
+import { Server as HttpServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { Hono } from "hono"
 import { config } from "./config"
@@ -14,6 +15,7 @@ import type { Db } from "./db"
 import { internalRoutes, type InternalRoutesOptions } from "./routes/internal"
 import { mcpRoutes } from "./routes/mcp"
 import { uiRoutes } from "./routes/ui"
+import { attachWsServer } from "./ws"
 
 /** 组装选项：internal 的 token 路径 + MCP 的 join_token 落盘 home / 会话 TTL（测试注入）。 */
 export interface AppOptions extends InternalRoutesOptions {
@@ -59,6 +61,8 @@ export async function start(options: StartOptions = {}): Promise<RunningServer> 
     }).fetch,
     port,
   })
+  // `/api/ws` 升级（Node 默认 HTTP 服务器实例；HTTP/2 分支不挂载，本项目用 HTTP/1.1）。
+  if (server instanceof HttpServer) attachWsServer(server)
 
   const info = await new Promise<AddressInfo>((resolve, reject) => {
     server.once("listening", () => {

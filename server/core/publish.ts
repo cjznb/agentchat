@@ -9,8 +9,11 @@
 import { z } from "zod"
 import type { ReceiptStage } from "../../shared/contracts"
 import type { Db } from "../db"
-import type { Message } from "../store/messages"
+import { listAgents } from "../store/agents"
+import { getConversation, listParticipants, SHOUT_KEY } from "../store/conversations"
+import { latestInConversation, type Message } from "../store/messages"
 import { getReadState } from "../store/read_states"
+import { emit } from "../ws"
 import { publish } from "./wait"
 
 // wake_jobs 状态镜像 schema.sql 的 CHECK（Task 6 落 store 后收敛到 store/wake）。
@@ -48,12 +51,49 @@ export function receiptState(db: Db, message: Message, recipient: string): Recei
   return job === undefined ? "queued" : WAKE_STATE_STAGE[wakeStateSchema.parse(job.state)]
 }
 
-/** 消息事件发布（决议 5 发布点 1：`sendMessage` 入库后）。 */
-export function publishMessage(conversationId: string): void {
-  publish(conversationId, "message")
+/** 收件方 id（喊话 = 全部节点；DM/群 = 其余成员），不含发送者本人（与 messaging.recipientsOf 同规则）。 */
+function recipientIdsOf(db: Db, conversationId: string, senderId: string): readonly string[] {
+  const ids =
+    getConversation(db, conversationId)?.key === SHOUT_KEY
+      ? listAgents(db).map((agent) => agent.id)
+      : listParticipants(db, conversationId).map((participant) => participant.agentId)
+  return ids.filter((id) => id !== senderId)
 }
 
-/** 回执事件发布（决议 5 发布点 2：`ack` 事务提交后）。 */
-export function publishReceipt(conversationId: string): void {
+/**
+ * 消息事件发布（决议 5 发布点 1：`sendMessage` 入库后）——
+ * 同步 bump+notify（wait.ts）+ 构造 `message` WS 载荷（Task 9）。
+ */
+export function publishMessage(db: Db, conversationId: string): void {
+  publish(conversationId, "message")
+  const message = latestInConversation(db, conversationId)
+  if (message === undefined) return
+  emit("message", {
+    conversationId,
+    messageId: message.id,
+    seq: message.seq,
+    from: message.fromAgentId,
+    body: message.body,
+    kind: message.kind,
+    createdAt: message.createdAt,
+  })
+}
+
+/**
+ * 回执事件发布（决议 5 发布点 2：`ack` 事务提交后）——
+ * 同步 bump+notify + `receipt` WS 载荷（Task 9：最新消息 id + 各收件方当前 stage）。
+ */
+export function publishReceipt(db: Db, conversationId: string): void {
   publish(conversationId, "receipt")
+  const message = latestInConversation(db, conversationId)
+  if (message === undefined) return
+  emit("receipt", {
+    conversationId,
+    messageId: message.id,
+    seq: message.seq,
+    receipts: recipientIdsOf(db, conversationId, message.fromAgentId).map((agentId) => ({
+      agentId,
+      stage: receiptState(db, message, agentId),
+    })),
+  })
 }

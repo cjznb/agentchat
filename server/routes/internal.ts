@@ -22,7 +22,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { ReceiptStage } from "../../shared/contracts"
 import { adapterStateSchema, type AdapterState } from "../adapters/types"
-import { canTransition } from "../core/agents"
+import { canTransition, emitAgentTree } from "../core/agents"
 import { receiptState } from "../core/messaging"
 import { publishReceipt } from "../core/publish"
 import { config } from "../config"
@@ -98,6 +98,8 @@ export function applyAgentState(db: Db, input: StateReportInput): StateReportOut
   if (target === "online") {
     makeJobsDue(db, { agentId: input.agentId, now: input.now ?? Date.now() })
   }
+  // 状态变化发布 `agent` WS 事件（Task 9：路由层只调用 core 导出函数，不直接广播）。
+  emitAgentTree(db)
   return { ok: true }
 }
 
@@ -196,7 +198,7 @@ export function internalRoutes(db?: Db, options?: InternalRoutesOptions): Hono {
       const agent = getAgent(database, parsed.data.agentId)
       if (agent === undefined) return c.json({ ok: false, error: "agent_not_found" }, 404)
       const backlog = claimWakeBacklog(database, parsed.data)
-      for (const conversationId of backlog.conversations) publishReceipt(conversationId)
+      for (const conversationId of backlog.conversations) publishReceipt(database, conversationId)
       return c.json({ messages: backlog.messages, receipts: backlog.receipts })
     })
     .post("/internal/result", async (c) => {
@@ -214,7 +216,7 @@ export function internalRoutes(db?: Db, options?: InternalRoutesOptions): Hono {
           now: Date.now(),
         })
         if (outcome.stateChanged && outcome.conversationId !== undefined) {
-          publishReceipt(outcome.conversationId)
+          publishReceipt(database, outcome.conversationId)
         }
         applied += 1
       }

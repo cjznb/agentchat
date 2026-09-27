@@ -10,12 +10,11 @@
 import { createHash, randomBytes } from "node:crypto"
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { z } from "zod"
 import {
-  agentKindSchema,
-  agentStatusSchema,
+  rosterTreeSchema,
   type AgentKind,
   type AgentStatus,
+  type RosterNode,
 } from "../../shared/contracts"
 import type { Db } from "../db"
 import {
@@ -32,6 +31,7 @@ import {
   type InsertAgentInput,
 } from "../store/agents"
 import { makeJobsDue } from "../store/wake"
+import { emit } from "../ws"
 import { publishMessage, publishReceipt } from "./publish"
 import { retireWakeJobs } from "./dispatcher"
 
@@ -161,6 +161,7 @@ export function registerRoot(
     const agent = touchAgent(db, existing.id, "online")
     // 重连补投（spec §7）：pending 积压（含 pending(offline)）立即到期，由 dispatcher 补投。
     makeJobsDue(db, { agentId: agent.id, now: Date.now() })
+    emitAgentTree(db)
     return { agent, joinToken: input.joinToken }
   }
 
@@ -172,6 +173,7 @@ export function registerRoot(
     return created
   }).immediate()
   writeTokenFile(home, agent.id, joinToken)
+  emitAgentTree(db)
   return { agent, joinToken }
 }
 
@@ -185,10 +187,12 @@ export function registerChild(db: Db, input: RegisterChildInput): Agent {
     if (existing.status === "retired") {
       throw new RegistrationError("retired", `agent ${existing.id} retired, register rejected`)
     }
-    return touchAgent(db, existing.id, "online")
+    const reactivated = touchAgent(db, existing.id, "online")
+    emitAgentTree(db)
+    return reactivated
   }
   assertParentExists(db, input.parentId)
-  return insertAgent(
+  const created = insertAgent(
     db,
     cardToInsert(input, {
       kind: "runtime",
@@ -197,12 +201,14 @@ export function registerChild(db: Db, input: RegisterChildInput): Agent {
       taskRef: input.taskRef,
     }),
   )
+  emitAgentTree(db)
+  return created
 }
 
 /** 注册逻辑节点（spec §5.2：永不上线、收件箱常开；初始 status=offline）。 */
 export function registerLogical(db: Db, input: RegisterLogicalInput): Agent {
   if (input.parentId !== undefined) assertParentExists(db, input.parentId)
-  return insertAgent(
+  const created = insertAgent(
     db,
     cardToInsert(input, {
       kind: "logical",
@@ -210,6 +216,8 @@ export function registerLogical(db: Db, input: RegisterLogicalInput): Agent {
       ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
     }),
   )
+  emitAgentTree(db)
+  return created
 }
 
 /** 退役节点（spec §5.2：不可恢复；树上灰显保留）。幂等：已退役原样返回。 */
@@ -221,50 +229,17 @@ export function retire(db: Db, id: string): Agent {
   const retired = touchAgent(db, id, "retired")
   // 退役取消（spec §7）：未投递 job 全 cancelled + 发送方收 system 消息「对方已离场」。
   for (const conversationId of retireWakeJobs(db, id)) {
-    publishMessage(conversationId)
-    publishReceipt(conversationId)
+    publishMessage(db, conversationId)
+    publishReceipt(db, conversationId)
   }
+  emitAgentTree(db)
   return retired
 }
 
-/** roster 节点卡（spec §9 `roster` 返回；线格式字段名对齐 spec 的 snake_case）。 */
-export interface RosterNode {
-  readonly id: string
-  readonly name: string
-  readonly kind: AgentKind
-  readonly parent_id: string | null
-  readonly vendor: string
-  readonly model: string
-  readonly status: AgentStatus
-  readonly status_text: string | null
-  readonly purpose: string | null
-  readonly role_tag: string | null
-  readonly remark: string | null
-  readonly unread: number
-  readonly children: readonly RosterNode[]
-}
-
-/** roster 线格式 schema（HTTP 边界解析；测试与后续任务共用）。 */
-const rosterNodeSchema: z.ZodType<RosterNode> = z.lazy(() =>
-  z.object({
-    id: z.string(),
-    name: z.string(),
-    kind: agentKindSchema,
-    parent_id: z.string().nullable(),
-    vendor: z.string(),
-    model: z.string(),
-    status: agentStatusSchema,
-    status_text: z.string().nullable(),
-    purpose: z.string().nullable(),
-    role_tag: z.string().nullable(),
-    remark: z.string().nullable(),
-    unread: z.number().int().nonnegative(),
-    children: z.array(rosterNodeSchema),
-  }),
-)
-
-/** `GET /api/roster` 响应体（森林根数组）。 */
-export const rosterTreeSchema = z.array(rosterNodeSchema)
+// roster 线格式 schema/类型单源在 shared/contracts（Task 9 上移，REST/WS/前端共用）；
+// 此处 re-export 保持既有导入路径（`core/agents.rosterTreeSchema`）。
+export { rosterTreeSchema }
+export type { RosterNode }
 
 /**
  * 展示态状态（读取时计算，**不回写库**）：
@@ -308,4 +283,12 @@ export function rosterTree(db: Db): RosterNode[] {
     children: (childrenByParent.get(agent.id) ?? []).map(build),
   })
   return roots.map(build)
+}
+
+/**
+ * 节点树快照发布（`agent` WS 事件；Task 9 发布点）——注册/退役与 `/internal/state`
+ * 状态变化处调用；路由层只调用本 core 导出函数，不直接广播。
+ */
+export function emitAgentTree(db: Db): void {
+  emit("agent", { tree: rosterTree(db) })
 }

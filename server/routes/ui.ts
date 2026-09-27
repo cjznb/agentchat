@@ -9,7 +9,14 @@
 import { Hono } from "hono"
 import { z } from "zod"
 import { rosterTree } from "../core/agents"
-import { sendMessage } from "../core/messaging"
+import {
+  addParticipant as gatedAddParticipant,
+  createGroup as gatedCreateGroup,
+  NotParticipantError,
+  RecipientNotFound,
+  sendMessage,
+  shout,
+} from "../core/messaging"
 import {
   ApprovalAlreadyDecidedError,
   ApprovalNotFoundError,
@@ -21,6 +28,7 @@ import {
   shoutPayloadSchema,
   type DecidedApproval,
 } from "../core/permissions"
+import { agentCard, conversationList, groupList } from "../core/ui-queries"
 import { config } from "../config"
 import { openDb, type Db } from "../db"
 import { listApprovals, type Approval } from "../store/approvals"
@@ -36,6 +44,12 @@ function resolveDb(db: Db | undefined): Db {
 }
 
 const decisionBodySchema = z.object({ decision: z.enum(["approve", "reject"]) })
+const sendBodySchema = z.object({ body: z.string() })
+const groupBodySchema = z.object({
+  name: z.string().min(1),
+  memberIds: z.array(z.string()).optional(),
+})
+const memberBodySchema = z.object({ agentId: z.string().min(1) })
 
 /**
  * 批准后的实际执行（决议 1：执行在路由层 —— 本层同时 import permissions 与
@@ -113,5 +127,64 @@ export function uiRoutes(db?: Db): Hono {
       }
       postDecision(database, approval)
       return c.json({ ok: true, approval })
+    })
+    // Task 9：会话列表（双层聚合未读 + 最后预览）。
+    .get("/api/conversations", (c) => c.json(conversationList(resolveDb(db))))
+    // Task 9：human 在既有会话发言（human 超级观察者，绕成员校验）。
+    .post("/api/conversations/:id/messages", async (c) => {
+      const database = resolveDb(db)
+      const parsed = sendBodySchema.safeParse(await c.req.json().catch(() => undefined))
+      if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
+      try {
+        const result = sendMessage(database, {
+          from: ensureHuman(database).id,
+          to: c.req.param("id"),
+          body: parsed.data.body,
+        })
+        return c.json({ ok: true, ...result })
+      } catch (error) {
+        if (error instanceof RecipientNotFound) return c.json({ ok: false, error: error.code }, 404)
+        if (error instanceof NotParticipantError) return c.json({ ok: false, error: error.code }, 403)
+        throw error
+      }
+    })
+    // Task 9：群列表 / 建群（human 走既有 gate → 即时执行零审批）。
+    .get("/api/groups", (c) => c.json({ groups: groupList(resolveDb(db)) }))
+    .post("/api/groups", async (c) => {
+      const database = resolveDb(db)
+      const parsed = groupBodySchema.safeParse(await c.req.json().catch(() => undefined))
+      if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
+      const group = gatedCreateGroup(database, {
+        name: parsed.data.name,
+        createdBy: ensureHuman(database).id,
+        ...(parsed.data.memberIds === undefined ? {} : { memberIds: parsed.data.memberIds }),
+      })
+      return c.json({ ok: true, group })
+    })
+    .post("/api/groups/:id/members", async (c) => {
+      const database = resolveDb(db)
+      const parsed = memberBodySchema.safeParse(await c.req.json().catch(() => undefined))
+      if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
+      gatedAddParticipant(database, {
+        conversationId: c.req.param("id"),
+        agentId: parsed.data.agentId,
+        invitedBy: ensureHuman(database).id,
+      })
+      return c.json({ ok: true })
+    })
+    // Task 9：全员喊话（human → gate 即时执行）。
+    .post("/api/shout", async (c) => {
+      const database = resolveDb(db)
+      const parsed = sendBodySchema.safeParse(await c.req.json().catch(() => undefined))
+      if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
+      const result = shout(database, ensureHuman(database).id, parsed.data.body)
+      return c.json({ ok: true, ...result })
+    })
+    // Task 9：资料卡（roster 节点 + 参与会话入口）。
+    .get("/api/agents/:id", (c) => {
+      const card = agentCard(resolveDb(db), c.req.param("id"))
+      return card === undefined
+        ? c.json({ ok: false, error: "agent_not_found" }, 404)
+        : c.json(card)
     })
 }
