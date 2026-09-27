@@ -12,7 +12,6 @@ import { rosterTree } from "../core/agents"
 import {
   addParticipant as gatedAddParticipant,
   createGroup as gatedCreateGroup,
-  history,
   NotParticipantError,
   RecipientNotFound,
   sendMessage,
@@ -29,7 +28,7 @@ import {
   shoutPayloadSchema,
   type DecidedApproval,
 } from "../core/permissions"
-import { agentCard, conversationList, groupList } from "../core/ui-queries"
+import { agentCard, conversationList, conversationMessages, groupList } from "../core/ui-queries"
 import { config } from "../config"
 import { openDb, type Db } from "../db"
 import { getApproval, listApprovals, type Approval } from "../store/approvals"
@@ -167,7 +166,10 @@ export function uiRoutes(db?: Db): Hono {
       if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 200)) {
         return c.json({ ok: false, error: "invalid_limit" }, 400)
       }
-      return c.json({ messages: history(database, id, before, limit) })
+      // Plan 3 T5：自有文本消息附四级回执 + 聚合 stage（决议 1）。
+      return c.json({
+        messages: conversationMessages(database, id, ensureHuman(database).id, before, limit),
+      })
     })
     // Task 1：human 会话读位点推进到该会话**最新 seq**（幂等，只前进不回退）；未知会话 404。
     .post("/api/conversations/:id/read", (c) => {

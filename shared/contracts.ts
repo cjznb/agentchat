@@ -512,6 +512,13 @@ export const chatMessageSchema = z.object({
   kind: messageKindSchema,
   meta: z.record(z.string(), z.unknown()).optional(),
   createdAt: z.number().int().nonnegative(),
+  /**
+   * 己方文本消息的各收件方四级回执（Plan 3 T5 决议 1：仅 human 消息；
+   * 非己方 / 系统消息 / 无收件方 → 字段缺省）。派生自既有 `receiptState`。
+   */
+  receipts: z.array(receiptViewSchema).optional(),
+  /** 聚合回执：取**最落后**收件方的阶段（全部 read → read）。与 `receipts` 同现。 */
+  receiptStage: receiptStageSchema.optional(),
 })
 export type ChatMessage = z.infer<typeof chatMessageSchema>
 

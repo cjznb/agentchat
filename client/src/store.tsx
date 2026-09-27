@@ -17,6 +17,7 @@ import {
 } from "react"
 import {
   INITIAL_RELOAD_PLAN,
+  loadMessages,
   loadReload,
   markConversationRead as postConversationRead,
   sendMessage as postMessage,
@@ -33,6 +34,8 @@ export interface StoreValue {
   openAndRead(conversationId: string): void
   reload(plan: ReloadPlan): void
   sendMessage(conversationId: string, body: string): Promise<void>
+  /** 上翻分页：拉取 `beforeSeq` 之前一页并入会话；返回本页条数（< 页大小 = 无更多）。 */
+  loadOlder(conversationId: string, beforeSeq: number): Promise<number>
   markConversationRead(conversationId: string): Promise<void>
 }
 
@@ -99,9 +102,20 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
 
   const sendMessage = useCallback(
     async (conversationId: string, body: string): Promise<void> => {
-      await postMessage(conversationId, body)
+      const result = await postMessage(conversationId, body)
+      // 乐观 reconcile：入库返回的消息按 id 入桶（WS `message` 帧稍后到达时去重）。
+      dispatch({ type: "message", chat: result.message })
     },
-    [],
+    [dispatch],
+  )
+
+  const loadOlder = useCallback(
+    async (conversationId: string, beforeSeq: number): Promise<number> => {
+      const page = await loadMessages(conversationId, beforeSeq)
+      dispatch({ type: "prepend", conversationId, messages: page })
+      return page.length
+    },
+    [dispatch],
   )
 
   const markConversationRead = useCallback(
@@ -137,8 +151,16 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
   )
 
   const value = useMemo<StoreValue>(
-    () => ({ state, openConversation, openAndRead, reload, sendMessage, markConversationRead }),
-    [state, openConversation, openAndRead, reload, sendMessage, markConversationRead],
+    () => ({
+      state,
+      openConversation,
+      openAndRead,
+      reload,
+      sendMessage,
+      loadOlder,
+      markConversationRead,
+    }),
+    [state, openConversation, openAndRead, reload, sendMessage, loadOlder, markConversationRead],
   )
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>

@@ -70,6 +70,13 @@ export type StoreAction =
       readonly conversationId: string
       readonly messages: readonly ChatMessage[]
     }
+  | { readonly type: "message"; readonly chat: ChatMessage }
+  | {
+      /** 上翻分页：把更早一页并入会话桶（按 id 去重，seq 升序）。 */
+      readonly type: "prepend"
+      readonly conversationId: string
+      readonly messages: readonly ChatMessage[]
+    }
   | { readonly type: "connection"; readonly status: ConnectionStatus }
   | { readonly type: "open"; readonly conversationId: string | null }
   | { readonly type: "hydrate"; readonly patch: ReloadResult }
@@ -120,6 +127,15 @@ function upsertMessage(
   if (existing.some((message) => message.id === chat.id)) return state.messages
   const next = [...existing, chat].sort((a, b) => a.seq - b.seq)
   return new Map(state.messages).set(chat.conversationId, next)
+}
+
+/** 单条消息进入状态：入桶（按 id 去重）+ 更新会话列表预览（WS 帧与乐观发送共用）。 */
+function applyMessage(state: AppState, chat: ChatMessage): AppState {
+  return {
+    ...state,
+    messages: upsertMessage(state, chat),
+    conversations: updatePreview(state.conversations, chat),
+  }
 }
 
 function toApprovalEntry(snapshot: ApprovalSnapshot): ApprovalEntry {
@@ -194,12 +210,7 @@ export function reduceFrame(state: AppState, frame: WsServerFrame): AppState {
         kind: payload.kind,
         createdAt: payload.createdAt,
       }
-      return {
-        ...state,
-        messages: upsertMessage(state, chat),
-        conversations: updatePreview(state.conversations, chat),
-        appliedSeq: frame.seq,
-      }
+      return { ...applyMessage(state, chat), appliedSeq: frame.seq }
     }
     case "receipt": {
       const parsed = wsReceiptPayloadSchema.safeParse(frame.payload)
@@ -248,6 +259,17 @@ export function reducer(state: AppState, action: StoreAction): AppState {
         ...state,
         messages: new Map(state.messages).set(action.conversationId, action.messages),
       }
+    case "message":
+      return applyMessage(state, action.chat)
+    case "prepend": {
+      const existing = state.messages.get(action.conversationId) ?? []
+      const byId = new Map(existing.map((message) => [message.id, message] as const))
+      for (const message of action.messages) {
+        if (!byId.has(message.id)) byId.set(message.id, message)
+      }
+      const merged = [...byId.values()].sort((a, b) => a.seq - b.seq)
+      return { ...state, messages: new Map(state.messages).set(action.conversationId, merged) }
+    }
     case "connection":
       return { ...state, connection: action.status }
     case "open":

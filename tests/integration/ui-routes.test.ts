@@ -13,17 +13,17 @@ import { join } from "node:path"
 import type { Hono } from "hono"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { z } from "zod"
-import { messageHistorySchema, notificationListSchema } from "../../shared/contracts"
+import { messageHistorySchema, notificationListSchema, type ChatMessage } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
 import { registerRoot } from "../../server/core/agents"
-import { ensureHuman, sendMessage, shout } from "../../server/core/messaging"
+import { ack, createGroup, ensureHuman, sendMessage, shout } from "../../server/core/messaging"
 import { ask, respondAsk } from "../../server/core/permissions"
 import { openDb, type Db } from "../../server/db"
 import { createApp } from "../../server/index"
 import { insertAgent } from "../../server/store/agents"
 import { getApproval } from "../../server/store/approvals"
 import { getConversationByKey, isParticipant, SHOUT_KEY } from "../../server/store/conversations"
-import { history } from "../../server/store/messages"
+import { history, send } from "../../server/store/messages"
 
 let home = ""
 let db: Db
@@ -427,5 +427,86 @@ describe("GET /api/conversations/:id/messages（Plan 3 T3）", () => {
     expect((await app.request(`/api/conversations/${dmId}/messages?limit=0`)).status).toBe(400)
     expect((await app.request(`/api/conversations/${dmId}/messages?limit=201`)).status).toBe(400)
     expect((await app.request(`/api/conversations/${dmId}/messages?limit=abc`)).status).toBe(400)
+  })
+})
+
+// ── Plan 3 T5 决议 1：自有消息四级回执进 REST（复用 receiptState，无新状态机） ──
+
+/** 取某条消息的收据映射 `{agentId: stage}`（缺字段 → undefined，便于断言「不带」）。 */
+function stageMap(message: ChatMessage | undefined) {
+  if (message?.receipts === undefined) return undefined
+  return Object.fromEntries(message.receipts.map((r) => [r.agentId, r.stage]))
+}
+
+describe("GET /api/conversations/:id/messages（回执字段）", () => {
+  it("decorates an own message: queued receipts, then read after core ack; peer message stays bare", async () => {
+    const sent = sendMessage(db, { from: humanId, to: rootId, body: "receipts?" })
+    const ownId = sent.message.id
+
+    const before = messageHistorySchema.parse(
+      await (await app.request(`/api/conversations/${dmId}/messages`)).json(),
+    )
+    const own = before.messages.find((message) => message.id === ownId)
+    expect(own?.fromAgentId).toBe(humanId)
+    expect(own?.receipts).toEqual([{ agentId: rootId, stage: "queued" }])
+    expect(own?.receiptStage).toBe("queued")
+
+    // 非己方消息（root 的 pong）不回执。
+    const peer = before.messages.find((message) => message.fromAgentId === rootId)
+    expect(peer?.receipts).toBeUndefined()
+    expect(peer?.receiptStage).toBeUndefined()
+
+    // core ack → 聚合（与逐条）回执 → read。
+    expect(ack(db, rootId, [ownId])).toBe(1)
+    const after = messageHistorySchema.parse(
+      await (await app.request(`/api/conversations/${dmId}/messages`)).json(),
+    )
+    const ownAfter = after.messages.find((message) => message.id === ownId)
+    expect(ownAfter?.receipts).toEqual([{ agentId: rootId, stage: "read" }])
+    expect(ownAfter?.receiptStage).toBe("read")
+  })
+
+  it("keeps per-recipient stages independent; aggregate takes the laggard in a group", async () => {
+    const child = insertAgent(db, {
+      name: "t5-child",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      parentId: rootId,
+    })
+    const group = createGroup(db, {
+      name: "t5-group",
+      createdBy: humanId,
+      memberIds: [rootId, child.id],
+    })
+    if (!("approved" in group)) throw new Error("human group creation must execute immediately")
+    const gid = group.approved.id
+
+    const sent = sendMessage(db, { from: humanId, to: gid, body: "hi group" })
+    // 仅子节点 ack：子 read、根仍 queued；聚合取最落后 → queued。
+    expect(ack(db, child.id, [sent.message.id])).toBe(1)
+
+    const page = messageHistorySchema.parse(
+      await (await app.request(`/api/conversations/${gid}/messages`)).json(),
+    )
+    const own = page.messages.find((message) => message.id === sent.message.id)
+    expect(stageMap(own)).toEqual({ [rootId]: "queued", [child.id]: "read" })
+    expect(own?.receiptStage).toBe("queued")
+  })
+
+  it("never decorates system messages", async () => {
+    const system = send(db, {
+      conversationId: dmId,
+      fromAgentId: humanId,
+      body: "X 加入群聊",
+      kind: "system",
+    })
+    const page = messageHistorySchema.parse(
+      await (await app.request(`/api/conversations/${dmId}/messages`)).json(),
+    )
+    const found = page.messages.find((message) => message.id === system.id)
+    expect(found?.kind).toBe("system")
+    expect(found?.receipts).toBeUndefined()
+    expect(found?.receiptStage).toBeUndefined()
   })
 })

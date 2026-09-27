@@ -1,5 +1,7 @@
-import { useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { ChatView } from "./components/ChatView"
 import { ConversationList } from "./components/ConversationList"
+import { parseDeepLink } from "./deeplink"
 import { useStore } from "./store"
 import type { ConnectionStatus } from "./ws"
 
@@ -36,11 +38,24 @@ function StatePanel({ state, title, hint }: { readonly state: ContentState; read
 }
 
 export function App() {
-  const { state } = useStore()
+  const { state, openConversation } = useStore()
   const [activeMode, setActiveMode] = useState<ModeId>("chat")
   const active = modes.find((mode) => mode.id === activeMode) ?? modes[0]
   const list = listCopy[activeMode]
   const showConversations = activeMode === "chat" && state.conversations.length > 0
+  const openId = state.openConversationId
+  const deepLink = useMemo(
+    () => parseDeepLink(typeof window === "undefined" ? "" : window.location.search),
+    [],
+  )
+  const deepLinkApplied = useRef(false)
+
+  // 深链入口（spec §11.5）：挂载时带 `?conversation=` 则自动承载该会话（消息由其内部重拉）。
+  useEffect(() => {
+    if (deepLinkApplied.current) return
+    deepLinkApplied.current = true
+    if (deepLink.conversationId !== null) openConversation(deepLink.conversationId)
+  }, [deepLink.conversationId, openConversation])
 
   return (
     <main className="app-shell" data-testid="app-shell">
@@ -69,8 +84,14 @@ export function App() {
       </aside>
 
       <section className="work-view" aria-labelledby="view-title" data-testid="right-view">
-        <header className="view-header"><div><p>当前视图</p><h1 id="view-title">{active.title}</h1></div><span className="mode-code">{active.id.toUpperCase()}</span></header>
-        <div className="view-body"><StatePanel state="empty" title={active.title} hint={active.hint} /></div>
+        {activeMode === "chat" && openId !== null ? (
+          <ChatView conversationId={openId} focusMessageId={deepLink.messageId} />
+        ) : (
+          <>
+            <header className="view-header"><div><p>当前视图</p><h1 id="view-title">{active.title}</h1></div><span className="mode-code">{active.id.toUpperCase()}</span></header>
+            <div className="view-body"><StatePanel state="empty" title={active.title} hint={active.hint} /></div>
+          </>
+        )}
       </section>
     </main>
   )
