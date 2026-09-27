@@ -15,9 +15,10 @@ import { internalRoutes, type InternalRoutesOptions } from "./routes/internal"
 import { mcpRoutes } from "./routes/mcp"
 import { uiRoutes } from "./routes/ui"
 
-/** 组装选项：internal 的 token 路径 + MCP 的 join_token 落盘 home（测试注入临时 home）。 */
+/** 组装选项：internal 的 token 路径 + MCP 的 join_token 落盘 home / 会话 TTL（测试注入）。 */
 export interface AppOptions extends InternalRoutesOptions {
   readonly home?: string
+  readonly sessionTtlMs?: number
 }
 
 export function createApp(db?: Db, options?: AppOptions): Hono {
@@ -44,6 +45,8 @@ export interface StartOptions {
   readonly hubTokenPath?: string
   /** join_token 落盘目录（缺省 `config.home`）；测试注入临时 home。 */
   readonly home?: string
+  /** 空闲 MCP 会话 TTL（缺省 `DEFAULT_SESSION_TTL_MS`）；测试注入短值。 */
+  readonly sessionTtlMs?: number
 }
 
 export async function start(options: StartOptions = {}): Promise<RunningServer> {
@@ -52,6 +55,7 @@ export async function start(options: StartOptions = {}): Promise<RunningServer> 
     fetch: createApp(options.db, {
       ...(options.hubTokenPath === undefined ? {} : { hubTokenPath: options.hubTokenPath }),
       ...(options.home === undefined ? {} : { home: options.home }),
+      ...(options.sessionTtlMs === undefined ? {} : { sessionTtlMs: options.sessionTtlMs }),
     }).fetch,
     port,
   })

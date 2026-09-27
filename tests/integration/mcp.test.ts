@@ -15,7 +15,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { z } from "zod"
-import { MCP_TOOLS, MCP_TOOL_INPUTS, type McpToolName } from "../../shared/contracts"
+import { MCP_TOOLS, type McpToolName } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
 import { openDb, type Db } from "../../server/db"
 import { inbox, sendMessage } from "../../server/core/messaging"
@@ -38,17 +38,20 @@ const sendOutput = z.object({
   reply: z.object({ timedOut: z.boolean(), messages: z.array(messageSchema) }).optional(),
 })
 
-const GOLDEN_INPUTS: Record<McpToolName, unknown> = {
-  register: { name: "golden-root", kind: "runtime", vendor: "opencode", model: "test" },
-  send: { to: "someone", body: "hi", wait: { until: "either", timeoutMs: 1000 } },
-  inbox: { conversation: "c", after: 0, ack: true, timeout: 1000 },
-  ack: { message_ids: ["abcdef"] },
-  roster: { filter: "root", online_only: true },
-  conversation: { id: "conv", before: 10, limit: 5 },
-  group: { op: "create", name: "g", member_ids: [] },
-  shout: { body: "hello" },
-  status: { text: "busy" },
-  message_status: { ids: ["abcdef"] },
+/** 十工具金样例（运行时注入真实 peer id；键集合即「接线错误」检测基准）。 */
+function goldenInputs(peerId: string): Record<McpToolName, Record<string, unknown>> {
+  return {
+    register: { name: "golden-root", kind: "runtime", vendor: "opencode", model: "test" },
+    send: { to: peerId, body: "hi" },
+    inbox: { conversation: "c", after: 0, ack: true },
+    ack: { message_ids: ["abcdef"] },
+    roster: { filter: "golden", online_only: true },
+    conversation: { id: "conv", before: 10, limit: 5 },
+    group: { op: "create", name: "golden-group", member_ids: [] },
+    shout: { body: "hello" },
+    status: { text: "busy" },
+    message_status: { ids: ["abcdef"] },
+  }
 }
 
 let home = ""
@@ -93,6 +96,48 @@ function callTool(client: Client, name: McpToolName, args: Record<string, unknow
   return client.callTool({ name, arguments: args })
 }
 
+/** 裸 HTTP 建会话（返回 `mcp-session-id`），用于精确观测 404/TTL 行为。 */
+async function initializeSession(): Promise<string> {
+  const response = await fetch(`${running.url}/mcp`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "raw", version: "0" },
+      },
+    }),
+  })
+  await response.text() // 排空 SSE 流，避免连接悬挂
+  const sessionId = response.headers.get("mcp-session-id")
+  if (sessionId === null) throw new Error(`no session id (status ${response.status})`)
+  return sessionId
+}
+
+/** 用既有 session id 发一个请求，返回 HTTP 状态码（未知/过期会话应为 404）。 */
+async function probeSession(sessionId: string): Promise<number> {
+  const response = await fetch(`${running.url}/mcp`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "mcp-session-id": sessionId,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" }),
+  })
+  await response.text()
+  return response.status
+}
+
 /** 取工具结果的文本内容（`unknown` 入参 + 运行时收窄，避开 SDK 结果类型并集）。 */
 function textOf(result: unknown): string {
   if (typeof result !== "object" || result === null || !("content" in result)) {
@@ -128,15 +173,48 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<vo
   throw new Error("condition not met in time")
 }
 
-describe("tools/list 与金样例（DoD ①）", () => {
-  it("exposes exactly the ten locked tools and every golden input parses", async () => {
-    const client = await connect()
+describe("tools/list 与十工具金样例端到端（DoD ①，Important #1）", () => {
+  it("advertises the contract schemas and executes every one of the ten tools with its golden input", async () => {
+    const actor = makeAgent("mcp-golden-actor")
+    const peer = makeAgent("mcp-golden-peer")
+    const golden = goldenInputs(peer.id)
+    const client = await connect(actor.id)
     try {
       const { tools } = await client.listTools()
       expect(tools.map((tool) => tool.name)).toEqual([...MCP_TOOLS])
+
+      // 广告 schema 接线校验：每个 object 工具的 properties 必须覆盖其金样例键
+      // （若 conversation/roster 等被对调，键集即不匹配而失败）。
+      const byName = new Map(tools.map((tool) => [tool.name, tool]))
       for (const name of MCP_TOOLS) {
-        expect(MCP_TOOL_INPUTS[name].safeParse(GOLDEN_INPUTS[name]).success).toBe(true)
+        if (name === "group") continue // discriminatedUnion → SDK 广告为空对象 schema，见下条断言
+        const advertised = Object.keys(byName.get(name)?.inputSchema.properties ?? {})
+        expect({ name, advertised }).toEqual({
+          name,
+          advertised: expect.arrayContaining(Object.keys(golden[name])),
+        })
       }
+      // group 是 discriminatedUnion：SDK 无法对象化 → 广告空 properties，
+      // 真正的联合校验由下面 `op:"create"` 正向 + 非法 `op` 反向调用端到端证明。
+      expect(Object.keys(byName.get("group")?.inputSchema.properties ?? {})).toEqual([])
+
+      // 逐一用金样例真调：任一 schema 接线错误或工具未执行都会在此暴露。
+      for (const name of MCP_TOOLS) {
+        const result = await callTool(client, name, golden[name])
+        if (toolFailed(result)) throw new Error(`${name} rejected golden input: ${textOf(result)}`)
+      }
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("rejects an invalid group discriminant end-to-end (union is enforced, not a loose schema)", async () => {
+    const actor = makeAgent("mcp-group-guard")
+    const client = await connect(actor.id)
+    try {
+      const result = await callTool(client, "group", { op: "bogus" })
+      expect(toolFailed(result)).toBe(true)
+      expect(textOf(result)).toContain("Input validation error")
     } finally {
       await client.close()
     }
@@ -264,5 +342,28 @@ describe("register 首次与认领（DoD ④）", () => {
     } finally {
       await client.close()
     }
+  })
+})
+
+describe("会话 TTL 淘汰（Important #2）", () => {
+  it("evicts idle sessions after the TTL and rejects reuse of both with 404", async () => {
+    await running.close()
+    running = await start({
+      port: 0,
+      db,
+      home,
+      hubTokenPath: join(home, "hub_token"),
+      sessionTtlMs: 80,
+    })
+
+    const first = await initializeSession()
+    const second = await initializeSession()
+    expect(first).not.toBe(second)
+
+    await delay(150) // 两个会话均闲置超过 80ms
+
+    // 首个探测触发惰性清扫：两台空闲会话被回收，旧 id 一律 404（map 大小归零）。
+    expect(await probeSession(first)).toBe(404)
+    expect(await probeSession(second)).toBe(404)
   })
 })
