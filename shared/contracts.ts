@@ -29,7 +29,7 @@ export type ReceiptStage = (typeof RECEIPT_STAGES)[number]
 export const WS_EVENT_TYPES = ["message", "receipt", "agent", "approval"] as const
 export type WsEventType = (typeof WS_EVENT_TYPES)[number]
 
-/** MCP 工具名（spec §9 十一个工具，顺序即表序；`ask`/`respond_ask` 为 2026-09-27 追加） */
+/** MCP 工具名（spec §9 十二个工具，顺序即表序；`ask`/`respond_ask` 为 2026-09-27 追加） */
 export const MCP_TOOLS = [
   "register",
   "send",
@@ -237,7 +237,7 @@ export type WsResync = z.infer<typeof wsResyncSchema>
 export const wsServerFrameSchema = z.union([wsEventSchema, wsResyncSchema])
 export type WsServerFrame = z.infer<typeof wsServerFrameSchema>
 
-// ── MCP 十工具 input schema（spec §9；Task 8） ──────────────────────
+// ── MCP 十二工具 input schema（spec §9；Task 8） ──────────────────────
 // 路由层零手写类型：server/routes/mcp.ts 全部经 `MCP_TOOL_INPUTS[name]`
 // 校验入参后 `z.infer` 派生类型调 core。金样例见 tests/integration/mcp.test.ts。
 
@@ -326,7 +326,7 @@ const mcpRespondAskInput = z.object({
   text: z.string().optional(),
 })
 
-/** 十一工具入参（键恰为 MCP_TOOLS；spec §9 参数列的 zod 化）。 */
+/** 十二工具入参（键恰为 MCP_TOOLS；spec §9 参数列的 zod 化）。 */
 export const MCP_TOOL_INPUTS = {
   register: mcpRegisterInput,
   send: mcpSendInput,
@@ -344,7 +344,7 @@ export const MCP_TOOL_INPUTS = {
 
 export type McpToolInput<N extends McpToolName> = z.infer<(typeof MCP_TOOL_INPUTS)[N]>
 
-// ── MCP 十工具 output schema（spec §13.5：契约防漂移；金样例见 tests/integration/mcp.test.ts） ──
+// ── MCP 十二工具 output schema（spec §13.5：契约防漂移；金样例见 tests/integration/mcp.test.ts） ──
 // 处理器侧不强制二次校验（保持轻）：本组 schema 供契约测试校验金样例出参形状，
 // 字段为「实际出参的子集」（zod object 默认 strip 未列字段），避免与内部域对象逐字耦合。
 
@@ -454,7 +454,7 @@ const mcpAskToolOutput = z.object({
   reply: mcpAskReplyOutput.optional(),
 })
 
-/** 十一工具出参（键恰为 MCP_TOOLS；spec §9 返回列的 zod 化）。 */
+/** 十二工具出参（键恰为 MCP_TOOLS；spec §9 返回列的 zod 化）。 */
 export const MCP_TOOL_OUTPUTS = {
   register: z.object({
     agent: mcpAgentOutput,

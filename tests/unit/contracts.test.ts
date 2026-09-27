@@ -36,7 +36,7 @@ describe("locked contract values", () => {
     expect(WS_EVENT_TYPES).toEqual(["message", "receipt", "agent", "approval"])
   })
 
-  it("locks MCP_TOOLS to the eleven spec §9 tool names in order when read as an array", () => {
+  it("locks MCP_TOOLS to the twelve spec §9 tool names in order when read as an array", () => {
     expect(MCP_TOOLS).toEqual([
       "register",
       "send",
