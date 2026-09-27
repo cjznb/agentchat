@@ -132,6 +132,8 @@ export interface InsertAskInput {
   readonly question: string
   readonly options: readonly string[]
   readonly allowCustom?: boolean
+  /** 卡所在会话 id（spec §17.1）：随 payload 持久化，供 `respondAsk` 恒定回落到卡会话。 */
+  readonly conversationId?: string
   readonly now: number
 }
 
@@ -145,14 +147,16 @@ interface InsertAskParams {
 
 /**
  * 插入一张 `pending` 请求批示单（spec §17.1）：`kind='ask'`，payload 存
- * `{question, options, allowCustom}`（`allowCustom` 缺省 true）；`target` 为 `'human'` 或目标 agent id。
- * 单行写入，语句自身原子；返回值按入参构造，不回查。
+ * `{question, options, allowCustom, conversationId?}`（`allowCustom` 缺省 true；
+ * `conversationId` 为卡所在会话，写入后 `respondAsk` 恒回落到该会话，不再重算）；
+ * `target` 为 `'human'` 或目标 agent id。单行写入，语句自身原子；返回值按入参构造，不回查。
  */
 export function insertAsk(db: Db, input: InsertAskInput): Approval {
   const payload: Record<string, unknown> = {
     question: input.question,
     options: [...input.options],
     allowCustom: input.allowCustom ?? true,
+    ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
   }
   const params: InsertAskParams = {
     id: randomUUID(),

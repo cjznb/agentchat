@@ -135,6 +135,11 @@ describe("场景① 人答全链路（MCP ask{wait} → REST respond）", () => 
     })
     const askId = await pendingAskId()
 
+    // Task 1（Plan 2 复审 L12-1）：答复前先记下深链锚点，答复后必须仍指向同一张卡消息
+    // —— 证明「最早一条」口径在已答复路径（答复消息也带 meta.askId）依然成立。
+    const cardBefore = (await notifications("all")).find((item) => item.id === askId)?.cardMessageId
+    expect(cardBefore).toEqual(expect.any(String))
+
     const responded = await rest(`/api/asks/${askId}/respond`, { choice: "staging" })
     expect(responded.status).toBe(200)
 
@@ -145,7 +150,7 @@ describe("场景① 人答全链路（MCP ask{wait} → REST respond）", () => 
 
     const entry = (await notifications("all")).find((item) => item.id === askId)
     expect(entry).toMatchObject({ kind: "ask", target: "human", status: "answered" })
-    expect(entry?.cardMessageId).toEqual(expect.any(String))
+    expect(entry?.cardMessageId).toBe(cardBefore)
     expect(entry?.conversationId).toEqual(expect.any(String))
 
     const conversation = history(db, { conversationId: entry?.conversationId ?? "" })

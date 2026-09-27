@@ -249,6 +249,29 @@ describe("respondAsk: 首答生效 + 答复落会话", () => {
     expect(getApproval(db, stored.id)?.result).toMatchObject({ choice: "a" })
   })
 
+  it("answers into the original card conversation even after a DM is created later", () => {
+    const a = makeRoot("ans-persist-a")
+    const b = makeRoot("ans-persist-b")
+    const group = createGroup(db, { name: "先群后 DM", createdBy: a.id, memberIds: [b.id] })
+
+    const { ask: stored } = ask(db, a.id, { to: b.id, question: "?", options: ["ok"] })
+    // 建卡时无 DM → 卡落共同群；conversationId 随单据 payload 持久化。
+    expect(messagesWithAsk(group.id, stored.id)).toHaveLength(1)
+    expect(stored.payload).toMatchObject({ conversationId: group.id })
+
+    // 双方随后新建 DM —— 若 respondAsk 重算卡会话，答复会误落新 DM。
+    const dm = createDm(db, a.id, b.id)
+
+    const answered = respondAsk(db, stored.id, b.id, { choice: "ok" })
+    expect(answered.status).toBe("answered")
+
+    // 答复落卡所在会话（群），而非新 DM。
+    expect(
+      messagesWithAsk(group.id, stored.id).filter((m) => m.fromAgentId === b.id),
+    ).toHaveLength(1)
+    expect(messagesWithAsk(dm.id, stored.id)).toHaveLength(0)
+  })
+
   it("forbids a non-target non-human responder and allows the target / the human", () => {
     const a = makeRoot("ans-forbid-a")
     const target = makeRoot("ans-forbid-target")

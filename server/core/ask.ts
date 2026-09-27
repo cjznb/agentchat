@@ -217,6 +217,7 @@ export function ask(db: Db, from: string, input: AskInput): AskResult | Promise<
     question: input.question,
     options: input.options,
     allowCustom,
+    conversationId: conversation.id,
     now: Date.now(),
   })
   postSystem(db, {
@@ -274,7 +275,8 @@ export async function awaitAsk(
 
 /**
  * 答复请求批示（首答生效）：校验应答权限与答案合法性 → `markAnswered`（仅 `pending` 成功）；
- * 答复消息落卡所在会话（`meta.askId`）+ publish（解锁 wait）+ `emitApproval`。
+ * 答复消息落**卡所在会话**（优先取建卡时持久化的 `payload.conversationId`，缺失才回退
+ * `cardConversation` 重算 —— 向后兼容既有行）+ publish（解锁 wait）+ `emitApproval`。
  * 人类超级观察者（`vendor='human'`）可答任意 ask；agent 仅限 `target`。
  */
 export function respondAsk(
@@ -289,7 +291,13 @@ export function respondAsk(
   if (responderAgent?.vendor !== "human" && responder !== stored.target) {
     throw new AskForbiddenError(responder, askId)
   }
-  const conversation = cardConversation(db, stored)
+  // 卡所在会话：优先建卡时持久化的会话 id（即使双方后来又建了 DM，也恒落卡会话）；
+  // 仅当旧行缺该字段时回退按目标规则重算（向后兼容）。
+  const persistedConversationId = stored.payload["conversationId"]
+  const conversationId =
+    typeof persistedConversationId === "string"
+      ? persistedConversationId
+      : cardConversation(db, stored).id
   const answer = resolveAnswer(
     input,
     stored.payload["options"],
@@ -300,7 +308,7 @@ export function respondAsk(
   if (!markAnswered(db, askId, result, decidedAt)) throw new AskAlreadyAnsweredError(askId)
   const decided: Approval = { ...stored, status: "answered", result, decidedAt }
   postSystem(db, {
-    conversationId: conversation.id,
+    conversationId,
     fromAgentId: responder,
     body: answerBody(answer),
     meta: { askId, kind: "ask", result },

@@ -303,6 +303,58 @@ describe("POST /api/notifications/:id/read", () => {
   })
 })
 
+// ── Task 1：human 会话读位点（POST /api/conversations/:id/read） ─────
+
+const readConversationBodySchema = z.object({ ok: z.boolean(), lastReadSeq: z.number() })
+
+describe("POST /api/conversations/:id/read", () => {
+  it("advances the human cursor to the latest seq, is idempotent, and leaves other conversations untouched", async () => {
+    // 第二会话自带未读（child → human），用于验证「其他会话不受影响」。
+    const child = insertAgent(db, {
+      name: "ui-read-child",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+    })
+    const secondDm = sendMessage(db, { from: child.id, to: humanId, body: "ping" }).message
+      .conversationId
+
+    const before = conversationListSchema.parse(
+      await (await app.request("/api/conversations")).json(),
+    )
+    expect(before.conversations.find((c) => c.id === dmId)?.unread).toBe(1)
+    expect(before.conversations.find((c) => c.id === secondDm)?.unread).toBe(1)
+
+    const res = await post(`/api/conversations/${dmId}/read`, {})
+    expect(res.status).toBe(200)
+    const body = readConversationBodySchema.parse(await res.json())
+    expect(body.ok).toBe(true)
+    expect(body.lastReadSeq).toBeGreaterThan(0)
+
+    const after = conversationListSchema.parse(
+      await (await app.request("/api/conversations")).json(),
+    )
+    expect(after.conversations.find((c) => c.id === dmId)?.unread).toBe(0)
+    expect(after.conversations.find((c) => c.id === secondDm)?.unread).toBe(1)
+
+    // 幂等：重复调用仍 200、值不变，其他会话仍不受影响。
+    const again = await post(`/api/conversations/${dmId}/read`, {})
+    expect(again.status).toBe(200)
+    expect(readConversationBodySchema.parse(await again.json()).lastReadSeq).toBe(body.lastReadSeq)
+    const afterAgain = conversationListSchema.parse(
+      await (await app.request("/api/conversations")).json(),
+    )
+    expect(afterAgain.conversations.find((c) => c.id === dmId)?.unread).toBe(0)
+    expect(afterAgain.conversations.find((c) => c.id === secondDm)?.unread).toBe(1)
+  })
+
+  it("returns 404 conversation_not_found for an unknown conversation", async () => {
+    const res = await post("/api/conversations/does-not-exist/read", {})
+    expect(res.status).toBe(404)
+    expect(errorBodySchema.parse(await res.json()).error).toBe("conversation_not_found")
+  })
+})
+
 // ── Fix 1：ask 守卫（审批端点先拒，绝不 decide 改写 ask） ─────────────
 
 describe("POST /api/approvals/:id（ask 守卫，Fix 1）", () => {

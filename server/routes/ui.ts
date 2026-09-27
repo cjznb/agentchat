@@ -32,7 +32,9 @@ import { agentCard, conversationList, groupList } from "../core/ui-queries"
 import { config } from "../config"
 import { openDb, type Db } from "../db"
 import { getApproval, listApprovals, type Approval } from "../store/approvals"
-import { addParticipant, createGroup } from "../store/conversations"
+import { addParticipant, createGroup, getConversation } from "../store/conversations"
+import { latestInConversation } from "../store/messages"
+import { markRead } from "../store/read_states"
 
 // 生产缺省连接：首个 roster 请求时按 `config.dbPath` 打开并复用（进程单例）。
 let defaultDb: Db | undefined
@@ -147,6 +149,17 @@ export function uiRoutes(db?: Db): Hono {
     })
     // Task 9：会话列表（双层聚合未读 + 最后预览）。
     .get("/api/conversations", (c) => c.json(conversationList(resolveDb(db))))
+    // Task 1：human 会话读位点推进到该会话**最新 seq**（幂等，只前进不回退）；未知会话 404。
+    .post("/api/conversations/:id/read", (c) => {
+      const database = resolveDb(db)
+      const id = c.req.param("id")
+      if (getConversation(database, id) === undefined) {
+        return c.json({ ok: false, error: "conversation_not_found" }, 404)
+      }
+      const lastReadSeq = latestInConversation(database, id)?.seq ?? 0
+      markRead(database, { conversationId: id, agentId: ensureHuman(database).id, lastReadSeq })
+      return c.json({ ok: true, lastReadSeq })
+    })
     // Task 9：human 在既有会话发言（human 超级观察者，绕成员校验）。
     .post("/api/conversations/:id/messages", async (c) => {
       const database = resolveDb(db)
