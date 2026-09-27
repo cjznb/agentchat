@@ -5,6 +5,15 @@ dist/
 *.db-wal
 *.db-shm
 
+# ── AI 工作区与日志：仅本地，永不入库 ──────────────────────────
+# SDD/规划工作区（任务简报、实现报告、评审 diff、台账）与代理临时产物
+.superpowers/
+.omo/
+.codegraph/
+# 适配器与应用日志
+*.log
+logs/
+
 # BEGIN oh-my-opencode-slim clonedeps
 .slim/clonedeps/repos/
 # END oh-my-opencode-slim clonedeps
