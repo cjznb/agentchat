@@ -82,15 +82,22 @@ CREATE TABLE IF NOT EXISTS agent_keys (
   created_at      INTEGER NOT NULL
 );
 
--- 权限审批单（spec §8；本任务只建表。created_at 为 24h TTL 起点）。
+-- 审批 / 请求批示单（spec §8 + §17；一套状态机两用，checkpoint 2026-09-27）。
+-- kind='action'=审批(T7)；kind='ask'=请求批示(§17)；result 存 ask 答复(JSON)。
+-- created_at 为 24h TTL 起点；read_at 为单用户 MVP 全局已读（epoch ms，NULL=未读）。
+-- 旧库无新列/旧 CHECK 时由 server/db.ts 幂等重建（CHECK 不可 ALTER）。
 CREATE TABLE IF NOT EXISTS approvals (
   id                 TEXT PRIMARY KEY,
   requester_agent_id TEXT NOT NULL REFERENCES agents(id),
-  action             TEXT NOT NULL,
+  kind               TEXT NOT NULL DEFAULT 'action',
+  target             TEXT NOT NULL DEFAULT 'human',
+  action             TEXT NOT NULL,                 -- 审批动作或 ask 占位
   payload            TEXT NOT NULL,                 -- JSON
-  status             TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired')),
+  status             TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'answered')),
+  result             TEXT,                          -- JSON 或 NULL
   created_at         INTEGER NOT NULL,
-  decided_at         INTEGER
+  decided_at         INTEGER,
+  read_at            INTEGER                        -- epoch ms；NULL = 未读
 );
 
 -- 唤醒任务（spec §7；状态机 store 后续任务实现，列结构对齐 bridge 状态机）。

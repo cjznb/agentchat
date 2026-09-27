@@ -70,8 +70,8 @@ export type WsEvent = z.infer<typeof wsEventSchema>
 export const APPROVAL_ACTIONS = ["shout", "group_create", "group_add"] as const
 export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number]
 
-/** 审批单状态（schema.sql `approvals.status` 的 CHECK 镜像）。 */
-export const APPROVAL_STATUS = ["pending", "approved", "rejected", "expired"] as const
+/** 审批单状态（schema.sql `approvals.status` 的 CHECK 镜像；`answered` = §17 批示首答落定）。 */
+export const APPROVAL_STATUS = ["pending", "approved", "rejected", "expired", "answered"] as const
 export type ApprovalStatus = (typeof APPROVAL_STATUS)[number]
 
 export const approvalActionSchema = z.enum(APPROVAL_ACTIONS)

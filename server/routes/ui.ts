@@ -83,6 +83,9 @@ function executeApproved(db: Db, approval: Approval): void {
       })
       return
     }
+    case "ask":
+      // ask 单的答复走 Task 2 的 respondAsk，不经审批执行路径；显式守卫（类型穷尽 + 运行期防御）。
+      throw new Error("ask approvals are not executed via executeApproved")
     default: {
       // 穷尽保护：ApprovalAction 增变体而漏处理时显式失败，而非静默不执行。
       const unreachable: never = approval.action

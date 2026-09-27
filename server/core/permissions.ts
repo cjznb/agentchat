@@ -30,6 +30,7 @@ import {
   insertApproval,
   type Approval,
   type ApprovalAction,
+  type ApprovalActionValue,
 } from "../store/approvals"
 import { createDm, type Conversation } from "../store/conversations"
 import { send } from "../store/messages"
@@ -114,10 +115,11 @@ export type DecidedApproval = Approval & {
   readonly status: "approved" | "rejected" | "expired"
 }
 
-const ACTION_LABEL: Record<ApprovalAction, string> = {
+const ACTION_LABEL: Record<ApprovalActionValue, string> = {
   shout: "全员喊话",
   group_create: "创建群聊",
   group_add: "拉人入会话",
+  ask: "请求批示",
 }
 
 /**
