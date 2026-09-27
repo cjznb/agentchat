@@ -37,6 +37,8 @@
   401/404 等确定性错误不重试，记录并降级。
 - 所有事件处理入队即返回（fire-and-forget，串行保序），网络重试在后台推进，**不阻塞宿主事件循环**。
 - token 写失败仅记录、不中断（尽力而为）。
+- 根注册成功后把**节点 agent id** 落盘 `<home>/agents/opencode.id`（供 OpenCode MCP 身份头 `x-agent-id` 以
+  `{file:…}` 引用）；陈旧 token 自愈时与 token 一并清除。
 - 陈旧 `join_token`（Hub DB 重置/切换后）→ `invalid_join_token`：清空本地 token 后按「无 token 首次注册」
   重新注册为根并写回新 token（此路径不可能产生重复根），日志给明确 warn。
 - 未映射会话（自身尚未注册的子会话）的 `session.status`/`session.idle` 一律跳过并 warn，
@@ -47,6 +49,10 @@
 
 见 `docs/adapters-opencode.md`（Task 3）与 `adapters/opencode/install.mjs`。
 
+`plugin.ts` 默认导出 OpenCode 期望的 `PluginModule` 形态 `{ id: "agentchat", server }`
+（加载器 `readV1Plugin` 只读 `default`，且本地路径插件必须带 `id`），命名导出 `AgentChatPlugin`
+保留供测试/复用。
+
 ## 文件
 
 | 文件 | 职责 |
@@ -55,6 +61,6 @@
 | `hub.ts` | 客户端门面：组合传输层与 MCP，暴露 `register` + `/internal/*` |
 | `transport.ts` | 传输层：HTTP POST、3s 超时、指数退避重试、`HubError` |
 | `mcp.ts` | MCP `register` 握手与 SSE/工具结果解析、`HubToolError` |
-| `token.ts` | `join_token` 文件读写/清除（0600 尽力而为） |
+| `token.ts` | `join_token` 与节点 agent id 文件读写/清除（0600 尽力而为） |
 | `types.ts` | OpenCode 插件 API 最小本地类型声明（实测 1.18.32） |
 | `util.ts` | 类型守卫 + 串行任务队列 |

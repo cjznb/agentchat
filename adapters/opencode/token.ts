@@ -20,6 +20,17 @@ export function tokenPath(home: string): string {
   return join(home, "agents", "opencode.token")
 }
 
+/**
+ * 本适配器注册得到的**节点 agent id** 落盘路径。
+ *
+ * 供 OpenCode 配置的 MCP 身份头 `x-agent-id` 以 `{file:…}` 引用：MCP 会话（LLM 侧工具）
+ * 需要节点身份才能 `send`/`respond_ask`，而该 id 在 `register` 后才由 Hub 分配且对同一
+ * `join_token` 稳定，故落盘一次、后续启动读取（见 docs/adapters-opencode.md）。
+ */
+export function agentIdPath(home: string): string {
+  return join(home, "agents", "opencode.id")
+}
+
 export function readToken(path: string): string | undefined {
   try {
     const value = readFileSync(path, "utf8").trim()

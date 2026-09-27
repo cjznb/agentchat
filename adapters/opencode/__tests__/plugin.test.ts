@@ -213,6 +213,13 @@ describe("根会话注册与 join_token 落盘", () => {
     expect(harness.kit.calls.some((call) => call.headers["authorization"] === "Bearer hub-token")).toBe(true)
   })
 
+  it("persists the node agent id for the MCP identity header", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(harness, rootCreated())
+    expect(readFileSync(join(home, "agents", "opencode.id"), "utf8")).toBe("agent-1")
+  })
+
   it("reconnect with an existing token claims via join_token without overwriting on omitted response", async () => {
     const home = tempHome()
     const path = join(home, "agents", "opencode.token")
@@ -276,6 +283,7 @@ describe("根会话注册与 join_token 落盘", () => {
     })
     expect(harness.kit.toolCalls[1]).toEqual({ vendor: "opencode", purpose: "coding-agent" })
     expect(readFileSync(path, "utf8")).toBe("jt-new")
+    expect(readFileSync(join(home, "agents", "opencode.id"), "utf8")).toBe("agent-new")
     expect(harness.logs.some((line) => line.includes("stale join_token rejected"))).toBe(true)
     expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-new", state: "busy" }])
   })

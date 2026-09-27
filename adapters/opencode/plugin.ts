@@ -24,7 +24,7 @@ import {
   type ResultItem,
   type WakeMessage,
 } from "./hub"
-import { clearToken, readToken, resolveHome, tokenPath, writeToken } from "./token"
+import { agentIdPath, clearToken, readToken, resolveHome, tokenPath, writeToken } from "./token"
 import type { Hooks, OpencodeEvent, OpencodeSession, Plugin, PluginInput } from "./types"
 import { createTaskQueue, type TaskQueue } from "./util"
 
@@ -74,6 +74,7 @@ function createRuntime(
     ...(deps.random === undefined ? {} : { random: deps.random }),
   })
   const path = tokenPath(resolveHome(deps.env))
+  const idPath = agentIdPath(resolveHome(deps.env))
   const state: RuntimeState = { agentId: undefined, sessionToAgent: new Map(), lastState: new Map() }
 
   /** 上报状态并去重同态（同态即心跳，重复信号无需再发）；失败不记账以便下次重试。 */
@@ -109,6 +110,7 @@ function createRuntime(
         throw error
       }
       const cleared = clearToken(path)
+      clearToken(idPath)
       log(
         `stale join_token rejected; re-registering as a new root${
           cleared.ok ? "" : ` (token clear failed: ${cleared.error ?? "unknown"})`
@@ -124,6 +126,8 @@ function createRuntime(
       const result = await registerRootAgent(existing)
       state.agentId = result.agentId
       state.sessionToAgent.set(session.id, result.agentId)
+      const idWritten = writeToken(idPath, result.agentId)
+      if (!idWritten.ok) log(`agent id write failed (continuing): ${idWritten.error ?? "unknown"}`)
       if (result.joinToken !== undefined) {
         const written = writeToken(path, result.joinToken)
         if (!written.ok) log(`token write failed (continuing): ${written.error ?? "unknown"}`)
@@ -267,3 +271,26 @@ export const AgentChatPlugin: Plugin = createPluginHandle({
   env: process.env,
   fetch: globalThis.fetch,
 }).plugin
+
+/**
+ * OpenCode 期望的插件模块形态（`@opencode-ai/plugin` 的 `PluginModule`）。
+ *
+ * 依据 OpenCode 1.18.32 加载器（`plugin/index.ts` + `plugin/shared.ts`）：
+ * - `readV1Plugin` **只读 `mod.default`**，要求其为含 `server()` 函数的记录，取其 `server`；
+ * - **文件来源**插件（本地路径）必须带 `id`，否则 `resolvePluginId` 抛 `must export id`；
+ * - 回退（legacy）路径遍历模块全部导出并要求皆为函数——本模块另有 `ADAPTER_VENDOR` 字符串导出，
+ *   故必须命中 v1 探测（提供 `default`）而非 legacy 回退。
+ *
+ * 因此默认导出 `{ id, server }`。`plugin` 配置项指向本目录时即按此形态加载。
+ */
+export interface AgentChatPluginModule {
+  readonly id: string
+  readonly server: Plugin
+}
+
+export const AgentChatPluginModule: AgentChatPluginModule = {
+  id: "agentchat",
+  server: AgentChatPlugin,
+}
+
+export default AgentChatPluginModule
