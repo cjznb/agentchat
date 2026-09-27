@@ -197,6 +197,16 @@ export function getAgentByTokenHash(db: Db, joinTokenHash: string): Agent | unde
   return row === undefined ? undefined : toAgent(row)
 }
 
+/** 是否持有 hub 身份（`agent_keys` 行；spec §9 Bearer 身份来源，`registerRoot` 注册时写入）。 */
+export function hasAgentKey(db: Db, agentId: string): boolean {
+  const row = db
+    .prepare<[string], { present: number }>(
+      "SELECT 1 AS present FROM agent_keys WHERE agent_id = ?",
+    )
+    .get(agentId)
+  return row !== undefined
+}
+
 /** store 层按 id 查找失败（行不存在）。 */
 export class AgentNotFoundError extends Error {
   constructor(readonly agentId: string) {

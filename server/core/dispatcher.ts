@@ -30,6 +30,7 @@ import {
   type PendingReason,
   type WakeJob,
 } from "../store/wake"
+import { sweepExpired } from "./permissions"
 import { publishMessage, publishReceipt } from "./publish"
 
 /** dispatcher 周期（计划 Global Constraints 锁定值：2000 ms）。 */
@@ -243,6 +244,7 @@ export class Dispatcher {
     this.running = true
     try {
       backupIfDue(this.db, this.home, now)
+      sweepExpired(this.db, now) // 审批 24h 过期（Task 7；brief 授权每轮顺带调用）
       for (const conversationId of expireBusyJobs(this.db, now)) publishReceipt(conversationId)
       for (const conversationId of rependStuckSending(this.db, now)) publishReceipt(conversationId)
       await this.dispatchDue(now)

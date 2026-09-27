@@ -7,20 +7,21 @@
  * - 四级回执为**派生**读取（决议 4）：`receiptState` = read_states → wake_jobs → queued；
  *   `read` 仅由 ack 触发，失败态不新增阶段（T6 经系统通知表达）
  * - `unreadFor` 双层聚合（决议 5）：自身全部会话（含喊话）+ 全部后代递归求和
- * - 权限闸门不在本层（决议 6）：建群/拉人/喊话的审批由 Task 7 在这些入口外包裹
+ * - 权限闸门（spec §8，Task 7）：建群/拉人/喊话三个入口内调 `permissions.gate` 单点执法
+ *   （决议 1：执行器以闭包传入，permissions 不反向依赖本层，无循环依赖）
  */
 import type { ReceiptStage } from "../../shared/contracts"
 import type { Db } from "../db"
 import {
   AgentNotFoundError,
   getAgent,
-  getAgentByName,
-  insertAgent,
   listAgents,
   type Agent,
 } from "../store/agents"
 import {
+  addParticipant as storeAddParticipant,
   createDm,
+  createGroup as storeCreateGroup,
   directUnreadCounts,
   ensureShoutConversation,
   getConversation,
@@ -28,7 +29,9 @@ import {
   isParticipant,
   listParticipants,
   SHOUT_KEY,
+  type AddParticipantInput,
   type Conversation,
+  type CreateGroupInput,
 } from "../store/conversations"
 import {
   DEFAULT_INBOX_LIMIT,
@@ -40,6 +43,7 @@ import {
 } from "../store/messages"
 import { markRead } from "../store/read_states"
 import { enqueueWakeJobs } from "../store/wake"
+import { gate, type ApprovalRequested, type Gated } from "./permissions"
 import { publishMessage, publishReceipt, receiptState } from "./publish"
 import {
   INBOX_WAIT_CONVERSATION,
@@ -51,10 +55,24 @@ import {
 
 export { receiptState }
 
-// 群原语（决议 6：本任务不带闸门）。Task 7 在此入口外包裹审批闸门。
-export { addParticipant, createGroup } from "../store/conversations"
+// human 身份（决议 2）实现已迁至 core/permissions（审批通道与人通道同层）；
+// 此处保持既有导入路径（`core/messaging.ensureHuman`）不变。
+export { ensureHuman } from "./permissions"
 
-const HUMAN_NAME = "用户"
+// 群原语（决议 6 → Task 7）：建群/拉人入口在此套审批闸门（`gate` 单点执法）。
+export function createGroup(db: Db, input: CreateGroupInput): Gated<Conversation>
+export function createGroup(db: Db, input: CreateGroupInput): Conversation | ApprovalRequested {
+  const payload = { name: input.name, memberIds: input.memberIds ?? [] }
+  const outcome = gate(db, "group_create", input.createdBy, payload, () => storeCreateGroup(db, input))
+  return "approval" in outcome ? outcome : outcome.approved
+}
+
+export function addParticipant(db: Db, input: AddParticipantInput): ApprovalRequested | void {
+  const actorId = input.invitedBy ?? getConversation(db, input.conversationId)?.createdBy ?? ""
+  const payload = { conversationId: input.conversationId, agentId: input.agentId, role: input.role }
+  const outcome = gate(db, "group_add", actorId, payload, () => storeAddParticipant(db, input))
+  return "approval" in outcome ? outcome : undefined
+}
 
 /** `to` 解析失败：既非 `*`、也找不到会话或节点（brief：未知 id → RecipientNotFound）。 */
 export class RecipientNotFound extends Error {
@@ -75,16 +93,6 @@ export class NotParticipantError extends Error {
     super(`agent ${agentId} is not a participant of conversation ${conversationId}`)
     this.name = "NotParticipantError"
   }
-}
-
-/**
- * human 身份（决议 2）：FK 要求 agents 行 —— 幂等创建
- * `{kind:"logical", vendor:"human", name:"用户", status:"offline"}`；human 可读发任意会话。
- */
-export function ensureHuman(db: Db): Agent {
-  const existing = getAgentByName(db, HUMAN_NAME)
-  if (existing !== undefined) return existing
-  return insertAgent(db, { name: HUMAN_NAME, kind: "logical", vendor: "human", status: "offline" })
 }
 
 function isHuman(agent: Agent): boolean {
@@ -200,9 +208,11 @@ function deliver(db: Db, input: SendMessageInput): SendMessageResult {
   return { message, receipts }
 }
 
-/** 喊话（`to='*'`）：写入唯一广播会话，全部节点收件箱可见（决议 3）。 */
-export function shout(db: Db, from: string, body: string): SendMessageResult {
-  return sendMessage(db, { from, to: "*", body })
+/** 喊话（`to='*'`）：写入唯一广播会话，全部节点收件箱可见（决议 3）；入口经 `gate`（Task 7）。 */
+export function shout(db: Db, from: string, body: string): Gated<SendMessageResult>
+export function shout(db: Db, from: string, body: string): SendMessageResult | ApprovalRequested {
+  const outcome = gate(db, "shout", from, { body }, () => sendMessage(db, { from, to: "*", body }))
+  return "approval" in outcome ? outcome : outcome.approved
 }
 
 export interface InboxOptions {
