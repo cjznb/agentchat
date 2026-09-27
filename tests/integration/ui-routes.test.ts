@@ -13,9 +13,14 @@ import { join } from "node:path"
 import type { Hono } from "hono"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { z } from "zod"
-import { messageHistorySchema, notificationListSchema, type ChatMessage } from "../../shared/contracts"
+import {
+  ensureDmResultSchema,
+  messageHistorySchema,
+  notificationListSchema,
+  type ChatMessage,
+} from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
-import { registerRoot } from "../../server/core/agents"
+import { registerLogical, registerRoot } from "../../server/core/agents"
 import {
   ack,
   createGroup,
@@ -552,5 +557,60 @@ describe("GET /api/conversations/:id/messages（回执字段）", () => {
     expect(direct[child.id]).toBe("read")
     expect(direct[rootId]).toBe("queued")
     expect(own?.receiptStage).toBe("queued")
+  })
+})
+
+// ── Plan 3 T6：确保 DM（POST /api/conversations） ─────────────────────
+
+describe("POST /api/conversations（Plan 3 T6 确保 DM）", () => {
+  it("ensures the human↔node DM idempotently and parses via the contract schema", async () => {
+    // beforeEach 已存在 human↔root 的 DM（hello）：ensure 应取回同一条（不新建）。
+    const first = await post("/api/conversations", { to: rootId })
+    expect(first.status).toBe(200)
+    const body = ensureDmResultSchema.parse(await first.json())
+    expect(body.conversation.kind).toBe("dm")
+    expect(body.conversation.id).toBe(dmId)
+    expect(isParticipant(db, body.conversation.id, humanId)).toBe(true)
+    expect(isParticipant(db, body.conversation.id, rootId)).toBe(true)
+
+    // 幂等复用：第二次返回同一 conversationId。
+    const second = await post("/api/conversations", { to: rootId })
+    expect(second.status).toBe(200)
+    expect(ensureDmResultSchema.parse(await second.json()).conversation.id).toBe(body.conversation.id)
+  })
+
+  it("creates a DM for a logical node target (allowed; 逻辑节点收件箱常开)", async () => {
+    const logical = registerLogical(db, { name: "dm-board" })
+    const res = await post("/api/conversations", { to: logical.id })
+    expect(res.status).toBe(200)
+    const body = ensureDmResultSchema.parse(await res.json())
+    expect(body.conversation.kind).toBe("dm")
+    expect(isParticipant(db, body.conversation.id, logical.id)).toBe(true)
+    expect(isParticipant(db, body.conversation.id, humanId)).toBe(true)
+  })
+
+  it("returns 404 recipient_not_found for an unknown target", async () => {
+    const res = await post("/api/conversations", { to: "no-such-agent" })
+    expect(res.status).toBe(404)
+    expect(errorBodySchema.parse(await res.json()).error).toBe("recipient_not_found")
+  })
+
+  it("returns 400 invalid_recipient when the target is the human itself", async () => {
+    const res = await post("/api/conversations", { to: humanId })
+    expect(res.status).toBe(400)
+    expect(errorBodySchema.parse(await res.json()).error).toBe("invalid_recipient")
+  })
+
+  it("returns 400 invalid_body for missing/empty/non-string to and a non-JSON body", async () => {
+    const payloads: readonly unknown[] = [{}, { to: "" }, { to: 123 }, { to: null }]
+    for (const payload of payloads) {
+      const res = await post("/api/conversations", payload)
+      expect(res.status).toBe(400)
+      expect(errorBodySchema.parse(await res.json()).error).toBe("invalid_body")
+    }
+    // 无 body / 非 JSON：`c.req.json().catch(() => undefined)` → invalid_body。
+    const raw = await app.request("/api/conversations", { method: "POST" })
+    expect(raw.status).toBe(400)
+    expect(errorBodySchema.parse(await raw.json()).error).toBe("invalid_body")
   })
 })

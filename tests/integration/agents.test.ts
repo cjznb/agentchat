@@ -252,6 +252,7 @@ describe("GET /api/roster", () => {
       name: "roster-child",
       vendor: "claude-code",
       model: "c1",
+      skills: ["go", "sql"],
     })
     const grandchild = registerChild(db, {
       taskRef: "task-roster-gc",
@@ -280,5 +281,30 @@ describe("GET /api/roster", () => {
     expect(childNode?.unread).toBe(1)
     expect(childNode?.children.map((n) => n.id)).toContain(grandchild.id)
     expect(rootNode?.children.find((n) => n.id === logical.id)?.kind).toBe("logical")
+
+    // Plan 3 T6：roster 出参补 `skills`（资料卡技能 chips）；注册值原样透传。
+    expect(childNode?.skills).toEqual(["go", "sql"])
+    // 未提供 skills 的节点 → 空数组（register 缺省 `[]`，非 null/缺字段）。
+    expect(rootNode?.skills).toEqual([])
+    expect(childNode?.children.find((n) => n.id === grandchild.id)?.skills).toEqual([])
+  })
+
+  it("keeps skills stable across a re-read and defaults missing skills to an empty array", async () => {
+    const root = registerRoot(db, home, { name: "skills-root" }).agent
+    registerChild(db, {
+      taskRef: "task-skills-none",
+      parentId: root.id,
+      name: "skills-child",
+      skills: ["ts"],
+    })
+
+    const first = rosterTreeSchema.parse(await (await createApp(db).request("/api/roster")).json())
+    const node = first.find((n) => n.id === root.id)?.children.find((n) => n.name === "skills-child")
+    expect(node?.skills).toEqual(["ts"])
+
+    // 再读一次（模拟 WS 重拉）：字段稳定，不漂移。
+    const again = rosterTreeSchema.parse(await (await createApp(db).request("/api/roster")).json())
+    const reread = again.find((n) => n.id === root.id)?.children.find((n) => n.name === "skills-child")
+    expect(reread?.skills).toEqual(["ts"])
   })
 })
