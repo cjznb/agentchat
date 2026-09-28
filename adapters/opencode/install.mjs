@@ -2,7 +2,7 @@
  * AgentChat OpenCode 安装器：把 **plugin 条目** 与 **MCP server 条目** 并入用户 OpenCode 配置。
  *
  * 用法：
- *   node adapters/opencode/install.mjs [--config <path>] [--dry-run] [--uninstall] [--help]
+ *   node adapters/opencode/install.mjs [--config <path>] [--dry-run] [--uninstall] [--force] [--help]
  *
  * 目标配置解析顺序（本文件实际支持，见 docs/adapters-opencode.md）：
  *   1. `--config <path>`（显式；父目录缺失/文件不存在 → 明确错误，退出码 1）
@@ -10,9 +10,13 @@
  *   3. `$XDG_CONFIG_HOME/opencode/`（未设则 `~/.config/opencode/`）下取
  *      `opencode.jsonc` → `opencode.json` 首个存在者；都无 → 报错并提示 `--config`
  *
+ * MCP 条目为**本地 stdio 桥**（同目录 `mcp-bridge.mjs`），配置里**不含任何 `{file:}` 引用或机密**：
+ * OpenCode 在解析配置前会对整份文件原文做 `{file:}` 替换，文件缺失即致命，故身份与传输 token
+ * 改由桥**逐请求**从磁盘读取（见 docs/adapters-opencode.md）。旧版 `remote` + `{file:…opencode.id}`
+ * 结构会被识别为本适配器旧产物，**无需 `--force`** 即可迁移；`--uninstall` 同样能移除它。
+ *
  * 安全：改动前先备份 `<config>.bak`，再以临时文件 + rename 原子替换；`--dry-run` 只打印不落盘。
  * 幂等：重复安装内容等价；`--uninstall` 仅精确移除本适配器条目，保留用户其它键。
- *
  * 纯 JS（不参与 `tsc`）；无第三方依赖。
  */
 import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs"
@@ -23,17 +27,11 @@ import { parseConfig } from "./jsonc.mjs"
 
 const MCP_KEY = "agentchat"
 const ADAPTER_DIR = dirname(fileURLToPath(import.meta.url))
+const BRIDGE_PATH = join(ADAPTER_DIR, "mcp-bridge.mjs")
+const BRIDGE_BASENAME = /(^|[\\/])mcp-bridge\.mjs$/
+const LEGACY_AGENT_ID = /^\{file:.*agents\/opencode\.id\}$/
 
 // ── 目标配置解析 ────────────────────────────────────────────────────
-
-function resolveHome(env) {
-  return env.AGENTCHAT_HOME || join(homedir(), ".agentchat")
-}
-
-function hubUrl(env) {
-  const base = env.AGENTCHAT_URL || `http://127.0.0.1:${env.AGENTCHAT_PORT ?? "4646"}`
-  return `${base.replace(/\/+$/, "")}/mcp`
-}
 
 function findDefaultConfig(env) {
   const dir = join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode")
@@ -66,26 +64,29 @@ function posix(p) {
   return p.split(sep).join("/")
 }
 
-/** home 下的绝对路径 → `~` 相对形式（OpenCode `{file:}` 支持 `~` 与 `/` 开头的绝对路径）。 */
-function fileRef(absPath) {
-  const homeDir = homedir()
-  const prefix = homeDir.endsWith(sep) ? homeDir : homeDir + sep
-  if (absPath === homeDir) return "~"
-  if (absPath.startsWith(prefix)) return `~/${posix(absPath.slice(prefix.length))}`
-  return posix(absPath)
+/** 仅写入显式覆盖的**非机密**环境变量；默认值不写（避免噪声与无谓 diff）。 */
+function bridgeEnvironment(env) {
+  const environment = {}
+  const home = env.AGENTCHAT_HOME
+  const url = env.AGENTCHAT_URL
+  const port = env.AGENTCHAT_PORT
+  if (home !== undefined && home !== "") environment.AGENTCHAT_HOME = home
+  if (url !== undefined && url !== "") environment.AGENTCHAT_URL = url
+  if (port !== undefined && port !== "" && port !== "4646") environment.AGENTCHAT_PORT = port
+  return environment
 }
 
 function desiredEntries(env) {
+  const environment = bridgeEnvironment(env)
   return {
     pluginPath: posix(ADAPTER_DIR),
     mcp: {
-      type: "remote",
-      url: hubUrl(env),
+      // 本地 stdio：由 OpenCode 直接 spawn `[node, mcp-bridge.mjs]`。
+      // node 取安装时的 process.execPath 绝对路径；换 node/升级后需重跑本安装器。
+      type: "local",
+      command: [process.execPath, posix(BRIDGE_PATH)],
       enabled: true,
-      headers: {
-        Authorization: "Bearer {env:HUB_TOKEN}",
-        "x-agent-id": `{file:${fileRef(join(resolveHome(env), "agents", "opencode.id"))}}`,
-      },
+      ...(Object.keys(environment).length === 0 ? {} : { environment }),
     },
   }
 }
@@ -102,8 +103,26 @@ function pluginSpec(entry) {
   return undefined
 }
 
+/** 旧（会砖）结构：remote + `/mcp` + `x-agent-id: {file:…agents/opencode.id}`。 */
+function isLegacyEntry(entry) {
+  if (!isRecord(entry) || entry.type !== "remote") return false
+  if (typeof entry.url !== "string" || !entry.url.endsWith("/mcp")) return false
+  const headers = entry.headers
+  if (!isRecord(headers)) return false
+  return typeof headers["x-agent-id"] === "string" && LEGACY_AGENT_ID.test(headers["x-agent-id"])
+}
+
+/** 本适配器产物（含旧结构）：可无 `--force` 就地替换/卸载。 */
+function isOwnEntry(entry) {
+  if (isLegacyEntry(entry)) return true
+  if (!isRecord(entry) || entry.type !== "local") return false
+  const command = entry.command
+  return Array.isArray(command) && typeof command[1] === "string" && BRIDGE_BASENAME.test(command[1])
+}
+
 function install(config, entries, force) {
   let changed = false
+  let migrated = false
   if (config.plugin === undefined) {
     config.plugin = []
     changed = true
@@ -125,17 +144,22 @@ function install(config, entries, force) {
     config.mcp[MCP_KEY] = entries.mcp
     changed = true
   } else if (JSON.stringify(existing) !== JSON.stringify(entries.mcp)) {
-    // 结构不同 = 非本安装器产物（可能用户自有同名条目）：默认拒绝覆盖，除非 --force。
-    if (!force) {
+    if (isOwnEntry(existing)) {
+      // 本适配器旧结构（或旧路径）→ 无 --force 迁移到新结构。
+      migrated = isLegacyEntry(existing)
+      config.mcp[MCP_KEY] = entries.mcp
+      changed = true
+    } else if (force) {
+      config.mcp[MCP_KEY] = entries.mcp
+      changed = true
+    } else {
       throw new Error(
         `目标配置已存在结构不同的 mcp.agentchat 条目（非本安装器产物）；拒绝覆盖。` +
           `确认它是本适配器的旧产物后，可加 --force 覆盖`,
       )
     }
-    config.mcp[MCP_KEY] = entries.mcp
-    changed = true
   }
-  return changed
+  return { changed, migrated }
 }
 
 function uninstall(config, entries) {
@@ -149,8 +173,9 @@ function uninstall(config, entries) {
   }
   let keptForeign = false
   if (isRecord(config.mcp) && Object.prototype.hasOwnProperty.call(config.mcp, MCP_KEY)) {
-    // 仅当结构与本安装器产物一致才移除；否则保留用户自有条目并提示。
-    if (JSON.stringify(config.mcp[MCP_KEY]) === JSON.stringify(entries.mcp)) {
+    const existing = config.mcp[MCP_KEY]
+    // 结构完全匹配或本适配器产物（含旧结构）→ 移除；否则保留用户自有条目并提示。
+    if (JSON.stringify(existing) === JSON.stringify(entries.mcp) || isOwnEntry(existing)) {
       delete config.mcp[MCP_KEY]
       changed = true
     } else {
@@ -191,7 +216,7 @@ const HELP = [
   "用法：node adapters/opencode/install.mjs [--config <path>] [--dry-run] [--uninstall] [--force]",
   "  --config <path>   目标 OpenCode 配置（默认：$OPENCODE_CONFIG 或 ~/.config/opencode/opencode.jsonc|json）",
   "  --dry-run 只打印不落盘；--uninstall 精确移除本适配器条目；--help 显示本帮助",
-  "  --force 覆盖结构不同的既有 mcp.agentchat 条目（默认拒绝，以免破坏用户自有同名条目）",
+  "  --force 覆盖结构不同的既有 mcp.agentchat 条目（默认拒绝；本适配器旧结构会自动迁移，无需此参数）",
 ].join("\n") + "\n"
 
 function main() {
@@ -213,7 +238,7 @@ function main() {
     const action = args.uninstall ? "卸载" : "安装"
     const outcome = args.uninstall
       ? uninstall(config, entries)
-      : { changed: install(config, entries, args.force), keptForeign: false }
+      : { ...install(config, entries, args.force), keptForeign: false }
     const text = `${JSON.stringify(config, null, 2)}\n`
     if (outcome.keptForeign) {
       console.error("[agentchat] 已保留结构不同的 mcp.agentchat 条目（非本适配器产物，未删除）")
@@ -232,10 +257,15 @@ function main() {
     const tmp = `${configPath}.tmp-${process.pid}`
     writeFileSync(tmp, text)
     renameSync(tmp, configPath)
+    if (outcome.migrated) {
+      console.log(
+        "[agentchat] 已从会砖的旧结构（remote + {file:…opencode.id} 身份头）迁移为本地 stdio 桥",
+      )
+    }
     console.log(`[agentchat] ${action}完成：${configPath}`)
     console.log(`[agentchat] 原文件已备份：${configPath}.bak`)
     console.log(`[agentchat] 插件条目：${entries.pluginPath}`)
-    console.log(`[agentchat] MCP 条目：${MCP_KEY} → ${entries.mcp.url}`)
+    console.log(`[agentchat] MCP 条目：${MCP_KEY} → local ${entries.mcp.command[1]}`)
     return 0
   } catch (error) {
     console.error(`[agentchat] 错误：${error instanceof Error ? error.message : String(error)}`)

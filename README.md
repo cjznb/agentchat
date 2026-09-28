@@ -53,6 +53,8 @@ dispatcher 不在 `createApp()`/`start()` 内部启动（测试反复调用会�
 | Claude Code | `node adapters/claude-code/install.mjs` | [docs/adapters-claude-code.md](docs/adapters-claude-code.md) |
 
 两安装器均**幂等**、改动前自动备份、支持 `--dry-run`（只打印不落盘）与 `--uninstall`（精确移除本适配器条目）。
+OpenCode 的 MCP 条目是**本地 stdio 桥**（`adapters/opencode/mcp-bridge.mjs`），配置里**不含 `{file:}` 引用
+与 token 明文** —— 身份与 token 由桥**逐请求**从磁盘读取；旧版会砖的 `{file:}` 结构会被安装器**自动迁移**。
 
 > **Claude Code 有两个落点（务必区分）**：**hooks 落 `settings.json`**；**MCP 配置落 `~/.claude.json` 顶层
 > `mcpServers`**（或 `--mcp-config` 指向项目 `.mcp.json`；设 `CLAUDE_CONFIG_DIR` 时随其重定位）——**两个不同文件**。

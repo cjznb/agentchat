@@ -16,7 +16,19 @@ const TEST_DIR = dirname(fileURLToPath(import.meta.url))
 const ADAPTER_DIR = join(TEST_DIR, "..")
 const INSTALL = join(ADAPTER_DIR, "install.mjs")
 const EXPECTED_PLUGIN = ADAPTER_DIR.split(/[\\/]/).join("/")
+const EXPECTED_BRIDGE = `${EXPECTED_PLUGIN}/mcp-bridge.mjs`
 const OTHER_MCP = { type: "remote", url: "https://example.com/mcp", enabled: true }
+
+/** 旧（会砖）结构：remote + `{file:…opencode.id}` 身份头 —— 本适配器早期版本写的产物。 */
+const LEGACY_ENTRY = {
+  type: "remote",
+  url: "http://127.0.0.1:4646/mcp",
+  enabled: true,
+  headers: {
+    Authorization: "Bearer {env:HUB_TOKEN}",
+    "x-agent-id": "{file:~/.agentchat/agents/opencode.id}",
+  },
+}
 
 const dirs: string[] = []
 
@@ -78,11 +90,6 @@ function nested(record: Record<string, unknown>, key: string): Record<string, un
   return value
 }
 
-function str(value: unknown): string {
-  if (typeof value !== "string") throw new Error("not a string")
-  return value
-}
-
 describe("install.mjs 幂等安装", () => {
   it("installs the plugin + MCP entries and is idempotent", () => {
     const cfg = join(tempDir(), "opencode.json")
@@ -105,12 +112,14 @@ describe("install.mjs 幂等安装", () => {
 
     const agentchat = mcpEntry(parsed, "agentchat")
     if (agentchat === undefined) throw new Error("mcp.agentchat missing")
-    expect(agentchat["type"]).toBe("remote")
+    expect(agentchat["type"]).toBe("local")
     expect(agentchat["enabled"]).toBe(true)
-    expect(agentchat["url"]).toBe("http://127.0.0.1:4646/mcp")
-    const headers = nested(agentchat, "headers")
-    expect(headers["Authorization"]).toBe("Bearer {env:HUB_TOKEN}")
-    expect(str(headers["x-agent-id"])).toMatch(/opencode\.id/)
+    expect(agentchat["command"]).toEqual([process.execPath, EXPECTED_BRIDGE])
+    // 配置里禁止任何 {file:} 引用与机密：否则 OpenCode 解析配置时会因生成文件缺失而致命。
+    const written = readFileSync(cfg, "utf8")
+    expect(written).not.toContain("{file:")
+    expect(written).not.toContain("Bearer")
+    expect(written).not.toContain("hub_token")
     expect(existsSync(`${cfg}.bak`)).toBe(true)
   })
 
@@ -125,8 +134,9 @@ describe("install.mjs 幂等安装", () => {
     expect(existsSync(`${cfg}.bak`)).toBe(false)
     const out = result.stdout ?? ""
     expect(out).toContain(EXPECTED_PLUGIN)
+    expect(out).toContain(EXPECTED_BRIDGE)
     expect(out).toContain('"agentchat"')
-    expect(out).toContain("x-agent-id")
+    expect(out).toContain('"local"')
   })
 
   it("--uninstall removes only this adapter's entries", () => {
@@ -167,8 +177,8 @@ describe("install.mjs 幂等安装", () => {
     expect(forced.status).toBe(0)
     const entry = mcpEntry(readConfig(cfg), "agentchat")
     if (entry === undefined) throw new Error("mcp.agentchat missing after --force")
-    expect(entry["type"]).toBe("remote")
-    expect(nested(entry, "headers")["Authorization"]).toBe("Bearer {env:HUB_TOKEN}")
+    expect(entry["type"]).toBe("local")
+    expect(entry["command"]).toEqual([process.execPath, EXPECTED_BRIDGE])
   })
 
   it("does not delete a structurally different user-owned mcp.agentchat on --uninstall", () => {
@@ -205,5 +215,78 @@ describe("install.mjs 幂等安装", () => {
     const result = run(["--config", cfg])
     expect(result.status).toBe(0)
     expect(pluginList(readConfig(cfg))).toEqual(["a", "b", EXPECTED_PLUGIN])
+  })
+
+  it("migrates the legacy {file:} structure without --force and says so", () => {
+    const cfg = join(tempDir(), "opencode.json")
+    const home = join(tempDir(), "home")
+    writeFileSync(
+      cfg,
+      `${JSON.stringify({ plugin: ["other-plugin"], mcp: { agentchat: LEGACY_ENTRY, other: OTHER_MCP } }, null, 2)}\n`,
+    )
+
+    const result = run(["--config", cfg], { AGENTCHAT_HOME: home })
+    expect(result.status).toBe(0)
+    expect(result.stdout ?? "").toContain("迁移")
+
+    const parsed = readConfig(cfg)
+    const agentchat = mcpEntry(parsed, "agentchat")
+    if (agentchat === undefined) throw new Error("mcp.agentchat missing after migration")
+    expect(agentchat["type"]).toBe("local")
+    expect(agentchat["command"]).toEqual([process.execPath, EXPECTED_BRIDGE])
+    expect(mcpEntry(parsed, "other")).toEqual(OTHER_MCP)
+    expect(pluginList(parsed)).toContain("other-plugin")
+    expect(existsSync(`${cfg}.bak`)).toBe(true)
+  })
+
+  it("--uninstall removes the legacy {file:} structure", () => {
+    const cfg = join(tempDir(), "opencode.json")
+    const home = join(tempDir(), "home")
+    writeFileSync(
+      cfg,
+      `${JSON.stringify({ plugin: ["other-plugin"], mcp: { agentchat: LEGACY_ENTRY, other: OTHER_MCP } }, null, 2)}\n`,
+    )
+
+    const result = run(["--config", cfg, "--uninstall"], { AGENTCHAT_HOME: home })
+    expect(result.status).toBe(0)
+    const parsed = readConfig(cfg)
+    expect(mcpEntry(parsed, "agentchat")).toBeUndefined()
+    expect(mcpEntry(parsed, "other")).toEqual(OTHER_MCP)
+    expect(pluginList(parsed)).toContain("other-plugin")
+  })
+
+  it("writes only non-secret agentchat overrides into the MCP environment", () => {
+    const cfg = join(tempDir(), "opencode.json")
+    const home = join(tempDir(), "home")
+    seedConfig(cfg)
+
+    const result = run(["--config", cfg], {
+      AGENTCHAT_HOME: home,
+      AGENTCHAT_URL: "http://127.0.0.1:9999",
+    })
+    expect(result.status).toBe(0)
+    const agentchat = mcpEntry(readConfig(cfg), "agentchat")
+    if (agentchat === undefined) throw new Error("mcp.agentchat missing")
+    expect(nested(agentchat, "environment")).toEqual({
+      AGENTCHAT_HOME: home,
+      AGENTCHAT_URL: "http://127.0.0.1:9999",
+    })
+    expect(readFileSync(cfg, "utf8")).not.toContain("HUB_TOKEN")
+  })
+
+  it("omits the environment block entirely when no agentchat override is set", () => {
+    const cfg = join(tempDir(), "opencode.json")
+    seedConfig(cfg)
+
+    const env: Record<string, string> = {}
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined && !key.startsWith("AGENTCHAT_") && key !== "HUB_TOKEN") env[key] = value
+    }
+    const result = spawnSync(process.execPath, [INSTALL, "--config", cfg], { encoding: "utf8", env })
+    expect(result.status).toBe(0)
+    const agentchat = mcpEntry(readConfig(cfg), "agentchat")
+    if (agentchat === undefined) throw new Error("mcp.agentchat missing")
+    expect(agentchat["environment"]).toBeUndefined()
+    expect(agentchat["command"]).toEqual([process.execPath, EXPECTED_BRIDGE])
   })
 })

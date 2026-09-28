@@ -3,7 +3,7 @@
  * 断言 Hub 调用序列与 payload（根注册→token 落盘、重连认领、子注册父关联、
  * busy/idle、wake→注入→result 闭环、401/5xx 重试与放弃、注入失败→refused）。
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -286,6 +286,33 @@ describe("根会话注册与 join_token 落盘", () => {
     expect(readFileSync(join(home, "agents", "opencode.id"), "utf8")).toBe("agent-new")
     expect(harness.logs.some((line) => line.includes("stale join_token rejected"))).toBe(true)
     expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-new", state: "busy" }])
+  })
+
+  it("keeps the persisted agent id when stale-token recovery re-registration fails", async () => {
+    // 回归：陈旧 token 自愈曾连带 clearToken(idPath) 删除 opencode.id，而 OpenCode 配置以
+    // {file:…} 引用它 → 下次启动因文件缺失而彻底无法启动（死锁）。id 文件必须保留。
+    const home = tempHome()
+    const tokenPath = join(home, "agents", "opencode.token")
+    const idPath = join(home, "agents", "opencode.id")
+    mkdirSync(dirname(tokenPath), { recursive: true })
+    writeFileSync(tokenPath, "stale-token")
+    writeFileSync(idPath, "stale-id")
+    let calls = 0
+    const harness = setup({
+      home,
+      overrides: {
+        toolsCall: () => {
+          calls += 1
+          return calls === 1
+            ? toolReply("RegistrationError: unknown join_token [invalid_join_token]", true)
+            : toolReply("RegistrationError: boom [name_taken]", true)
+        },
+      },
+    })
+    await emit(harness, rootCreated())
+    expect(readFileSync(idPath, "utf8")).toBe("stale-id") // 未被删除
+    expect(existsSync(tokenPath)).toBe(false) // token 仍被清除（自愈路径只清 token）
+    expect(harness.logs.some((line) => line.includes("stale join_token rejected"))).toBe(true)
   })
 })
 

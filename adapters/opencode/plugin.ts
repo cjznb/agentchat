@@ -117,7 +117,10 @@ function createRuntime(
         throw error
       }
       const cleared = clearToken(path)
-      clearToken(idPath)
+      // 注意：**不要**删除 `<home>/agents/opencode.id`。旧实现连带清除它，而 OpenCode 配置曾以
+      // `{file:…opencode.id}` 引用该文件：文件缺失会让 OpenCode 在解析配置前就致命失败（无法启动），
+      // 于是插件再也不会注册、文件永不生成 —— 死锁。注册成功后下方 `writeToken(idPath, …)` 会覆盖为
+      // 正确 id，故这里保留旧 id 即可打断「删除→砖」的连锁。
       log(
         `stale join_token rejected; re-registering as a new root${
           cleared.ok ? "" : ` (token clear failed: ${cleared.error ?? "unknown"})`

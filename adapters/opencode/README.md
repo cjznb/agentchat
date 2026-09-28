@@ -9,7 +9,7 @@
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `HUB_TOKEN` | 是 | Hub 传输门 token，取 `<AGENTCHAT_HOME>/hub_token` 内容 |
+| `HUB_TOKEN` | 运行插件时是 | Hub 传输门 token，取 `<AGENTCHAT_HOME>/hub_token` 内容（**插件**读 `process.env`；**MCP 桥不读它**，逐请求从磁盘读盘） |
 | `AGENTCHAT_HOME` | 否 | 数据目录，默认 `~/.agentchat`（与 Hub 一致） |
 | `AGENTCHAT_URL` | 否 | Hub 地址，默认 `http://127.0.0.1:<AGENTCHAT_PORT 或 4646>` |
 | `AGENTCHAT_PORT` | 否 | 仅用于推导默认 `AGENTCHAT_URL` |
@@ -38,8 +38,9 @@
   401/404 等确定性错误不重试，记录并降级。
 - 所有事件处理入队即返回（fire-and-forget，串行保序），网络重试在后台推进，**不阻塞宿主事件循环**。
 - token 写失败仅记录、不中断（尽力而为）。
-- 根注册成功后把**节点 agent id** 落盘 `<home>/agents/opencode.id`（供 OpenCode MCP 身份头 `x-agent-id` 以
-  `{file:…}` 引用）；陈旧 token 自愈时与 token 一并清除。
+- 根注册成功后把**节点 agent id** 落盘 `<home>/agents/opencode.id`（供本地 MCP 桥**逐请求**读作
+  `x-agent-id`）。陈旧 token 自愈**只清 token、保留该 id 文件**：曾因连删该文件（而旧配置以 `{file:…}`
+  引用它）导致 OpenCode 下次启动直接无法解析配置（被砖），详见 `docs/adapters-opencode.md`。
 - 陈旧 `join_token`（Hub DB 重置/切换后）→ `invalid_join_token`：清空本地 token 后按「无 token 首次注册」
   重新注册为根并写回新 token（此路径不可能产生重复根），日志给明确 warn。
 - 未映射会话（自身尚未注册的子会话）的 `session.status`/`session.idle` 一律跳过并 warn，
@@ -53,9 +54,23 @@
 
 ## 安装
 
-见 `docs/adapters-opencode.md`（Task 3）与 `adapters/opencode/install.mjs`。
-安装器对既有 `mcp.agentchat` 条目做**结构比对**：仅当结构与本安装器将写入的一致才覆盖（幂等），
-否则**拒绝并给非 0 退出码**（除非 `--force`）；`--uninstall` 仅当结构匹配本安装器产物时才移除，否则保留用户自有条目并提示。
+见 `docs/adapters-opencode.md` 与 `adapters/opencode/install.mjs`。
+安装器对既有 `mcp.agentchat` 条目做**结构比对**：结构一致则幂等无改动；识别为**本适配器旧产物**
+（`remote` + `{file:…opencode.id}` 身份头，或本地桥条目）则**无需 `--force`** 就地迁移/移除；
+结构不同的**用户自有**同名条目则**拒绝并给非 0 退出码**（除非 `--force`）。
+`--uninstall` 能移除新旧两种结构，同时保留用户其它键。
+
+## MCP 接入：本地 stdio 桥
+
+`mcp-bridge.mjs` 是被 OpenCode 直接 spawn 的本地 stdio MCP server，把 JSON-RPC 透明转发到 Hub `/mcp`
+（streamable-HTTP 有状态会话，响应支持 `application/json` 与 `text/event-stream`）。设计动因与取舍见
+`docs/adapters-opencode.md`：
+
+- **逐请求读盘**：`Authorization: Bearer <home>/hub_token`、`x-agent-id: <home>/agents/opencode.id`
+  （文件不存在则省略该头，绝不因环境缺失而拒绝启动）。
+- 会话 id 取自 initialize 响应头并在后续请求回带；`404 session_not_found` → 自动重新 initialize 一次重试。
+- 失败只在首次工具调用时以清晰 JSON-RPC error 回给宿主，桥进程保持存活。
+- 配置里**不含任何 `{file:}` 引用与机密**（这正是旧结构让 OpenCode 无法启动的根因）。
 
 `plugin.ts` 默认导出 OpenCode 期望的 `PluginModule` 形态 `{ id: "agentchat", server }`
 （加载器 `readV1Plugin` 只读 `default`，且本地路径插件必须带 `id`），命名导出 `AgentChatPlugin`
@@ -66,6 +81,7 @@
 | 文件 | 职责 |
 |---|---|
 | `plugin.ts` | 插件入口（`AgentChatPlugin`）；事件映射与队列调度 |
+| `mcp-bridge.mjs` | 本地 stdio MCP 桥：逐请求读盘身份/token，透明转发到 Hub `/mcp` |
 | `hub.ts` | 客户端门面：组合传输层与 MCP，暴露 `register` + `/internal/*` |
 | `transport.ts` | 传输层：HTTP POST、3s 超时、指数退避重试、`HubError` |
 | `mcp.ts` | MCP `register` 握手与 SSE/工具结果解析、`HubToolError` |
