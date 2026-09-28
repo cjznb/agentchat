@@ -1,7 +1,8 @@
 # AgentChat — OpenCode 插件（进程外适配器）
 
-把本机运行的 [OpenCode](https://opencode.ai) 会话接入 AgentChat Hub：会话建立时注册节点、
-回合始末上报 busy/idle、空闲时从 Hub 拉取积压消息并注入会话。
+把本机运行的 [OpenCode](https://opencode.ai) 接入 AgentChat Hub：**每个会话即一个联系人**——
+实例节点（根，`opencode@<主机名>`）下挂会话节点（名字=会话标题，`task_ref=session.id`），
+子代理会话再挂在其所属会话节点下；回合始末上报 busy/idle、空闲时从 Hub 拉取积压消息并注入会话。
 
 插件**只经 HTTP 契约**与 Hub 通信（不 import Hub 的 server 代码）。
 
@@ -24,28 +25,46 @@
 
 | OpenCode 事件 | 动作 |
 |---|---|
-| `session.created`（`info.parentID` 缺失） | MCP `register`（根）：无 token → 首注册并把返回的 `join_token` 写 `<home>/agents/opencode.token`（0600）；有 token → 带 `join_token` 重连认领 |
-| `session.created`（`info.parentID` 存在） | MCP `register{parent_ref, task_ref: info.id}`（`parent_ref` = 父会话已映射的节点 id；缺失时按「当前根 = 父回合窗口」兜底） |
-| `session.status`（`busy`/`retry`/`idle`） | `POST /internal/state {busy\|idle}`（同态去重） |
+| （首次需要时） | MCP `register`（**实例节点**，根）：可读名 `opencode@<主机名>`；无 token → 首注册并把返回的 `join_token` 写 `<home>/agents/opencode.token`（0600）；有 token → 带 `join_token` 重连认领。其实例 id 写 `<home>/agents/opencode.id` |
+| `session.created`（根或子代理） | 会话登记为**实例节点的子节点**（根会话）或**其所属会话节点的子节点**（子代理）：MCP `register{parent_ref, task_ref: info.id, name: 标题}`；标题空回退 `opencode:<id 前 8 位>` |
+| `session.status`（`busy`/`retry`/`idle`） | `POST /internal/state {busy\|idle}`（**按会话节点 id**；同态去重） |
 | `session.idle` | 报 `idle`（心跳上报）→ `POST /internal/wake` → 逐条 `client.session.promptAsync` 注入（**按 `messageId` 有界去重**，租约重投不重复注入）→ `POST /internal/result {items:[{messageId,result:"delivered"\|"refused"}]}`（注入抛错记 `refused`）；随后为该会话**启动空闲轮询** |
 | **（idle 期间·无事件）** | **空闲轮询**（默认 10s，`AGENTCHAT_POLL_MS` 覆盖）：每次执行与 `session.idle` **同一路径**并上报 `idle` 心跳（刷新 `last_seen`）；转 `busy`/`retry` 即停；`dispose`/会话删除时清理定时器 |
-| `session.deleted`（根） | `POST /internal/state {offline}`（根保持 offline 语义） |
-| `session.deleted`（子）/ `dispose` | `POST /internal/retire {agentId:<子节点>}` 退役子节点（**幂等**；`404` 视为已退役，不重试）；子节点不报 `offline`（Hub 侧 409 拒绝） |
-| **`session.updated` / 任何带会话事件指向未映射会话** | **懒收养（A）**：`client.session.get` 查询后按 `parentID` 收养（根走既有 token 认领；子要求父已映射），成功继续处理原事件 |
-| **（启动·初始化后）** | **启动枚举收养（B）**：fire-and-forget `client.session.list{scope:"project", roots, limit}`，客户端过滤 `time.archived` 后逐个走根收养；不可用/报错即静默降级 |
+| `session.deleted`（任意会话） | `POST /internal/retire {agentId:<会话节点>}` 退役该会话节点（**幂等**；`404` 视为已退役，不重试）；会话节点是**子节点**故**绝不报 `offline`**（Hub 侧 409 `child_never_offline` 拒绝） |
+| `dispose` | `POST /internal/state {offline}`（**实例节点**是根，报 offline 合规） |
+| **`session.updated`（标题变化）** | 若映射且标题变化 → **重注册**（`task_ref` 不变、名字=新标题；靠 Hub「重注册可更新卡片字段」改名）；标题未变则 no-op |
+| **任何带会话事件指向未映射会话** | **懒收养（A）**：`client.session.get` 查询后登记（根会话父=实例节点；子代理父=其所属会话节点，父未映射则跳过并 warn，**绝不回落实例**），成功继续处理原事件 |
+| **（启动·初始化后）** | **启动枚举收养（B）**：fire-and-forget `client.session.list{scope:"project", roots, limit}`，客户端过滤 `time.archived` 后逐个收为**实例节点的子节点**（名字=标题）；不可用/报错即静默降级 |
+
+### 会话即联系人（层级 / 命名 / 标题同步）
+
+```
+实例节点（根）        opencode@<主机名>           ← join_token 认领；MCP 出站身份（opencode.id）
+└─ 会话节点（子）     <OpenCode 会话标题>         ← task_ref=session.id；状态/投递按它
+   └─ 子代理会话      <子会话标题>                ← subagent 会话
+```
+
+- **命名**：实例节点 `opencode@<os.hostname()>`（拿不到主机名回退 `opencode`）；
+  会话节点取 `session.title`（trim 非空），空标题回退 `opencode:<sessionid 前 8 位>`。
+- **标题同步**：记录每会话「上次已知标题」，**仅当标题真的变化**才重注册，避免每次
+  `session.updated`（频繁 touch）都重注册刷屏。
+- **身份分层**：OpenCode 一个进程只暴露**一个** MCP server（本地 stdio 桥），桥逐请求读
+  `opencode.id` 作 `x-agent-id` → 故它是**实例级**身份；而状态（`/internal/state`）、投递
+  （`/internal/wake`/`result`）按**会话节点 id**。
+- **无需迁移**：旧的会话子节点/历史实例节点保留无害；升级后最多多出一个可读的实例分组节点。
 
 ### 已存在/被恢复会话的收养（缺陷修复）
 
 OpenCode **不会**为已存在/被恢复的会话补发 `session.created`，而插件此前只在建会话事件上注册，故历史会话
 永远不会出现在 AgentChat（日志 `status for unmapped session …; skipped`）。现分两路收养：
 
-- **A 懒收养**：`session.status`/`session.idle`/`session.updated` 等任何带会话的事件指向**未映射**会话时，
+- **A 懒收养**：`session.status`/`session.idle` 等带会话 id 的事件指向**未映射**会话时，
   先 `client.session.get({path:{id}})` 查询（失败/404 → 保持既有「跳过 + warn」，不崩溃）：无 `parentID` 的
-  根走**既有根注册路径**（复用 `<home>/agents/opencode.token` 的 `join_token` 认领，恢复的旧根挂回**同一节点**，
-  不新建重复根）；有 `parentID` 且**父已映射** → 既有子注册（`parent_ref`/`task_ref`）；**父未映射 → 跳过 + warn
-  （绝不回落根）**。收养成功后**继续处理原事件**；已映射会话不重复注册（既有映射表为准，同一串行队列保序）。
-- **B 启动枚举**：初始化后 fire-and-forget 取根会话（`roots:true` + `limit`，默认 5）并按 A 的根路径逐个收养；
-  `session.list` 在旧宿主可能缺失/报错 → 记录并**静默降级**（只保留 A），插件不失效。
+  根会话登记为**实例节点的子节点**（`task_ref=session.id`、名字=标题）；有 `parentID` 且**父会话已映射** →
+  登记为其**所属会话节点的子节点**；**父未映射 → 跳过 + warn（绝不回落实例）**。收养成功后**继续处理原事件**；
+  已映射会话（标题未变）不重复注册（映射表为准，同一串行队列保序）。`session.updated` 直接带完整 `info`，无需再查。
+- **B 启动枚举**：初始化后 fire-and-forget 取根会话（`roots:true` + `limit`，默认 5）并按同一规则逐个收为
+  **实例节点的子节点**（名字=标题）；`session.list` 在旧宿主可能缺失/报错 → 记录并**静默降级**（只保留 A），插件不失效。
 
 依据：`@opencode-ai/sdk` 的 `client.session.list`（`GET /session`）与 `client.session.get`（`GET /session/{id}`）
 在 1.18.x 运行期存在且支持 `scope:"project"`/`roots`/`limit`（项目级 list **不过滤归档**，故客户端过滤
@@ -70,19 +89,19 @@ OpenCode **不会**为已存在/被恢复的会话补发 `session.created`，而
   轮询失败按指数退避拉长（上限 60s）、成功后回到基础间隔，Hub 不可达时不刷屏；定时器 `unref` 且
   `dispose` 清理，**不阻塞/不泄漏**。轮询与事件路径共用 `messageId` 有界去重，**绝不重复注入**。
 - token 写失败仅记录、不中断（尽力而为）。
-- 根注册成功后把**节点 agent id** 落盘 `<home>/agents/opencode.id`（供本地 MCP 桥**逐请求**读作
-  `x-agent-id`）。陈旧 token 自愈**只清 token、保留该 id 文件**：曾因连删该文件（而旧配置以 `{file:…}`
+- **实例节点**注册成功后把其 agent id 落盘 `<home>/agents/opencode.id`（供本地 MCP 桥**逐请求**读作
+  `x-agent-id`；即实例级出站身份）。陈旧 token 自愈**只清 token、保留该 id 文件**：曾因连删该文件（而旧配置以 `{file:…}`
   引用它）导致 OpenCode 下次启动直接无法解析配置（被砖），详见 `docs/adapters-opencode.md`。
 - 陈旧 `join_token`（Hub DB 重置/切换后）→ `invalid_join_token`：清空本地 token 后按「无 token 首次注册」
-  重新注册为根并写回新 token（此路径不可能产生重复根），日志给明确 warn。
-- 未映射会话（自身尚未注册的根/子会话）的 `session.status`/`session.idle` **先尝试懒收养**（见「已存在/被恢复
-  会话的收养」）：收养成功则正常处理；`session.get` 失败/404 或**子会话父未映射**时仍**跳过并 warn**，
-  **不回落根节点**（避免「给根取件、往子会话注入」错配）。
+  重新注册为新**实例节点**（根）并写回新 token（此路径不可能产生重复实例节点），日志给明确 warn。
+- 未映射会话（自身尚未登记）的 `session.status`/`session.idle` **先尝试懒收养**（见「已存在/被恢复
+  会话的收养」）：收养成功则正常处理；`session.get` 失败/404 或**子代理父会话未映射**时仍**跳过并 warn**，
+  **不回落实例节点**（避免「给实例取件、往会话注入」错配）。
 - **在途租约去重**：Hub 的 `/internal/wake` 认领即 job → `sending` + 30s 在途租约（**非** `accepted`/`delivered`），
   未回执则租约到期后重投；故插件按 `messageId` **有界去重**（上限 256，FIFO 淘汰），已注入者**绝不重复注入**、仅补回执。
-- **运行期子节点退役**：子会话 `session.deleted` → `POST /internal/retire`（幂等，`404` 视为已退役不重试；失败只记日志、
+- **运行期会话节点退役**：任何会话 `session.deleted` → `POST /internal/retire`（幂等，`404` 视为已退役不重试；失败只记日志、
   不阻塞主流程），避免名单残留与向已死参与者投递。退役**不可复活**：同一 `task_ref`（=`session.id`）再注册被 Hub 拒绝；
-  OpenCode 子会话 id 唯一，重派生即新节点。**根节点保持 `offline` 语义，不退役**。
+  OpenCode 会话 id 唯一，重派生即新节点。会话节点是**子节点**故**绝不报 `offline`**（实例节点是根，`dispose` 时才报 offline）。
 - Windows 上 `chmod 0600` 调用成功但权限位可能不生效（与 Hub 侧 token 同策略）。
 
 ## 安装
@@ -116,7 +135,7 @@ OpenCode **不会**为已存在/被恢复的会话补发 `session.created`，而
 | 文件 | 职责 |
 |---|---|
 | `plugin.ts` | 插件入口（`AgentChatPlugin`）；事件映射与队列调度 |
-| `adopt.ts` | 已存在/被恢复会话的收养（A 懒收养 + B 启动枚举、`AGENTCHAT_ADOPT[_LIMIT]` 解析） |
+| `adopt.ts` | 会话即联系人（实例/会话命名、标题同步、A 懒收养 + B 启动枚举、`AGENTCHAT_ADOPT[_LIMIT]` 解析） |
 | `mcp-bridge.mjs` | 本地 stdio MCP 桥：逐请求读盘身份/token，透明转发到 Hub `/mcp` |
 | `hub.ts` | 客户端门面：组合传输层与 MCP，暴露 `register` + `/internal/*` |
 | `transport.ts` | 传输层：HTTP POST、3s 超时、指数退避重试、`HubError` |

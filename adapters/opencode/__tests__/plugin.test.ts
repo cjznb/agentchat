@@ -4,7 +4,7 @@
  * busy/idle、wake→注入→result 闭环、401/5xx 重试与放弃、注入失败→refused）。
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { hostname as osHostname, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createPluginHandle, type PluginDeps, type PluginHandle } from "../plugin"
@@ -359,14 +359,45 @@ async function emit(harness: Harness, ...events: OpencodeEvent[]): Promise<void>
 
 // ── 事件构造 ────────────────────────────────────────────────────────
 
-const rootCreated = (id = "root-sess"): OpencodeEvent => ({
+const rootCreated = (id = "root-sess", title = "根会话标题"): OpencodeEvent => ({
   type: "session.created",
-  properties: { info: { id } },
+  properties: { info: { id, title } },
 })
-const childCreated = (id: string, parentID: string): OpencodeEvent => ({
+const childCreated = (id: string, parentID: string, title = "子会话标题"): OpencodeEvent => ({
   type: "session.created",
-  properties: { info: { id, parentID } },
+  properties: { info: { id, parentID, title } },
 })
+
+/**
+ * 实例节点（根）注册入参期望：`opencode@<host>` 可读名（主机名缺失回退 `opencode`）。
+ */
+function instanceArgs(joinToken?: string): Record<string, unknown> {
+  const host = osHostname()
+  const name = host === undefined ? "opencode" : `opencode@${host}`
+  return {
+    vendor: "opencode",
+    purpose: "coding-agent",
+    name,
+    ...(joinToken === undefined ? {} : { join_token: joinToken }),
+  }
+}
+
+/** 会话节点注册入参期望：名字=标题（trim 非空）否则 `opencode:<id 前 8 位>`；`model` 可选。 */
+function sessionArgs(
+  session: OpencodeSession,
+  parentRef: string,
+  model?: string,
+): Record<string, unknown> {
+  const title = session.title?.trim()
+  const name = title === undefined || title === "" ? `opencode:${session.id.slice(0, 8)}` : title
+  return {
+    vendor: "opencode",
+    parent_ref: parentRef,
+    task_ref: session.id,
+    name,
+    ...(model === undefined ? {} : { model }),
+  }
+}
 const sessionStatus = (sessionID: string, type: "idle" | "busy" | "retry"): OpencodeEvent => ({
   type: "session.status",
   properties: { sessionID, status: { type } },
@@ -408,7 +439,11 @@ describe("根会话注册与 join_token 落盘", () => {
     const home = tempHome()
     const harness = setup({ home })
     await emit(harness, rootCreated())
-    expect(harness.kit.toolCalls).toEqual([{ vendor: "opencode", purpose: "coding-agent" }])
+    // 先认领实例节点（根），再把根会话登记为其子节点（task_ref=sessionid）。
+    expect(harness.kit.toolCalls).toEqual([
+      instanceArgs(),
+      sessionArgs({ id: "root-sess", title: "根会话标题" }, "agent-1"),
+    ])
     expect(readFileSync(join(home, "agents", "opencode.token"), "utf8")).toBe("jt-1")
     expect(harness.kit.calls.some((call) => call.headers["authorization"] === "Bearer hub-token")).toBe(true)
   })
@@ -431,7 +466,8 @@ describe("根会话注册与 join_token 落盘", () => {
     })
     await emit(harness, rootCreated())
     expect(harness.kit.toolCalls).toEqual([
-      { vendor: "opencode", purpose: "coding-agent", join_token: "old-token" },
+      instanceArgs("old-token"),
+      sessionArgs({ id: "root-sess", title: "根会话标题" }, "agent-7"),
     ])
     expect(readFileSync(path, "utf8")).toBe("old-token")
   })
@@ -441,7 +477,8 @@ describe("根会话注册与 join_token 落盘", () => {
     writeFileSync(home, "file")
     const harness = setup({ home })
     await emit(harness, rootCreated())
-    expect(harness.kit.toolCalls).toHaveLength(1)
+    // 实例 + 会话两次注册（token 落盘失败只记录、不中断）。
+    expect(harness.kit.toolCalls).toHaveLength(2)
     expect(harness.logs.some((line) => line.includes("token write failed"))).toBe(true)
   })
 
@@ -476,12 +513,11 @@ describe("根会话注册与 join_token 落盘", () => {
       },
     })
     await emit(harness, rootCreated(), sessionStatus("root-sess", "busy"))
-    expect(harness.kit.toolCalls[0]).toEqual({
-      vendor: "opencode",
-      purpose: "coding-agent",
-      join_token: "stale-token",
-    })
-    expect(harness.kit.toolCalls[1]).toEqual({ vendor: "opencode", purpose: "coding-agent" })
+    expect(harness.kit.toolCalls[0]).toEqual(instanceArgs("stale-token"))
+    expect(harness.kit.toolCalls[1]).toEqual(instanceArgs())
+    expect(harness.kit.toolCalls[2]).toEqual(
+      sessionArgs({ id: "root-sess", title: "根会话标题" }, "agent-new"),
+    )
     expect(readFileSync(path, "utf8")).toBe("jt-new")
     expect(readFileSync(join(home, "agents", "opencode.id"), "utf8")).toBe("agent-new")
     expect(harness.logs.some((line) => line.includes("stale join_token rejected"))).toBe(true)
@@ -559,26 +595,27 @@ describe("传输门 token 解析（env → 磁盘 → 空）", () => {
 // ── 子注册 ──────────────────────────────────────────────────────────
 
 describe("子会话注册（父关联）", () => {
-  it("registers a child with parent_ref=root agent id and task_ref=session id", async () => {
+  it("registers a child with parent_ref=its session node id and task_ref=session id", async () => {
     const home = tempHome()
     const harness = setup({ home })
     await emit(harness, rootCreated(), childCreated("child-1", "root-sess"))
-    expect(harness.kit.toolCalls[1]).toEqual({
-      vendor: "opencode",
-      parent_ref: "agent-1",
-      task_ref: "child-1",
-    })
+    // 层级 实例(agent-1) → 根会话(agent-2) → 子代理(agent-3)：子代理父 = 根会话节点。
+    expect(harness.kit.toolCalls[2]).toEqual(
+      sessionArgs({ id: "child-1", parentID: "root-sess", title: "子会话标题" }, "agent-2"),
+    )
   })
 
-  it("falls back to the current root when the parent session is unmapped", async () => {
+  it("skips a child whose parent session is unmapped (never falls back to the instance)", async () => {
     const home = tempHome()
     const harness = setup({ home })
     await emit(harness, rootCreated(), childCreated("child-2", "unknown-sess"))
-    expect(harness.kit.toolCalls[1]).toEqual({
-      vendor: "opencode",
-      parent_ref: "agent-1",
-      task_ref: "child-2",
-    })
+    // 绝不回落实例节点：父会话未映射即跳过（只保留实例 + 根会话两次注册）。
+    expect(harness.kit.toolCalls).toHaveLength(2)
+    expect(
+      harness.logs.some((line) =>
+        line.includes("adopt child child-2 skipped: parent unknown-sess not mapped"),
+      ),
+    ).toBe(true)
   })
 })
 
@@ -589,9 +626,10 @@ describe("状态上报", () => {
     const home = tempHome()
     const harness = setup({ home })
     await emit(harness, rootCreated(), sessionStatus("root-sess", "busy"), sessionStatus("root-sess", "idle"))
+    // 状态按**会话节点 id**（实例 agent-1 的根会话节点 = agent-2）。
     expect(stateCalls(harness.kit)).toEqual([
-      { agentId: "agent-1", state: "busy" },
-      { agentId: "agent-1", state: "idle" },
+      { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-2", state: "idle" },
     ])
   })
 
@@ -604,10 +642,10 @@ describe("状态上报", () => {
       sessionStatus("root-sess", "busy"),
       sessionStatus("root-sess", "busy"),
     )
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
   })
 
-  it("reports offline on root deletion but not on child deletion", async () => {
+  it("retires every session node on deletion and never reports offline", async () => {
     const home = tempHome()
     const harness = setup({ home })
     await emit(
@@ -615,12 +653,17 @@ describe("状态上报", () => {
       rootCreated(),
       childCreated("child-1", "root-sess"),
       { type: "session.deleted", properties: { info: { id: "child-1", parentID: "root-sess" } } },
-      { type: "session.deleted", properties: { info: { id: "root-sess" } } },
+      { type: "session.deleted", properties: { info: { id: "root-sess", title: "根会话标题" } } },
     )
+    // 根会话/子代理皆为实例节点的子节点 → 删除即退役（子节点不得报 offline）。
+    const retires = harness.kit.internalCalls
+      .filter((call) => call.path === "/internal/retire")
+      .map((call) => call.body)
+    expect(retires).toEqual([{ agentId: "agent-3" }, { agentId: "agent-2" }])
     const offline = stateCalls(harness.kit).filter(
       (body) => isRecord(body) && body["state"] === "offline",
     )
-    expect(offline).toEqual([{ agentId: "agent-1", state: "offline" }])
+    expect(offline).toEqual([])
   })
 })
 
@@ -671,11 +714,12 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
       home,
       overrides: { toolsCall: () => toolReply(registerText("agent-1")), ...wakeOne },
     })
-    harness.client.sessions.set("old-root", { id: "old-root" })
+    harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(harness, sessionStatus("old-root", "idle"), sessionIdle("old-root"))
     expect(harness.client.getCalls).toEqual(["old-root"])
     expect(harness.kit.toolCalls).toEqual([
-      { vendor: "opencode", purpose: "coding-agent", join_token: "existing-token" },
+      instanceArgs("existing-token"),
+      sessionArgs({ id: "old-root", title: "旧根会话" }, "agent-1"),
     ])
     expect(readFileSync(tokenPath, "utf8")).toBe("existing-token") // 复用旧 token，未新建节点/新 token
     expect(stateCalls(harness.kit)).toContainEqual({ agentId: "agent-1", state: "idle" })
@@ -683,19 +727,18 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
     expect(harness.client.texts[0]).toContain("hi")
   })
 
-  it("A/子（父已映射）：registers the child with parent_ref=parent agent", async () => {
+  it("A/子（父已映射）：registers the child under its session node", async () => {
     const home = tempHome()
     const harness = setup({ home })
     await emit(harness, rootCreated())
-    harness.client.sessions.set("child-x", { id: "child-x", parentID: "root-sess" })
+    harness.client.sessions.set("child-x", { id: "child-x", parentID: "root-sess", title: "子会话X" })
     await emit(harness, sessionStatus("child-x", "busy"))
     expect(harness.client.getCalls).toEqual(["child-x"])
-    expect(harness.kit.toolCalls[1]).toEqual({
-      vendor: "opencode",
-      parent_ref: "agent-1",
-      task_ref: "child-x",
-    })
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
+    // 子代理父 = 其所属根会话节点（agent-2）。
+    expect(harness.kit.toolCalls[2]).toEqual(
+      sessionArgs({ id: "child-x", parentID: "root-sess", title: "子会话X" }, "agent-2"),
+    )
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-3", state: "busy" }])
   })
 
   it("A/子（父未映射）：skips with warn and never falls back to the root", async () => {
@@ -724,7 +767,7 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
   it("A/幂等：adopts a session only once across repeated events", async () => {
     const home = tempHome()
     const harness = setup({ home })
-    harness.client.sessions.set("old-root", { id: "old-root" })
+    harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(
       harness,
       sessionStatus("old-root", "busy"),
@@ -732,24 +775,26 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
       sessionStatus("old-root", "busy"),
     )
     expect(harness.client.getCalls).toEqual(["old-root"])
-    expect(harness.kit.toolCalls).toHaveLength(1)
+    // 实例 + 会话各一次注册；后续同态事件不再重注册。
+    expect(harness.kit.toolCalls).toHaveLength(2)
     expect(stateCalls(harness.kit)).toEqual([
-      { agentId: "agent-1", state: "busy" },
-      { agentId: "agent-1", state: "idle" },
-      { agentId: "agent-1", state: "busy" },
+      { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-2", state: "idle" },
+      { agentId: "agent-2", state: "busy" },
     ])
   })
 
   it("session.updated：adopts a restored session that never emitted session.created", async () => {
     const home = tempHome()
     const harness = setup({ home })
-    harness.client.sessions.set("revived", { id: "revived" })
+    harness.client.sessions.set("revived", { id: "revived", title: "被恢复的会话" })
     await emit(harness, { type: "session.updated", properties: { info: { id: "revived" } } })
-    expect(harness.client.getCalls).toEqual(["revived"])
-    expect(harness.kit.toolCalls).toHaveLength(1)
+    // session.updated 的 info 无标题 → 用回退名登记（实例 + 会话两次注册）。
+    expect(harness.client.getCalls).toEqual([])
+    expect(harness.kit.toolCalls).toHaveLength(2)
   })
 
-  it("B/枚举：lists bounded roots, filters archived, tolerates a failed root", async () => {
+  it("B/枚举：lists bounded roots, filters archived, tolerates a failed session", async () => {
     const home = tempHome()
     let registers = 0
     const harness = setup({
@@ -765,7 +810,8 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
       overrides: {
         toolsCall: () => {
           registers += 1
-          return registers === 1
+          // 第 1 次是实例节点（成功）；第 2 次（r1 会话）失败被容忍。
+          return registers === 2
             ? toolReply("RegistrationError: boom [name_taken]", true)
             : toolReply(registerText("agent-ok"))
         },
@@ -788,12 +834,12 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
       sessionStatus("r5", "busy"),
       sessionStatus("r3", "busy"),
     )
-    // r1 注册失败被容忍，r2 成功，r4 挂同一节点；r5/r3 未收养 → 各自 warn
+    // r1 会话注册失败被容忍，r2/r4 挂同一（mock 恒定）节点；r5/r3 未收养 → 各自 warn
     expect(stateCalls(harness.kit)).toEqual([
       { agentId: "agent-ok", state: "busy" },
       { agentId: "agent-ok", state: "idle" },
     ])
-    expect(harness.logs.some((line) => line.includes("root register failed"))).toBe(true)
+    expect(harness.logs.some((line) => line.includes("session register failed"))).toBe(true)
     expect(harness.logs.filter((line) => line.includes("unmapped session"))).toHaveLength(2)
   })
 
@@ -801,10 +847,10 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
     const home = tempHome()
     const harness = setup({ home })
     harness.client.listError = new Error("list unavailable")
-    harness.client.sessions.set("old-root", { id: "old-root" })
+    harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(harness, sessionStatus("old-root", "busy"))
     expect(harness.logs.some((line) => line.includes("startup adoption list failed"))).toBe(true)
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
   })
 
   it("B/关闭：does not call session.list when AGENTCHAT_ADOPT=0 (A still effective)", async () => {
@@ -822,9 +868,9 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
     })
     await harness.handle.flush()
     expect(harness.client.listCalls).toHaveLength(0)
-    harness.client.sessions.set("old-root", { id: "old-root" })
+    harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(harness, sessionStatus("old-root", "busy"))
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
   })
 })
 
@@ -856,7 +902,8 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
     harness.client.getError = new Error("404 not found")
     await emit(harness, rootCreated(), sessionStatus("ghost-sess", "busy"), sessionIdle("ghost-sess"))
     expect(harness.client.getCalls).toEqual(["ghost-sess", "ghost-sess"])
-    expect(harness.kit.toolCalls).toHaveLength(1) // 仅 rootCreated 的根注册；ghost 未被误判为根
+    // 仅 rootCreated 的实例 + 会话两次注册；ghost 未被误判为根。
+    expect(harness.kit.toolCalls).toHaveLength(2)
     expect(harness.logs.some((line) => line.includes("session lookup failed for ghost-sess"))).toBe(true)
     expect(harness.logs.filter((line) => line.includes("unmapped session"))).toHaveLength(2)
     expect(harness.kit.internalCalls.some((call) => call.path === "/internal/wake")).toBe(false)
@@ -887,11 +934,12 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
       overrides: { toolsCall: () => toolReply(registerText("agent-1")), ...wakeOne },
     })
     harness.client.shape = "fields"
-    harness.client.sessions.set("old-root", { id: "old-root" })
+    harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(harness, sessionStatus("old-root", "idle"), sessionIdle("old-root"))
     expect(harness.client.getCalls).toEqual(["old-root"])
     expect(harness.kit.toolCalls).toEqual([
-      { vendor: "opencode", purpose: "coding-agent", join_token: "existing-token" },
+      instanceArgs("existing-token"),
+      sessionArgs({ id: "old-root", title: "旧根会话" }, "agent-1"),
     ])
     expect(readFileSync(tokenPath, "utf8")).toBe("existing-token")
     expect(stateCalls(harness.kit)).toContainEqual({ agentId: "agent-1", state: "idle" })
@@ -903,15 +951,13 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
     const harness = setup({ home })
     harness.client.shape = "fields"
     await emit(harness, rootCreated())
-    harness.client.sessions.set("child-x", { id: "child-x", parentID: "root-sess" })
+    harness.client.sessions.set("child-x", { id: "child-x", parentID: "root-sess", title: "子会话X" })
     await emit(harness, sessionStatus("child-x", "busy"))
     expect(harness.client.getCalls).toEqual(["child-x"])
-    expect(harness.kit.toolCalls[1]).toEqual({
-      vendor: "opencode",
-      parent_ref: "agent-1",
-      task_ref: "child-x",
-    })
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
+    expect(harness.kit.toolCalls[2]).toEqual(
+      sessionArgs({ id: "child-x", parentID: "root-sess", title: "子会话X" }, "agent-2"),
+    )
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-3", state: "busy" }])
   })
 
   it("fields/get + data（子，父未映射）：跳过 + warn，不回落根", async () => {
@@ -929,11 +975,11 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
   it("bare/get：裸 Session 仍正常收养（向后兼容）", async () => {
     const home = tempHome()
     const harness = setup({ home }) // shape 默认 "bare"
-    harness.client.sessions.set("old-root", { id: "old-root" })
+    harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(harness, sessionStatus("old-root", "busy"))
     expect(harness.client.getCalls).toEqual(["old-root"])
-    expect(harness.kit.toolCalls).toHaveLength(1)
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "busy" }])
+    expect(harness.kit.toolCalls).toHaveLength(2)
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
   })
 
   it("fields/list + data（数组）：过滤归档、限流、逐个根收养", async () => {
@@ -967,9 +1013,10 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
       sessionStatus("r5", "busy"),
       sessionStatus("r3", "busy"),
     )
+    // 实例=agent-1；r1=agent-2、r2=agent-3、r4=agent-4（按注册序）。
     expect(stateCalls(harness.kit)).toEqual([
-      { agentId: "agent-1", state: "busy" },
-      { agentId: "agent-1", state: "idle" },
+      { agentId: "agent-3", state: "busy" },
+      { agentId: "agent-4", state: "idle" },
     ])
     // r5（超 limit）+ r3（归档）未收养 → 各自 warn
     expect(harness.logs.filter((line) => line.includes("unmapped session"))).toHaveLength(2)
@@ -980,20 +1027,20 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
     const harness = setup({ home })
     harness.client.shape = "fields"
     harness.client.listError = new Error("list unavailable")
-    harness.client.sessions.set("old-root", { id: "old-root" })
+    harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(harness, sessionStatus("old-root", "busy"))
     expect(harness.logs.some((line) => line.includes("startup adoption list unavailable"))).toBe(true)
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
   })
 
   it("bare/list 非数组：静默降级、不抛错，懒收养（A）仍生效", async () => {
     const home = tempHome()
     const harness = setup({ home })
     harness.client.listRaw = { unexpected: true }
-    harness.client.sessions.set("old-root", { id: "old-root" })
+    harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(harness, sessionStatus("old-root", "busy"))
     expect(harness.logs.some((line) => line.includes("startup adoption list unavailable"))).toBe(true)
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
   })
 
   it("fields/promptAsync + error：refused（不写 seen、不报 delivered），重投再注入", async () => {
@@ -1067,10 +1114,11 @@ describe("session.idle 唤醒闭环", () => {
     expect(harness.client.texts).toHaveLength(2)
     expect(harness.client.texts[0]).toContain("hello")
     expect(harness.client.texts[0]).toContain("peer")
+    // 投递/状态按**会话节点 id**（实例 agent-1 的根会话节点 = agent-2）。
     expect(harness.kit.internalCalls.find((call) => call.path === "/internal/wake")?.body).toEqual({
-      agentId: "agent-1",
+      agentId: "agent-2",
     })
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "idle" }])
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "idle" }])
     expect(resultItems(harness.kit)).toEqual([
       { messageId: "m1", result: "delivered" },
       { messageId: "m2", result: "delivered" },
@@ -1193,18 +1241,20 @@ describe("子节点退役", () => {
     properties: { info: { id: "child-1", parentID: "root-sess" } },
   }
 
-  it("retires the child node on child session deletion, keeping root offline semantics", async () => {
+  it("retires the session node on deletion and never reports offline (sessions are children)", async () => {
     const home = tempHome()
     const harness = setup({ home })
     await emit(harness, rootCreated(), childCreated("child-1", "root-sess"), childDeleted, {
       type: "session.deleted",
-      properties: { info: { id: "root-sess" } },
+      properties: { info: { id: "root-sess", title: "根会话标题" } },
     })
-    expect(harness.kit.internalCalls.find((call) => call.path === "/internal/retire")?.body).toEqual({
-      agentId: "agent-2",
-    })
+    // 子代理(agent-3) 与根会话(agent-2) 各自退役；实例节点 agent-1 保留。
+    const retires = harness.kit.internalCalls
+      .filter((call) => call.path === "/internal/retire")
+      .map((call) => call.body)
+    expect(retires).toEqual([{ agentId: "agent-3" }, { agentId: "agent-2" }])
     const offline = stateCalls(harness.kit).filter((body) => isRecord(body) && body["state"] === "offline")
-    expect(offline).toEqual([{ agentId: "agent-1", state: "offline" }])
+    expect(offline).toEqual([])
   })
 
   it("treats 404 from /internal/retire as already retired (no failure log)", async () => {
@@ -1234,6 +1284,96 @@ describe("子节点退役", () => {
     })
     await emit(harness, rootCreated(), childCreated("child-1", "root-sess"), childDeleted)
     expect(harness.logs.some((line) => line.includes("retire failed"))).toBe(true)
+  })
+})
+
+// ── 会话即联系人（实例 → 会话 → 子代理）────────────────────────────
+
+describe("会话即联系人", () => {
+  it("session.created 把根会话登记为实例的子节点（task_ref=sessionid，名字=标题）", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    const title = "多AI聊天协作工具开源项目调研"
+    await emit(harness, rootCreated("sess-1", title))
+    expect(harness.kit.toolCalls).toEqual([
+      instanceArgs(),
+      { vendor: "opencode", parent_ref: "agent-1", task_ref: "sess-1", name: title },
+    ])
+  })
+
+  it("空标题回退 `opencode:<sessionid 前 8 位>`；带 model 时透传", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(harness, { type: "session.updated", properties: { info: { id: "abcdefgh1234" } } })
+    expect(harness.kit.toolCalls[1]).toEqual({
+      vendor: "opencode",
+      parent_ref: "agent-1",
+      task_ref: "abcdefgh1234",
+      name: "opencode:abcdefgh",
+    })
+    const home2 = tempHome()
+    const harness2 = setup({ home: home2 })
+    await emit(harness2, {
+      type: "session.updated",
+      properties: { info: { id: "m-sess", title: "带模型", model: { id: "claude-x" } } },
+    })
+    expect(harness2.kit.toolCalls[1]).toEqual(
+      sessionArgs({ id: "m-sess", title: "带模型" }, "agent-1", "claude-x"),
+    )
+  })
+
+  it("标题变化恰好重注册一次并带新名；未变化不重注册", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(harness, rootCreated("root-sess", "初始标题"))
+    const afterCreate = harness.kit.toolCalls.length // 实例 + 会话
+    const info = (title: string): OpencodeEvent => ({
+      type: "session.updated",
+      properties: { info: { id: "root-sess", title } },
+    })
+
+    // 同标题 → no-op（session.updated 会频繁 touch）。
+    await emit(harness, info("初始标题"))
+    expect(harness.kit.toolCalls).toHaveLength(afterCreate)
+
+    // 变化 → 恰好一次重注册，带新名，仍挂实例节点、task_ref 不变。
+    await emit(harness, info("新标题"))
+    expect(harness.kit.toolCalls).toHaveLength(afterCreate + 1)
+    expect(harness.kit.toolCalls[afterCreate]).toEqual(
+      sessionArgs({ id: "root-sess", title: "新标题" }, "agent-1"),
+    )
+
+    // 再发同新标题 → 不再重注册。
+    await emit(harness, info("新标题"))
+    expect(harness.kit.toolCalls).toHaveLength(afterCreate + 1)
+  })
+
+  it("子代理标题变化重注册时 parent_ref 仍是其所属会话节点", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(harness, rootCreated()) // 实例 agent-1 → 根会话 agent-2
+    harness.client.sessions.set("child-1", { id: "child-1", parentID: "root-sess", title: "子旧名" })
+    await emit(harness, sessionStatus("child-1", "busy")) // 懒收养 → 子代理 agent-3
+    const before = harness.kit.toolCalls.length
+    await emit(harness, {
+      type: "session.updated",
+      properties: { info: { id: "child-1", parentID: "root-sess", title: "子新名" } },
+    })
+    expect(harness.kit.toolCalls).toHaveLength(before + 1)
+    expect(harness.kit.toolCalls[before]).toEqual(
+      sessionArgs({ id: "child-1", parentID: "root-sess", title: "子新名" }, "agent-2"),
+    )
+  })
+
+  it("B 枚举把根会话收为实例的子节点并带标题", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.listResult = [{ id: "r1", title: "项目调研" }]
+    await harness.handle.flush()
+    expect(harness.kit.toolCalls).toEqual([
+      instanceArgs(),
+      sessionArgs({ id: "r1", title: "项目调研" }, "agent-1"),
+    ])
   })
 })
 

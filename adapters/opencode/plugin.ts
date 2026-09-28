@@ -1,22 +1,26 @@
 /**
  * AgentChat OpenCode 插件（进程外适配器，spec §7/§10）。
  *
- * 只经 HTTP 契约与 Hub 通信（不 import server 代码）：
- * - `session.created`（根）→ MCP `register`（无 token 首注册并把返回的 `join_token`
- *   写 `<home>/agents/opencode.token`；有 token 重连认领）
- * - `session.created`（子，`info.parentID` 存在）→ MCP `register{parent_ref, task_ref}`
- * - `session.status`（回合始/末）→ `POST /internal/state {busy|idle}`
+ * 只经 HTTP 契约与 Hub 通信（不 import server 代码）。层级：**实例节点（根，`opencode@<host>`，
+ * join_token 认领）→ 会话节点（子，`task_ref=session.id`，名字=会话标题）→ 子代理会话节点**：
+ * - 首次需要时 MCP `register` 认领**实例节点**（无 token 首注册并把返回的 `join_token`
+ *   写 `<home>/agents/opencode.token`；有 token 重连认领）。实例 id 落 `<home>/agents/opencode.id`
+ *   供本地 MCP 桥作**出站身份**（OpenCode 一进程只暴露一个 MCP server）。
+ * - `session.created` / `session.updated`（根或子）→ MCP `register{parent_ref, task_ref, name}`
+ *   收/改会话节点（根父=实例节点，子代理父=其所属会话节点）；标题变化才重注册（`adopt.ts`）。
+ * - `session.status`（回合始/末）→ `POST /internal/state {busy|idle}`（**按会话节点 id**）
  * - `session.idle` → `POST /internal/wake` → 经 `client.session.promptAsync` 逐条注入
- *   → `POST /internal/result {items:[{messageId, result:"delivered"|"refused"}]}`
+ *   → `POST /internal/result {items:[{messageId, result:"delivered"|"refused"}]}`（**按会话节点 id**）
  * - idle 期间**周期轮询**（默认 10s，`AGENTCHAT_POLL_MS` 覆盖）：消息在「已经 idle 之后」
  *   到达时无事件可依，靠轮询补拉；走与 `session.idle` **同一**路径，`messageId` 有界去重防重复注入；
  *   转 busy 即停、`dispose` 清理（见 `poll.ts`）。
- * - `session.deleted`（根）/ `dispose` → `POST /internal/state {offline}`
+ * - `session.deleted` → `POST /internal/retire`（**按会话节点 id 退役，绝不报 offline**）
+ * - `dispose` → `POST /internal/state {offline}`（**实例节点**是根，报 offline 合规）
  *
  * 所有事件处理入队即返回（fire-and-forget，串行保序），网络重试在后台推进，
  * 不阻塞宿主事件循环。详见 README.md。
  */
-import { createAdopter } from "./adopt"
+import { createAdopter, instanceName, resolveHostname } from "./adopt"
 import { createIdleFlush, describe } from "./flush"
 import {
   createHubClient,
@@ -59,8 +63,12 @@ export function createPluginHandle(deps: PluginDeps): PluginHandle {
 }
 
 interface RuntimeState {
-  agentId: string | undefined
+  /** 实例节点 id（根，`opencode@<host>`）：MCP 出站身份 + 会话节点的父。 */
+  instanceAgentId: string | undefined
+  /** sessionID → 会话节点 id（层级 实例 → 会话 → 子代理）。 */
   readonly sessionToAgent: Map<string, string>
+  /** sessionID → 上次已知会话名（名字随标题漂移时仅真正变化才重注册）。 */
+  readonly sessionTitles: Map<string, string>
   readonly lastState: Map<string, AdapterState>
   /** 已成功注入的 messageId 去重集合（有界 FIFO）：Hub 的在途租约重投不重复注入。 */
   readonly seenMessages: BoundedSet
@@ -85,8 +93,9 @@ function createRuntime(
   const idPath = agentIdPath(resolveHome(deps.env))
   const pollMs = parsePollMs(deps.env["AGENTCHAT_POLL_MS"])
   const state: RuntimeState = {
-    agentId: undefined,
+    instanceAgentId: undefined,
     sessionToAgent: new Map(),
+    sessionTitles: new Map(),
     lastState: new Map(),
     seenMessages: createBoundedSet(256),
     pollers: new Map(),
@@ -138,9 +147,11 @@ function createRuntime(
     poller.start()
   }
 
+  /** 实例节点（根）注册入参：可读名 `opencode@<host>`，主机名缺失回退 `opencode`。 */
   const registerArgs = (joinToken: string | undefined): RegisterArgs => ({
     vendor: ADAPTER_VENDOR,
     purpose: "coding-agent",
+    name: instanceName(resolveHostname()),
     ...(joinToken === undefined ? {} : { join_token: joinToken }),
   })
 
@@ -173,57 +184,42 @@ function createRuntime(
     }
   }
 
-  const rootRegister = async (session: OpencodeSession): Promise<void> => {
+  /**
+   * 确保实例节点（根，`opencode@<host>`）已注册：读/写 join_token 与 id 文件；成功后返回其 id。
+   *
+   * 实例节点是 **MCP 出站身份**（`<home>/agents/opencode.id`）与会话节点的父；每个会话都是它的
+   * 子节点（投递/状态按会话节点，不用实例 id）。
+   */
+  const registerInstance = async (): Promise<string | undefined> => {
+    if (state.instanceAgentId !== undefined) return state.instanceAgentId
     const existing = readToken(path)
     try {
       const result = await registerRootAgent(existing)
-      state.agentId = result.agentId
-      state.sessionToAgent.set(session.id, result.agentId)
+      state.instanceAgentId = result.agentId
       const idWritten = writeToken(idPath, result.agentId)
       if (!idWritten.ok) log(`agent id write failed (continuing): ${idWritten.error ?? "unknown"}`)
       if (result.joinToken !== undefined) {
         const written = writeToken(path, result.joinToken)
         if (!written.ok) log(`token write failed (continuing): ${written.error ?? "unknown"}`)
       }
+      return result.agentId
     } catch (error) {
       log(`root register failed: ${describe(error)}`)
-    }
-  }
-
-  const childRegister = async (session: OpencodeSession): Promise<void> => {
-    const mapped = session.parentID === undefined ? undefined : state.sessionToAgent.get(session.parentID)
-    // ② 父子关联兜底：事件无可用父映射时，按「当前根（父回合窗口）」关联。
-    const parentAgentId = mapped ?? state.agentId
-    if (parentAgentId === undefined) {
-      log(`child session ${session.id} seen before any root registration; skipped`)
-      return
-    }
-    try {
-      const result = await hub.register({
-        vendor: ADAPTER_VENDOR,
-        parent_ref: parentAgentId,
-        task_ref: session.id,
-      })
-      state.sessionToAgent.set(session.id, result.agentId)
-    } catch (error) {
-      log(`child register failed for ${session.id}: ${describe(error)}`)
+      return undefined
     }
   }
 
   // 收养器：A 懒收养 + B 启动枚举（构造即 fire-and-forget 枚举，不阻塞宿主）。配置见 README。
   const adopter = createAdopter({
     env: deps.env, client: input.client, hub, vendor: ADAPTER_VENDOR,
-    state: { get: (id) => state.sessionToAgent.get(id), set: (id, a) => state.sessionToAgent.set(id, a), rootAgentId: () => state.agentId },
-    rootRegister, enqueue: (task) => queue.push(task), log,
+    state: {
+      get: (id) => state.sessionToAgent.get(id),
+      set: (id, a) => state.sessionToAgent.set(id, a),
+      getTitle: (id) => state.sessionTitles.get(id),
+      setTitle: (id, name) => state.sessionTitles.set(id, name),
+    },
+    ensureInstance: registerInstance, enqueue: (task) => queue.push(task), log,
   })
-
-  const onCreated = async (session: OpencodeSession): Promise<void> => {
-    if (session.parentID === undefined) {
-      await adopter.adoptRoot(session)
-      return
-    }
-    await childRegister(session)
-  }
 
   const onStatus = async (sessionID: string, status: "idle" | "busy" | "retry"): Promise<void> => {
     // 未映射会话先尝试懒收养（已存在/被恢复的会话不会再发 `session.created`）；仍失败才跳过并 warn。
@@ -255,13 +251,10 @@ function createRuntime(
     const agentId = state.sessionToAgent.get(session.id)
     stopPolling(session.id)
     state.sessionToAgent.delete(session.id)
+    state.sessionTitles.delete(session.id)
     if (agentId === undefined) return
-    if (session.parentID === undefined) {
-      await reportState(agentId, "offline")
-      return
-    }
-    // 子会话消失 → 退役子节点（不可复活；Hub 侧取消待投递 job），
-    // 避免名单残留与向已死参与者投递。根保持既有 offline 语义，不退役。
+    // 会话节点皆为实例节点的**子节点**：删除即退役（不可复活；Hub 侧取消待投递 job），
+    // 避免名单残留与向已死参与者投递。**绝不报 offline**（子节点 offline 会被 Hub 409 拒绝）。
     state.lastState.delete(agentId)
     try {
       await hub.retire(agentId)
@@ -272,12 +265,10 @@ function createRuntime(
 
   const dispatch = async (event: OpencodeEvent): Promise<void> => {
     switch (event.type) {
+      // 建会话即登记为实例节点的子节点；被恢复/改标题的旧会话经 `session.updated` 收养或改名。
       case "session.created":
-        await onCreated(event.properties.info)
-        return
-      // 被恢复的旧会话一旦被使用（touch/setTitle 等）就会发 `session.updated`：借它懒收养。
       case "session.updated":
-        await adopter.resolve(event.properties.info.id)
+        await adopter.adoptSession(event.properties.info)
         return
       case "session.status":
         await onStatus(event.properties.sessionID, event.properties.status.type)
@@ -302,7 +293,8 @@ function createRuntime(
       for (const poller of state.pollers.values()) poller.stop()
       state.pollers.clear()
       await queue.flush()
-      if (state.agentId !== undefined) await reportState(state.agentId, "offline")
+      // 实例节点是根：dispose 报 offline（会话节点是子节点，已随事件退役，不在此列）。
+      if (state.instanceAgentId !== undefined) await reportState(state.instanceAgentId, "offline")
     },
   }
 }

@@ -1,26 +1,32 @@
 /**
- * 会话收养（缺陷修复：仅靠 `session.created` 注册，导致「已存在/被恢复」的会话永不进入 AgentChat）。
+ * 会话收养与「会话即联系人」登记（缺陷修复 + 会话联系人特性）。
  *
- * OpenCode 不会为已存在/被恢复的会话补发 `session.created`，插件此前只能在未映射会话上跳过并 warn。
- * 本模块提供两条收养路径（均复用既有 token 认领语义，绝不新建重复节点）：
- * - **A 懒收养**：任何带会话的事件指向未映射会话时，`client.session.get` 查询后按 `parentID` 收养：
- *   根 → 既有根注册路径；子且父已映射 → 子注册（`parent_ref` + `task_ref`）；子且父未映射 → 跳过并 warn
- *   （**绝不回落根**，不猜父）。查询失败/404 亦保持跳过并 warn，不崩溃。
+ * **层级**：实例节点（根，`opencode@<host>`，join_token 认领）→ 会话节点（子，
+ * `task_ref=session.id`，名字=会话标题）→ 子代理会话节点（子，父=其所属会话节点）。
+ *
+ * 两条收养路径（均复用 `task_ref` 幂等语义，绝不新建重复节点）：
+ * - **A 懒收养**：任何带会话的事件指向未映射会话时，`client.session.get` 查询后登记：
+ *   根会话父 = 实例节点；子代理父 = 其父会话节点（父未映射则跳过并 warn，**绝不回落实例**）。
+ *   查询失败/404 亦保持跳过并 warn，不崩溃。
  * - **B 启动枚举**：初始化后 fire-and-forget 地 `client.session.list`（`roots`+`limit`，默认 5，
- *   `AGENTCHAT_ADOPT_LIMIT` 可覆盖；`AGENTCHAT_ADOPT=0` 关闭），客户端过滤 `time.archived` 后逐个走
- *   与 A 相同的根收养；`session.list` 不可用/报错（老宿主）即记录并静默降级，只保留 A。
+ *   `AGENTCHAT_ADOPT_LIMIT` 可覆盖；`AGENTCHAT_ADOPT=0` 关闭），客户端过滤 `time.archived` 后
+ *   逐个按同一规则收为**实例节点的子节点**；`session.list` 不可用/报错即记录并静默降级，只保留 A。
  *
- * 依赖经 `AdoptDeps` 注入（避免与 `plugin.ts` 的模块环），状态经 `AdoptState` 读写既有映射表。
+ * **标题同步**：每会话记录「上次已知标题」，仅当标题真的变化时重注册（`session.updated` 会频繁
+ * touch，未变即 no-op，避免刷屏）；重注册靠 Hub 侧「重注册可更新卡片字段」（Part 1）落到名字。
  *
- * **形状容错（缺陷修复）**：宿主 `client.session.get`/`list` 可能返回裸值，也可能返回 SDK 的
- * `{ data, error, request, response }` 包装（见 `sdk-result.ts` 实证）。此前直接当 `Session` 用，
- * 包装被当成「无 `parentID` 的根」→ 误判根、把 `undefined` 写入映射；`list` 拿到 `{data:[…]}` 非数组
- * → `.filter` 抛错、B 静默失效。现统一经 `unwrapResult` 解包后再走原逻辑。
+ * 依赖经 `AdoptDeps` 注入（避免与 `plugin.ts` 的模块环），状态经 `AdoptState` 读写映射表。
+ *
+ * **形状容错**：宿主 `client.session.get`/`list` 可能返回裸值，也可能返回 SDK 的
+ * `{ data, error, request, response }` 包装（见 `sdk-result.ts` 实证）；统一经 `unwrapResult`
+ * 解包后再走原逻辑。
  */
+import { hostname } from "node:os"
 import { describe } from "./flush"
 import { unwrapResult } from "./sdk-result"
 import type { Hub } from "./hub"
 import type { OpencodeClient, OpencodeSession } from "./types"
+import { isRecord } from "./util"
 
 /** 默认启动收养上限。 */
 export const DEFAULT_ADOPT_LIMIT = 5
@@ -41,17 +47,55 @@ export function isAdoptEnabled(env: Readonly<Record<string, string | undefined>>
   return env["AGENTCHAT_ADOPT"] !== "0"
 }
 
+/** 取本机主机名；异常/空回落 `undefined`（调用方再回退可读名 `opencode`）。 */
+export function resolveHostname(): string | undefined {
+  try {
+    const value = hostname()
+    return value === "" ? undefined : value
+  } catch {
+    return undefined
+  }
+}
+
+/** 实例节点可读名：`opencode@<host>`；主机名缺失/空白回退 `opencode`。 */
+export function instanceName(host: string | undefined): string {
+  const trimmed = host?.trim()
+  return trimmed === undefined || trimmed === "" ? "opencode" : `opencode@${trimmed}`
+}
+
+/** 会话节点名：优先会话标题（trim 后非空）；否则 `opencode:<sessionid 前 8 位>`。 */
+export function sessionName(session: OpencodeSession): string {
+  const title = session.title?.trim()
+  return title === undefined || title === "" ? `opencode:${session.id.slice(0, 8)}` : title
+}
+
+/**
+ * 会话节点 `model`（发布类型未声明该字段，运行期形状不定）：字符串或 `{id}` 记录取其值，
+ * 否则 `undefined`（调用方省略该字段，不写假值）。
+ */
+export function sessionModel(session: OpencodeSession): string | undefined {
+  const value = session.model
+  if (typeof value === "string") return value === "" ? undefined : value
+  if (isRecord(value)) {
+    const id = value["id"]
+    if (typeof id === "string" && id !== "") return id
+  }
+  return undefined
+}
+
 /** `Session[]` 结构守卫：把解包后的 `unknown` 收窄为只读数组（非数组 = 不可用）。 */
 function isSessionArray(value: unknown): value is readonly OpencodeSession[] {
   return Array.isArray(value)
 }
 
-/** 既有会话映射表的最小读写面（由 `plugin.ts` 的运行时状态实现）。 */
+/** 会话映射与标题台账（由 `plugin.ts` 的运行时状态实现）。 */
 export interface AdoptState {
+  /** sessionID → 会话节点 id。 */
   get(sessionID: string): string | undefined
   set(sessionID: string, agentId: string): void
-  /** 当前根节点 agent id（未注册时 undefined）。 */
-  rootAgentId(): string | undefined
+  /** sessionID → 上次已知会话名（标题或回退名），用于仅标题变化时重注册。 */
+  getTitle(sessionID: string): string | undefined
+  setTitle(sessionID: string, name: string): void
 }
 
 export interface AdoptDeps {
@@ -60,56 +104,64 @@ export interface AdoptDeps {
   readonly hub: Hub
   readonly vendor: string
   readonly state: AdoptState
-  /** 既有根注册路径（读/写 join_token、陈旧 token 自愈后重注册）。 */
-  readonly rootRegister: (session: OpencodeSession) => Promise<void>
+  /** 确保实例节点（根）已注册并返回其 id（含 join_token 认领与 token/id 落盘）。 */
+  readonly ensureInstance: () => Promise<string | undefined>
   /** 与事件处理共用的串行队列（避免同一会话并发注册两次）。 */
   readonly enqueue: (task: () => Promise<void>) => void
   readonly log: (message: string) => void
 }
 
 export interface Adopter {
-  /** A：解析 `sessionID` 的 agentId；未映射则查询并收养，失败返回 undefined。 */
+  /** A：解析 `sessionID` 的会话节点 id；未映射则查询并收养，失败返回 undefined。 */
   resolve(sessionID: string): Promise<string | undefined>
-  /** 根会话收养（`session.created` 与 B 枚举共用；已有根则挂到同一节点）。 */
-  adoptRoot(session: OpencodeSession): Promise<void>
+  /** 会话（根/子代理）登记为节点；已映射且标题未变则 no-op，父未定/失败返回 undefined。 */
+  adoptSession(session: OpencodeSession): Promise<string | undefined>
 }
 
 /** 建收养器；构造即触发 B 的 fire-and-forget 启动枚举。 */
 export function createAdopter(deps: AdoptDeps): Adopter {
-  /** 根：已有根节点则挂到同一节点（不新建重复根）；否则走既有 token 认领注册。 */
-  const adoptRoot = async (session: OpencodeSession): Promise<void> => {
-    const agentId = deps.state.rootAgentId()
-    if (agentId === undefined) await deps.rootRegister(session)
-    else deps.state.set(session.id, agentId)
+  /** 父节点：根会话 → 实例节点；子代理 → 其父会话节点（未映射 = undefined，不回落实例）。 */
+  const parentOf = async (session: OpencodeSession): Promise<string | undefined> => {
+    if (session.parentID === undefined) return deps.ensureInstance()
+    return deps.state.get(session.parentID)
   }
 
-  /** 子：严格以父节点注册；父未映射由调用方拦截（本函数只做已确认父的注册）。 */
-  const adoptChild = async (session: OpencodeSession, parentAgentId: string): Promise<void> => {
+  /** 按 `task_ref=session.id` 登记/重登记会话节点（重注册可更新名字，见 Part 1）。 */
+  const register = async (session: OpencodeSession): Promise<string | undefined> => {
+    const parentId = await parentOf(session)
+    if (parentId === undefined) {
+      if (session.parentID === undefined) {
+        deps.log(`session ${session.id} skipped: instance not registered`)
+      } else {
+        deps.log(`adopt child ${session.id} skipped: parent ${session.parentID} not mapped`)
+      }
+      return undefined
+    }
+    const name = sessionName(session)
+    const model = sessionModel(session)
     try {
       const result = await deps.hub.register({
         vendor: deps.vendor,
-        parent_ref: parentAgentId,
+        parent_ref: parentId,
         task_ref: session.id,
+        name,
+        ...(model === undefined ? {} : { model }),
       })
       deps.state.set(session.id, result.agentId)
+      deps.state.setTitle(session.id, name)
+      return result.agentId
     } catch (error) {
-      deps.log(`child register failed for ${session.id}: ${describe(error)}`)
+      deps.log(`session register failed for ${session.id}: ${describe(error)}`)
+      return undefined
     }
   }
 
-  /** 按会话对象分支收养；已映射即跳过（幂等）。 */
-  const adopt = async (session: OpencodeSession): Promise<void> => {
-    if (deps.state.get(session.id) !== undefined) return
-    if (session.parentID === undefined) {
-      await adoptRoot(session)
-      return
-    }
-    const parentAgentId = deps.state.get(session.parentID)
-    if (parentAgentId === undefined) {
-      deps.log(`adopt child ${session.id} skipped: parent ${session.parentID} not mapped`)
-      return
-    }
-    await adoptChild(session, parentAgentId)
+  /** 已映射：标题未变即 no-op；变了则重注册以更新名字（其余字段由已有节点保留）。 */
+  const adoptSession = async (session: OpencodeSession): Promise<string | undefined> => {
+    const mapped = deps.state.get(session.id)
+    if (mapped === undefined) return register(session)
+    if (deps.state.getTitle(session.id) === sessionName(session)) return mapped
+    return register(session)
   }
 
   const resolve = async (sessionID: string): Promise<string | undefined> => {
@@ -137,8 +189,7 @@ export function createAdopter(deps: AdoptDeps): Adopter {
       deps.log(`session lookup failed for ${sessionID}: ${summary}`)
       return undefined
     }
-    await adopt(session)
-    return deps.state.get(sessionID)
+    return adoptSession(session)
   }
 
   const enumerate = (): void => {
@@ -169,11 +220,11 @@ export function createAdopter(deps: AdoptDeps): Adopter {
       const roots = data.filter((session) => session.time?.archived == null).slice(0, limit)
       for (const session of roots) {
         if (deps.state.get(session.id) !== undefined) continue
-        await adoptRoot(session)
+        await adoptSession(session)
       }
     })
   }
 
   enumerate()
-  return { resolve, adoptRoot }
+  return { resolve, adoptSession }
 }

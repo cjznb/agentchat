@@ -24,6 +24,11 @@ export interface OpencodeSession {
   readonly title?: string
   readonly slug?: string
   readonly directory?: string
+  /**
+   * 运行期可选的模型标识（**发布类型未声明**，形状不定：实测可能是字符串或 `{id}` 记录）；
+   * 有则经 `sessionModel` 守卫取值为会话节点卡 `model`，无则省略（不写假值）。
+   */
+  readonly model?: unknown
   readonly time?: {
     readonly created?: number
     readonly updated?: number
