@@ -113,32 +113,57 @@ class RecordingClient {
   readonly sessions = new Map<string, OpencodeSession>()
   /** `session.list` 返回体（默认空）。 */
   listResult: readonly OpencodeSession[] = []
-  /** 非空则 `session.get` 抛错（模拟 404/不可用）。 */
+  /** 非空则 `session.list` 返回该原始值（模拟非数组形状）。 */
+  listRaw: unknown
+  /** 非空则 `session.get` 报错（模拟 404/不可用）：`bare` 抛错，`fields` 返回包装 `error`。 */
   getError: Error | undefined
-  /** 非空则 `session.list` 抛错（模拟老宿主）。 */
+  /** 非空则 `session.list` 报错（模拟老宿主）：`bare` 抛错，`fields` 返回包装 `error`。 */
   listError: Error | undefined
+  /**
+   * 返回形状：`"bare"` = 裸值/抛错（旧行为，默认）；`"fields"` = SDK 包装
+   * `{ data, error, request, response }`（宿主 `responseStyle!=="data"` / 不抛错时）。
+   */
+  shape: "bare" | "fields" = "bare"
   readonly getCalls: string[] = []
   readonly listCalls: Array<{ readonly query?: SessionListQuery } | undefined> = []
+  /** 把结果包成 SDK `fields` 形状。 */
+  private fields(data: unknown, error: unknown): unknown {
+    return { data, error, request: {}, response: {} }
+  }
   readonly client: OpencodeClient = {
     session: {
       promptAsync: async (input) => {
         this.texts.push(input.body.parts[0]?.text ?? "")
         if (this.failInjections > 0) {
           this.failInjections -= 1
-          throw new Error("inject boom")
+          const error = new Error("inject boom")
+          if (this.shape === "fields") return this.fields(undefined, error)
+          throw error
         }
+        return this.shape === "fields" ? this.fields({}, undefined) : undefined
       },
       get: async (input) => {
         this.getCalls.push(input.path.id)
-        if (this.getError !== undefined) throw this.getError
+        if (this.getError !== undefined) {
+          if (this.shape === "fields") return this.fields(undefined, this.getError)
+          throw this.getError
+        }
         const session = this.sessions.get(input.path.id)
-        if (session === undefined) throw new Error(`session not found: ${input.path.id}`)
-        return session
+        if (session === undefined) {
+          const error = new Error(`session not found: ${input.path.id}`)
+          if (this.shape === "fields") return this.fields(undefined, error)
+          throw error
+        }
+        return this.shape === "fields" ? this.fields(session, undefined) : session
       },
       list: async (input) => {
         this.listCalls.push(input)
-        if (this.listError !== undefined) throw this.listError
-        return this.listResult
+        if (this.listError !== undefined) {
+          if (this.shape === "fields") return this.fields(undefined, this.listError)
+          throw this.listError
+        }
+        const value = this.listRaw === undefined ? this.listResult : this.listRaw
+        return this.shape === "fields" ? this.fields(value, undefined) : value
       },
     },
   }
@@ -647,6 +672,194 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
     harness.client.sessions.set("old-root", { id: "old-root" })
     await emit(harness, sessionStatus("old-root", "busy"))
     expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "busy" }])
+  })
+})
+
+// ── SDK 返回形状容错（fields 包装 / bare 裸值）──────────────────────
+
+describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
+  const wakeOne = {
+    internal: (path: string) =>
+      path === "/internal/wake"
+        ? jsonResponse({ messages: [{ id: "m1", fromAgentId: "peer", conversationId: "c1", body: "hi" }] })
+        : undefined,
+  }
+  const twoMessages = [
+    { id: "m1", fromAgentId: "peer", conversationId: "c1", body: "hello" },
+    { id: "m2", fromAgentId: "peer", conversationId: "c1", body: "world" },
+  ]
+  const wakeTwo = {
+    internal: (path: string) => (path === "/internal/wake" ? jsonResponse({ messages: twoMessages }) : undefined),
+  }
+
+  it("fields/get + error（404）：跳过 + warn，绝不误判为根、不注册", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.shape = "fields"
+    harness.client.getError = new Error("404 not found")
+    await emit(harness, rootCreated(), sessionStatus("ghost-sess", "busy"), sessionIdle("ghost-sess"))
+    expect(harness.client.getCalls).toEqual(["ghost-sess", "ghost-sess"])
+    expect(harness.kit.toolCalls).toHaveLength(1) // 仅 rootCreated 的根注册；ghost 未被误判为根
+    expect(harness.logs.some((line) => line.includes("session lookup failed for ghost-sess"))).toBe(true)
+    expect(harness.logs.filter((line) => line.includes("unmapped session"))).toHaveLength(2)
+    expect(harness.kit.internalCalls.some((call) => call.path === "/internal/wake")).toBe(false)
+  })
+
+  it("fields/get + data（根）：复用 token 认领，正常根收养", async () => {
+    const home = tempHome()
+    const tokenPath = join(home, "agents", "opencode.token")
+    mkdirSync(dirname(tokenPath), { recursive: true })
+    writeFileSync(tokenPath, "existing-token")
+    const harness = setup({
+      home,
+      overrides: { toolsCall: () => toolReply(registerText("agent-1")), ...wakeOne },
+    })
+    harness.client.shape = "fields"
+    harness.client.sessions.set("old-root", { id: "old-root" })
+    await emit(harness, sessionStatus("old-root", "idle"), sessionIdle("old-root"))
+    expect(harness.client.getCalls).toEqual(["old-root"])
+    expect(harness.kit.toolCalls).toEqual([
+      { vendor: "opencode", purpose: "coding-agent", join_token: "existing-token" },
+    ])
+    expect(readFileSync(tokenPath, "utf8")).toBe("existing-token")
+    expect(stateCalls(harness.kit)).toContainEqual({ agentId: "agent-1", state: "idle" })
+    expect(harness.client.texts).toHaveLength(1)
+  })
+
+  it("fields/get + data（子，父已映射）：子注册 parent_ref=父 agent", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.shape = "fields"
+    await emit(harness, rootCreated())
+    harness.client.sessions.set("child-x", { id: "child-x", parentID: "root-sess" })
+    await emit(harness, sessionStatus("child-x", "busy"))
+    expect(harness.client.getCalls).toEqual(["child-x"])
+    expect(harness.kit.toolCalls[1]).toEqual({
+      vendor: "opencode",
+      parent_ref: "agent-1",
+      task_ref: "child-x",
+    })
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
+  })
+
+  it("fields/get + data（子，父未映射）：跳过 + warn，不回落根", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.shape = "fields"
+    harness.client.sessions.set("child-y", { id: "child-y", parentID: "ghost-parent" })
+    await emit(harness, sessionStatus("child-y", "busy"), sessionIdle("child-y"))
+    expect(harness.kit.toolCalls).toEqual([])
+    expect(stateCalls(harness.kit)).toEqual([])
+    expect(harness.logs.some((line) => line.includes("adopt child child-y skipped"))).toBe(true)
+    expect(harness.logs.filter((line) => line.includes("unmapped session"))).toHaveLength(2)
+  })
+
+  it("bare/get：裸 Session 仍正常收养（向后兼容）", async () => {
+    const home = tempHome()
+    const harness = setup({ home }) // shape 默认 "bare"
+    harness.client.sessions.set("old-root", { id: "old-root" })
+    await emit(harness, sessionStatus("old-root", "busy"))
+    expect(harness.client.getCalls).toEqual(["old-root"])
+    expect(harness.kit.toolCalls).toHaveLength(1)
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "busy" }])
+  })
+
+  it("fields/list + data（数组）：过滤归档、限流、逐个根收养", async () => {
+    const home = tempHome()
+    const harness = setup({
+      home,
+      deps: {
+        env: {
+          AGENTCHAT_HOME: home,
+          HUB_TOKEN: "hub-token",
+          AGENTCHAT_URL: "http://hub.test",
+          AGENTCHAT_ADOPT_LIMIT: "3",
+        },
+      },
+    })
+    harness.client.shape = "fields"
+    harness.client.listResult = [
+      { id: "r1" },
+      { id: "r2" },
+      { id: "r3", time: { archived: 1 } }, // 归档：客户端过滤
+      { id: "r4" },
+      { id: "r5" }, // 超出 limit=3：未收养
+    ]
+    await harness.handle.flush()
+    expect(harness.client.listCalls).toHaveLength(1)
+    expect(harness.client.listCalls[0]?.query).toEqual({ scope: "project", roots: true, limit: 3 })
+    await emit(
+      harness,
+      sessionStatus("r2", "busy"),
+      sessionStatus("r4", "idle"),
+      sessionStatus("r5", "busy"),
+      sessionStatus("r3", "busy"),
+    )
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-1", state: "busy" },
+      { agentId: "agent-1", state: "idle" },
+    ])
+    // r5（超 limit）+ r3（归档）未收养 → 各自 warn
+    expect(harness.logs.filter((line) => line.includes("unmapped session"))).toHaveLength(2)
+  })
+
+  it("fields/list + error：静默降级、不抛错，懒收养（A）仍生效", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.shape = "fields"
+    harness.client.listError = new Error("list unavailable")
+    harness.client.sessions.set("old-root", { id: "old-root" })
+    await emit(harness, sessionStatus("old-root", "busy"))
+    expect(harness.logs.some((line) => line.includes("startup adoption list unavailable"))).toBe(true)
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "busy" }])
+  })
+
+  it("bare/list 非数组：静默降级、不抛错，懒收养（A）仍生效", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.listRaw = { unexpected: true }
+    harness.client.sessions.set("old-root", { id: "old-root" })
+    await emit(harness, sessionStatus("old-root", "busy"))
+    expect(harness.logs.some((line) => line.includes("startup adoption list unavailable"))).toBe(true)
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "busy" }])
+  })
+
+  it("fields/promptAsync + error：refused（不写 seen、不报 delivered），重投再注入", async () => {
+    const home = tempHome()
+    const harness = setup({ home, overrides: wakeTwo })
+    harness.client.shape = "fields"
+    harness.client.failInjections = 1
+    await emit(harness, rootCreated(), sessionIdle("root-sess"))
+    expect(harness.client.texts).toHaveLength(2)
+    const reportItems = (): unknown[] =>
+      harness.kit.internalCalls
+        .filter((call) => call.path === "/internal/result")
+        .map((call) => (isRecord(call.body) ? call.body["items"] : undefined))
+    expect(reportItems()[0]).toEqual([
+      { messageId: "m1", result: "refused" },
+      { messageId: "m2", result: "delivered" },
+    ])
+    expect(harness.logs.some((line) => line.includes("inject failed for m1"))).toBe(true)
+    // m1 未写入 seen → 第二次 idle 会重新注入 m1（m2 已在 seen，不重复注入）。
+    await emit(harness, sessionIdle("root-sess"))
+    expect(harness.client.texts).toHaveLength(3)
+    expect(harness.client.texts[2]).toContain("hello")
+    expect(reportItems()[1]).toEqual([
+      { messageId: "m1", result: "delivered" },
+      { messageId: "m2", result: "delivered" },
+    ])
+  })
+
+  it("fields/promptAsync + data：204 语义，视为 delivered", async () => {
+    const home = tempHome()
+    const harness = setup({ home, overrides: wakeTwo })
+    harness.client.shape = "fields"
+    await emit(harness, rootCreated(), sessionIdle("root-sess"))
+    expect(harness.client.texts).toHaveLength(2)
+    expect(resultItems(harness.kit)).toEqual([
+      { messageId: "m1", result: "delivered" },
+      { messageId: "m2", result: "delivered" },
+    ])
   })
 })
 

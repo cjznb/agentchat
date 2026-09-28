@@ -11,8 +11,14 @@
  *   与 A 相同的根收养；`session.list` 不可用/报错（老宿主）即记录并静默降级，只保留 A。
  *
  * 依赖经 `AdoptDeps` 注入（避免与 `plugin.ts` 的模块环），状态经 `AdoptState` 读写既有映射表。
+ *
+ * **形状容错（缺陷修复）**：宿主 `client.session.get`/`list` 可能返回裸值，也可能返回 SDK 的
+ * `{ data, error, request, response }` 包装（见 `sdk-result.ts` 实证）。此前直接当 `Session` 用，
+ * 包装被当成「无 `parentID` 的根」→ 误判根、把 `undefined` 写入映射；`list` 拿到 `{data:[…]}` 非数组
+ * → `.filter` 抛错、B 静默失效。现统一经 `unwrapResult` 解包后再走原逻辑。
  */
 import { describe } from "./flush"
+import { unwrapResult } from "./sdk-result"
 import type { Hub } from "./hub"
 import type { OpencodeClient, OpencodeSession } from "./types"
 
@@ -33,6 +39,11 @@ export function parseAdoptLimit(raw: string | undefined): number {
 /** `AGENTCHAT_ADOPT=0` 关闭启动枚举收养（A 懒收养不受影响）。 */
 export function isAdoptEnabled(env: Readonly<Record<string, string | undefined>>): boolean {
   return env["AGENTCHAT_ADOPT"] !== "0"
+}
+
+/** `Session[]` 结构守卫：把解包后的 `unknown` 收窄为只读数组（非数组 = 不可用）。 */
+function isSessionArray(value: unknown): value is readonly OpencodeSession[] {
+  return Array.isArray(value)
 }
 
 /** 既有会话映射表的最小读写面（由 `plugin.ts` 的运行时状态实现）。 */
@@ -109,11 +120,19 @@ export function createAdopter(deps: AdoptDeps): Adopter {
       deps.log(`session lookup unavailable for ${sessionID}; skipped`)
       return undefined
     }
-    let session: OpencodeSession
+    let raw: unknown
     try {
-      session = await get({ path: { id: sessionID } })
+      raw = await get({ path: { id: sessionID } })
     } catch (error) {
       deps.log(`session lookup failed for ${sessionID}: ${describe(error)}`)
+      return undefined
+    }
+    const result = unwrapResult<OpencodeSession>(raw)
+    const session = result.data
+    if (!result.ok || session === undefined) {
+      // 包装 `error`（如 404）或空数据：保持既有「跳过 + warn」，**绝不误判为根**。
+      const summary = result.error === undefined ? "no session data" : describe(result.error)
+      deps.log(`session lookup failed for ${sessionID}: ${summary}`)
       return undefined
     }
     await adopt(session)
@@ -129,14 +148,22 @@ export function createAdopter(deps: AdoptDeps): Adopter {
     }
     const limit = parseAdoptLimit(deps.env["AGENTCHAT_ADOPT_LIMIT"])
     deps.enqueue(async () => {
-      let sessions: readonly OpencodeSession[]
+      let raw: unknown
       try {
-        sessions = await list({ query: { scope: "project", roots: true, limit } })
+        raw = await list({ query: { scope: "project", roots: true, limit } })
       } catch (error) {
         deps.log(`startup adoption list failed: ${describe(error)}`)
         return
       }
-      const roots = sessions.filter((session) => session.time?.archived == null).slice(0, limit)
+      const result = unwrapResult<unknown>(raw)
+      const data = result.data
+      if (!result.ok || !isSessionArray(data)) {
+        // 包装 `error` 或非数组（老宿主）：记录并**静默降级**（只保留 A），绝不抛错。
+        const summary = result.error === undefined ? "unexpected shape" : describe(result.error)
+        deps.log(`startup adoption list unavailable: ${summary}`)
+        return
+      }
+      const roots = data.filter((session) => session.time?.archived == null).slice(0, limit)
       for (const session of roots) {
         if (deps.state.get(session.id) !== undefined) continue
         await adoptRoot(session)

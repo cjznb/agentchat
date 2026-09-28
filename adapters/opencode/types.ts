@@ -66,6 +66,10 @@ export interface SessionListQuery {
 /**
  * 注入与查询入口。`promptAsync` 为注入；`list`/`get` **在旧宿主可能缺失**，故声明为可选并在
  * 调用侧降级（**发布类型未声明 `list`/`get`**，服务端实为 `GET /session` 与 `GET /session/{id}`）。
+ *
+ * **返回形状刻意声明为 `unknown`**：宿主 client 可能返回裸值，也可能返回 SDK 的
+ * `{ data, error, request, response }` 包装（取决于 `responseStyle`/`throwOnError`，宿主内部不可读），
+ * 故调用方必须先经 `unwrapResult<T>` 解包，**不得**直接把返回值当作 `Session`/`Session[]` 使用。
  */
 export interface OpencodeClient {
   readonly session: {
@@ -73,10 +77,10 @@ export interface OpencodeClient {
       readonly path: { readonly id: string }
       readonly body: { readonly parts: readonly { readonly type: "text"; readonly text: string }[] }
     }): Promise<unknown>
-    /** `GET /session` → `Session[]`（`limit`/`roots`/`scope` 见 `SessionListQuery`）。 */
-    list?(input?: { readonly query?: SessionListQuery }): Promise<readonly OpencodeSession[]>
-    /** `GET /session/{id}` → `Session`（不存在时抛错）。 */
-    get?(input: { readonly path: { readonly id: string } }): Promise<OpencodeSession>
+    /** `GET /session` → `Session[]` 或包装（`limit`/`roots`/`scope` 见 `SessionListQuery`）。 */
+    list?(input?: { readonly query?: SessionListQuery }): Promise<unknown>
+    /** `GET /session/{id}` → `Session` 或包装（不存在时抛错或包装 `error`）。 */
+    get?(input: { readonly path: { readonly id: string } }): Promise<unknown>
   }
 }
 
