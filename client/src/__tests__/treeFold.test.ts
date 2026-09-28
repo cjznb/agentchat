@@ -9,6 +9,7 @@ import {
   EXPANDED_TREE_KEY,
   flattenTree,
   foldTree,
+  isContainerNode,
   isHuman,
   loadExpandedTree,
   roleTone,
@@ -177,6 +178,21 @@ describe("roleTone（执行者/组织者/监管者 + 兜底）", () => {
     expect(roleTone(null)).toBe("none")
     expect(roleTone("")).toBe("none")
     expect(roleTone("   ")).toBe("none")
+  })
+
+  it("container → none（容器徽标接管，不渲染裸英文角色标签 —— 评审 Minor #1）", () => {
+    expect(roleTone("container")).toBe("none")
+  })
+})
+
+describe("isContainerNode（容器判定单源，评审 Minor #2）", () => {
+  it("role_tag=container → true", () => {
+    expect(isContainerNode(node("inst", { role: "container" }))).toBe(true)
+  })
+
+  it("普通角色 / null → false", () => {
+    expect(isContainerNode(node("a", { role: "执行者" }))).toBe(false)
+    expect(isContainerNode(node("b"))).toBe(false)
   })
 })
 

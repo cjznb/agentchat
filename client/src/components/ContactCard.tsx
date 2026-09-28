@@ -12,7 +12,7 @@ import { useCallback, useEffect, useState } from "react"
 import type { AgentCard, RosterNode } from "../../../shared/contracts"
 import { loadAgentCard } from "../api"
 import { initialOf } from "../chat"
-import { roleTone, statusGlyph, statusLabel } from "../treeFold"
+import { isContainerNode, roleTone, statusGlyph, statusLabel } from "../treeFold"
 
 type ContactConversation = AgentCard["conversations"][number]
 
@@ -75,7 +75,7 @@ export function ContactCard({
 
   const toggleConversations = useCallback(() => setShowConversations((value) => !value), [])
   const retired = node.status === "retired"
-  const isContainer = node.role_tag === "container"
+  const isContainer = isContainerNode(node)
   const role = roleTone(node.role_tag)
   const skills = node.skills
 

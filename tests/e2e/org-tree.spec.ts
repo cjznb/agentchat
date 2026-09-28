@@ -1,9 +1,19 @@
 /**
- * Plan 3 T6 —— 通讯录组织树 + 资料卡 E2E（真 Hub + 进程内种子）：
- * 默认折叠第一层 / human 不出现 / 摘要 `N子·M忙` + 聚合徽标 / 手风琴 /
- * 退役灰显不可点 / 状态变化与实时挂载 <2s / 资料卡字段与两按钮。
+ * Plan 3 T6 —— 通讯录组织树（**扁平单层**）+ 资料卡 E2E（真 Hub + 进程内种子）：
+ * 恒渲染（无折叠/无层级属性/无缩进）、DFS 父前子随 + `↳` 来源标注、human 过滤、
+ * 摘要 `N子·M忙` + 聚合徽标、退役灰显可点、busy 状态与角色色调、
+ * 容器徽标 + 容器卡不可 DM、状态变化与实时挂载 <2s、资料卡字段与两按钮。
  *
- * 前置：Playwright webServer 自举 `npm run build && npm start`（`start` 从 `client/dist` 托管静态页）。
+ * 扁平化重写（评审 Critical #1）：
+ * - 删除：toggle/折叠/手风琴断言与 `ensureExpanded` helper（`org-toggle` testid 已随
+ *   `OrgTree.tsx` 扁平化删除，旧断言在第一条即中止、后续覆盖全部失效）。
+ * - 新增：扁平恒渲染（9 行默认可见）、扁平 DOM（无嵌套/无层级属性/无缩进实测）、
+ *   DFS 父前子随、`↳` 来源标注、容器行/容器卡（含「无 contact-message」）。
+ * - 保留：human 过滤、逻辑图标、摘要与徽标、退役灰化可点、busy 与角色色调、
+ *   实时状态变化、实时挂载、资料卡字段完整性、会话过滤视图、发消息开 DM。
+ *
+ * 前置：Playwright webServer 自举 `npm run build && npm start`（临时 `AGENTCHAT_HOME`，
+ * 隔离于用户真实 Hub）；本 spec 内 `start({ port: 0 })` 另起独立临时 Hub。
  */
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -23,13 +33,28 @@ function rowOf(page: Page, id: string): Locator {
 function nodeOf(page: Page, id: string): Locator {
   return page.locator(`[data-testid="org-node"][data-node-id="${id}"]`)
 }
-/** 确保某根行处于展开态（`.first()` 取本行自身的 toggle，避免命中嵌套子行）。 */
-async function ensureExpanded(page: Page, id: string): Promise<void> {
-  const toggle = rowOf(page, id).getByTestId("org-toggle").first()
-  if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click()
+
+/** 扁平列表当前渲染顺序（自上而下的 `data-node-id` 序列；DFS 断言用）。 */
+async function rowOrder(page: Page): Promise<readonly string[]> {
+  const nodes = page.getByTestId("org-node")
+  const count = await nodes.count()
+  const ids: string[] = []
+  for (let i = 0; i < count; i++) {
+    const id = await nodes.nth(i).getAttribute("data-node-id")
+    if (id === null) throw new Error(`org-node[${i}] 缺少 data-node-id`)
+    ids.push(id)
+  }
+  return ids
 }
 
-test("org tree: collapsed default, summary+badge, accordion, retired grey, live mount, contact card", async ({
+/** 节点在扁平顺序中的下标（缺失即失败，避免静默 -1 误判）。 */
+function at(order: readonly string[], id: string): number {
+  const index = order.indexOf(id)
+  if (index < 0) throw new Error(`节点 ${id} 不在扁平列表：${order.join(", ")}`)
+  return index
+}
+
+test("org tree（扁平）：恒渲染 + DFS/↳ + 退役/忙碌/容器 + 实时挂载 + 资料卡", async ({
   page,
 }) => {
   resetWsHub()
@@ -40,33 +65,70 @@ test("org tree: collapsed default, summary+badge, accordion, retired grey, live 
     const seed = seedOrg(db, home)
     await page.goto(`${running.url}/`)
     await page.getByRole("button", { name: "通讯录" }).click()
-    await expect(page.getByTestId("org-tree")).toBeVisible()
+    const tree = page.getByTestId("org-tree")
+    await expect(tree).toBeVisible()
 
-    // 默认折叠：第一层仅根主 agent + 逻辑节点；子级不渲染。
-    await expect(rowOf(page, seed.root1)).toBeVisible()
-    await expect(rowOf(page, seed.root2)).toBeVisible()
-    await expect(rowOf(page, seed.logical)).toBeVisible()
-    await expect(nodeOf(page, seed.child1)).toHaveCount(0)
-
-    // human 不出现在树。
+    // ── 扁平恒渲染：9 行默认全部可见（无折叠），human 不出现 ─────────────
+    await expect(page.getByTestId("org-row")).toHaveCount(9)
+    for (const id of [
+      seed.root1,
+      seed.root2,
+      seed.logical,
+      seed.child1,
+      seed.child2,
+      seed.child3,
+      seed.child4,
+      seed.instance,
+      seed.session,
+    ]) {
+      await expect(nodeOf(page, id)).toBeVisible()
+    }
     await expect(page.locator('[data-testid="org-node"]', { hasText: "用户" })).toHaveCount(0)
 
-    // 逻辑节点特殊图标。
+    // 逻辑节点特殊图标（原覆盖保留）。
     await expect(nodeOf(page, seed.logical).locator(".node-icon")).toHaveText("◆")
 
-    // 摘要 `N子·M忙` + 聚合未读徽标（root1=1，root2=0 无徽标）。
-    await expect(rowOf(page, seed.root1).getByTestId("org-summary").first()).toHaveText("3子·1忙")
-    await expect(rowOf(page, seed.root2).getByTestId("org-summary").first()).toHaveText("1子·0忙")
-    // F1：树行徽标为 human 观察者全子树口径（root1 = child1 的两条 DM 各 1 未读 = 2）。
-    await expect(rowOf(page, seed.root1).getByTestId("unread-badge").first()).toHaveText("2")
+    // ── 扁平 DOM：无嵌套行 / 无 toggle / 无层级属性 / 无行级内联缩进 ──────
+    await expect(tree.locator("ul")).toHaveCount(0)
+    await expect(tree.locator("li li")).toHaveCount(0)
+    await expect(tree.locator(":scope > li")).toHaveCount(9)
+    await expect(
+      tree.locator(
+        '[data-testid="org-toggle"], .org-toggle, .org-children, .org-head, [aria-expanded], [role="tree"], [role="treeitem"], [role="group"]',
+      ),
+    ).toHaveCount(0)
+    await expect(tree.locator(".org-node[style]")).toHaveCount(0)
+
+    // 无层级缩进（实测）：所有行计算样式的左内边距一致。
+    const paddings = await tree.locator(".org-node").evaluateAll((els) =>
+      els.map((el) => el.ownerDocument?.defaultView?.getComputedStyle(el).paddingLeft ?? ""),
+    )
+    expect(new Set(paddings).size).toBe(1)
+    expect(paddings[0]).not.toBe("")
+
+    // ── DFS 顺序：父在前、子紧随（子行紧跟其父，不跨层跳散） ─────────────
+    const order = await rowOrder(page)
+    expect(at(order, seed.child1)).toBe(at(order, seed.root1) + 1)
+    expect(at(order, seed.child2)).toBe(at(order, seed.root1) + 2)
+    expect(at(order, seed.child3)).toBe(at(order, seed.root1) + 3)
+    expect(at(order, seed.child4)).toBe(at(order, seed.root2) + 1)
+    expect(at(order, seed.session)).toBe(at(order, seed.instance) + 1)
+    expect(at(order, seed.root1)).toBeLessThan(at(order, seed.root2))
+
+    // ── `↳` 来源标注：子行标父名；根行（含容器）无标注 ───────────────────
+    await expect(rowOf(page, seed.root1).getByTestId("org-source")).toHaveCount(0)
+    await expect(rowOf(page, seed.child1).getByTestId("org-source")).toHaveText("↳ org-root1")
+    await expect(rowOf(page, seed.child4).getByTestId("org-source")).toHaveText("↳ org-root2")
+    await expect(rowOf(page, seed.session).getByTestId("org-source")).toHaveText("↳ org-instance")
+
+    // ── 摘要 `N子·M忙` + 聚合未读徽标（root1=2，root2 无徽标） ────────────
+    await expect(rowOf(page, seed.root1).getByTestId("org-summary")).toHaveText("3子·1忙")
+    await expect(rowOf(page, seed.root2).getByTestId("org-summary")).toHaveText("1子·0忙")
+    await expect(rowOf(page, seed.instance).getByTestId("org-summary")).toHaveText("1子·0忙")
+    await expect(rowOf(page, seed.root1).getByTestId("unread-badge")).toHaveText("2")
     await expect(rowOf(page, seed.root2).getByTestId("unread-badge")).toHaveCount(0)
 
-    // 展开 root1：子行可见；child1 折叠徽标 = 其子树（自身两条 DM = 2）。
-    await rowOf(page, seed.root1).getByTestId("org-toggle").first().click()
-    await expect(nodeOf(page, seed.child1)).toBeVisible()
-    await expect(rowOf(page, seed.child1).getByTestId("unread-badge").first()).toHaveText("2")
-
-    // 退役子节点：灰显、留原位、**仍可点开资料卡**（仅「发消息」禁用）；退役父节点仍可展开。
+    // ── 退役节点：灰显、留原位、仍可点开资料卡（仅「发消息」禁用） ─────────
     await expect(nodeOf(page, seed.child3)).toHaveAttribute("data-retired", "true")
     await expect(nodeOf(page, seed.child3)).toBeEnabled()
     await nodeOf(page, seed.child3).click()
@@ -74,7 +136,7 @@ test("org tree: collapsed default, summary+badge, accordion, retired grey, live 
     await expect(page.getByTestId("contact-message")).toBeDisabled()
     await page.getByTestId("contact-close").click()
 
-    // busy 状态点 + 状态文字；role 彩色标签。
+    // ── busy 状态点 + 状态文字；role 彩色标签 ─────────────────────────────
     await expect(nodeOf(page, seed.child2).locator(".node-dot")).toHaveText("🟠")
     await expect(nodeOf(page, seed.child2).getByTestId("status-text")).toHaveText("编译中")
     await expect(nodeOf(page, seed.child1).getByTestId("role-tag")).toHaveText("执行者")
@@ -83,23 +145,34 @@ test("org tree: collapsed default, summary+badge, accordion, retired grey, live 
       "executor",
     )
 
-    // 手风琴：展开 root2 收起 root1。
-    await rowOf(page, seed.root2).getByTestId("org-toggle").first().click()
-    await expect(nodeOf(page, seed.child4)).toBeVisible()
-    await expect(nodeOf(page, seed.child1)).toHaveCount(0)
+    // ── 容器行：徽标 + data-container；不渲染裸英文 `container` 角色标签 ───
+    await expect(rowOf(page, seed.instance).getByTestId("container-badge")).toHaveText("容器")
+    await expect(nodeOf(page, seed.instance)).toHaveAttribute("data-container", "true")
+    await expect(nodeOf(page, seed.instance).getByTestId("role-tag")).toHaveCount(0)
 
-    // 实时：状态变化（/internal/state 同路径）→ 摘要 <2s 刷新。
+    // ── 容器资料卡：容器说明可见、无「发消息」按钮、角色标签「未设置」 ─────
+    await nodeOf(page, seed.instance).click()
+    await expect(page.getByTestId("contact-card")).toBeVisible()
+    await expect(page.getByTestId("contact-container-note")).toBeVisible()
+    await expect(page.getByTestId("contact-message")).toHaveCount(0)
+    await expect(page.getByTestId("contact-role")).toHaveCount(0)
+    await expect(page.getByTestId("contact-card")).toContainText("未设置")
+    await expect(page.getByTestId("contact-conversations")).toBeVisible()
+    await page.getByTestId("contact-close").click()
+
+    // ── 实时：状态变化（/internal/state 同路径）→ 摘要 <2s 刷新 ───────────
     applyAgentState(db, { agentId: seed.child4, state: "busy" })
-    await expect(rowOf(page, seed.root2).getByTestId("org-summary").first()).toHaveText("1子·1忙", {
+    await expect(rowOf(page, seed.root2).getByTestId("org-summary")).toHaveText("1子·1忙", {
       timeout: 2000,
     })
 
-    // 实时：新子节点注册 → 2s 内挂载到父下。
-    await ensureExpanded(page, seed.root1)
+    // ── 实时：新子节点注册 → 2s 内挂载（扁平：无需任何展开操作） ──────────
     const live = registerChild(db, { name: "org-live", parentId: seed.root1, taskRef: "org-live" })
     await expect(nodeOf(page, live.id)).toBeVisible({ timeout: 2000 })
+    await expect(page.getByTestId("org-row")).toHaveCount(10)
+    await expect(rowOf(page, live.id).getByTestId("org-source")).toHaveText("↳ org-root1")
 
-    // 资料卡：点节点 → 字段齐全 + 两按钮。
+    // ── 资料卡：点节点 → 字段齐全 + 两按钮（普通节点按钮在，对照容器） ─────
     await nodeOf(page, seed.child1).click()
     await expect(page.getByTestId("contact-card")).toBeVisible()
     await expect(page.getByTestId("contact-name")).toHaveText("org-child1")
@@ -120,7 +193,6 @@ test("org tree: collapsed default, summary+badge, accordion, retired grey, live 
 
     // 发消息（child2 无既有 DM）→ 创建 DM 并打开（标题为节点名）。
     await page.getByRole("button", { name: "通讯录" }).click()
-    await ensureExpanded(page, seed.root1)
     await nodeOf(page, seed.child2).click()
     await page.getByTestId("contact-message").click()
     await expect(page.getByTestId("chat-view")).toBeVisible()

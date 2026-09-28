@@ -17,6 +17,7 @@ import { aggregateUnread } from "../unread"
 import {
   flattenTree,
   foldTree,
+  isContainerNode,
   roleTone,
   statusGlyph,
   statusLabel,
@@ -77,7 +78,7 @@ function FlatNodeRow({
   readonly onSelect: (nodeId: string) => void
 }) {
   const { node, summary, retired, logical } = row
-  const isContainer = node.role_tag === "container"
+  const isContainer = isContainerNode(node)
   return (
     <li className="org-row" data-testid="org-row" data-node-id={node.id}>
       <button

@@ -104,10 +104,20 @@ const ROLE_TONES: Readonly<Record<string, Exclude<RoleTone, "none" | "other">>> 
   监管者: "supervisor",
 }
 
-/** `role_tag` → 颜色 tone（三已知角色映射；未知值兜底 `other`；空值 `none`）。 */
+/** `role_tag` → 颜色 tone（三已知角色映射；空值与 `container` → `none`；未知值兜底 `other`）。 */
 export function roleTone(tag: string | null): RoleTone {
   if (tag === null || tag.trim() === "") return "none"
+  // 容器节点由专属「容器」徽标表达，不再渲染裸英文 `container` 角色标签（评审 Minor #1）。
+  if (tag === "container") return "none"
   return ROLE_TONES[tag] ?? "other"
+}
+
+/**
+ * 容器节点判定（`role_tag === "container"`）——**唯一谓词**，组件与拦截共用（评审 Minor #2）。
+ * 容器展示「容器」徽标且不可作为私聊对象（`ContactCard` 隐藏按钮 + `App` 拦截 `openDm`）。
+ */
+export function isContainerNode(node: Pick<RosterNode, "role_tag">): boolean {
+  return node.role_tag === "container"
 }
 
 const STATUS_GLYPHS = {

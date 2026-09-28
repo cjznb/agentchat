@@ -89,9 +89,16 @@ export interface OrgSeed {
   readonly child3: string
   readonly child4: string
   readonly logical: string
+  /** 实例容器节点（`kind=runtime`、`role_tag=container`），不可 DM。 */
+  readonly instance: string
+  /** 容器的子会话节点（体现扁平列表 `↳` 来源标注）。 */
+  readonly session: string
 }
 
-/** human + 两棵根树（含 busy/退役/逻辑/多层）+ 未读（组织树用例）。 */
+/**
+ * human + 两棵根树（含 busy/退役/逻辑/多层）+ 未读 + 实例容器（组织树用例）。
+ * 容器语义与新 UI 一致：**实例为容器、会话为其子节点**（`role_tag=container` 仅标实例）。
+ */
 export function seedOrg(db: Db, home: string): OrgSeed {
   const human = ensureHuman(db)
   const root1 = registerRoot(db, home, {
@@ -123,6 +130,19 @@ export function seedOrg(db: Db, home: string): OrgSeed {
   const child3 = registerChild(db, { name: "org-child3", parentId: root1.id, taskRef: "org-t3" })
   const child4 = registerChild(db, { name: "org-child4", parentId: root2.id, taskRef: "org-t4" })
   const logical = registerLogical(db, { name: "org-board" })
+  // 实例容器：kind=runtime、role_tag=container；其下挂会话子节点（扁平 `↳` 标注用）。
+  const instance = registerRoot(db, home, {
+    name: "org-instance",
+    vendor: "opencode",
+    purpose: "实例分组容器",
+    roleTag: "container",
+  }).agent
+  const session = registerChild(db, {
+    name: "org-session",
+    parentId: instance.id,
+    taskRef: "org-s1",
+    vendor: "opencode",
+  })
   touchAgent(db, child2.id, "busy")
   setStatusText(db, child2.id, "编译中")
   sendMessage(db, { from: child1.id, to: root1.id, body: "root1-ping" }) // root1 聚合未读
@@ -136,6 +156,8 @@ export function seedOrg(db: Db, home: string): OrgSeed {
     child3: child3.id,
     child4: child4.id,
     logical: logical.id,
+    instance: instance.id,
+    session: session.id,
   }
 }
 
