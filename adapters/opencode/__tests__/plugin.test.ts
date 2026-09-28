@@ -316,6 +316,46 @@ describe("根会话注册与 join_token 落盘", () => {
   })
 })
 
+// ── 传输门 token 解析（env → 磁盘 → 空）────────────────────────────
+
+describe("传输门 token 解析（env → 磁盘 → 空）", () => {
+  /** 覆盖 env（不含 HUB_TOKEN）+ 预置/不预置磁盘 hub_token。 */
+  function setupWithToken(home: string, env: Record<string, string>): Harness {
+    return setup({ home, deps: { env } })
+  }
+
+  it("prefers a non-empty HUB_TOKEN from the environment over the disk file", async () => {
+    const home = tempHome()
+    writeFileSync(join(home, "hub_token"), "disk-token")
+    const harness = setupWithToken(home, {
+      AGENTCHAT_HOME: home,
+      HUB_TOKEN: "env-token",
+      AGENTCHAT_URL: "http://hub.test",
+    })
+    await emit(harness, rootCreated())
+    expect(harness.kit.calls.some((call) => call.headers["authorization"] === "Bearer env-token")).toBe(true)
+    expect(harness.kit.calls.every((call) => call.headers["authorization"] !== "Bearer disk-token")).toBe(true)
+  })
+
+  it("falls back to <home>/hub_token (trimmed) when HUB_TOKEN is unset", async () => {
+    const home = tempHome()
+    writeFileSync(join(home, "hub_token"), "  disk-token\n")
+    const harness = setupWithToken(home, { AGENTCHAT_HOME: home, AGENTCHAT_URL: "http://hub.test" })
+    await emit(harness, rootCreated())
+    expect(harness.kit.calls.some((call) => call.headers["authorization"] === "Bearer disk-token")).toBe(true)
+  })
+
+  it("warns clearly and sends an empty bearer when neither source provides a token", async () => {
+    const home = tempHome()
+    const harness = setupWithToken(home, { AGENTCHAT_HOME: home, AGENTCHAT_URL: "http://hub.test" })
+    await emit(harness, rootCreated())
+    // 既有失败路径：空 Bearer → Hub 会 401（这里断言请求确实带了空 token；
+    // `Headers` 会剥掉值尾随空白，故为 "Bearer"）。
+    expect(harness.kit.calls.some((call) => call.headers["authorization"] === "Bearer")).toBe(true)
+    expect(harness.logs.some((line) => line.includes("HUB_TOKEN"))).toBe(true)
+  })
+})
+
 // ── 子注册 ──────────────────────────────────────────────────────────
 
 describe("子会话注册（父关联）", () => {

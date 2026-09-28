@@ -21,14 +21,13 @@
  */
 import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join, sep } from "node:path"
+import { basename, dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { parseConfig } from "./jsonc.mjs"
 
 const MCP_KEY = "agentchat"
 const ADAPTER_DIR = dirname(fileURLToPath(import.meta.url))
 const BRIDGE_PATH = join(ADAPTER_DIR, "mcp-bridge.mjs")
-const BRIDGE_BASENAME = /(^|[\\/])mcp-bridge\.mjs$/
 const LEGACY_AGENT_ID = /^\{file:.*agents\/opencode\.id\}$/
 
 // ── 目标配置解析 ────────────────────────────────────────────────────
@@ -80,6 +79,7 @@ function desiredEntries(env) {
   const environment = bridgeEnvironment(env)
   return {
     pluginPath: posix(ADAPTER_DIR),
+    bridgePath: posix(BRIDGE_PATH),
     mcp: {
       // 本地 stdio：由 OpenCode 直接 spawn `[node, mcp-bridge.mjs]`。
       // node 取安装时的 process.execPath 绝对路径；换 node/升级后需重跑本安装器。
@@ -112,12 +112,19 @@ function isLegacyEntry(entry) {
   return typeof headers["x-agent-id"] === "string" && LEGACY_AGENT_ID.test(headers["x-agent-id"])
 }
 
-/** 本适配器产物（含旧结构）：可无 `--force` 就地替换/卸载。 */
-function isOwnEntry(entry) {
+/**
+ * 本适配器产物（含旧结构）：可无 `--force` 就地替换/卸载。
+ *
+ * local 条目必须指向**本安装器会写入的桥路径**（或同目录同名文件）——仅同名不同目录**不算**本产物，
+ * 以免误删/误改用户自有的同名条目。
+ */
+function isOwnEntry(entry, bridgePath) {
   if (isLegacyEntry(entry)) return true
   if (!isRecord(entry) || entry.type !== "local") return false
   const command = entry.command
-  return Array.isArray(command) && typeof command[1] === "string" && BRIDGE_BASENAME.test(command[1])
+  if (!Array.isArray(command) || typeof command[1] !== "string") return false
+  if (command[1] === bridgePath) return true
+  return dirname(command[1]) === dirname(bridgePath) && basename(command[1]) === basename(bridgePath)
 }
 
 function install(config, entries, force) {
@@ -144,7 +151,7 @@ function install(config, entries, force) {
     config.mcp[MCP_KEY] = entries.mcp
     changed = true
   } else if (JSON.stringify(existing) !== JSON.stringify(entries.mcp)) {
-    if (isOwnEntry(existing)) {
+    if (isOwnEntry(existing, entries.bridgePath)) {
       // 本适配器旧结构（或旧路径）→ 无 --force 迁移到新结构。
       migrated = isLegacyEntry(existing)
       config.mcp[MCP_KEY] = entries.mcp
@@ -175,7 +182,7 @@ function uninstall(config, entries) {
   if (isRecord(config.mcp) && Object.prototype.hasOwnProperty.call(config.mcp, MCP_KEY)) {
     const existing = config.mcp[MCP_KEY]
     // 结构完全匹配或本适配器产物（含旧结构）→ 移除；否则保留用户自有条目并提示。
-    if (JSON.stringify(existing) === JSON.stringify(entries.mcp) || isOwnEntry(existing)) {
+    if (JSON.stringify(existing) === JSON.stringify(entries.mcp) || isOwnEntry(existing, entries.bridgePath)) {
       delete config.mcp[MCP_KEY]
       changed = true
     } else {

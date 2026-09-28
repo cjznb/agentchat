@@ -44,8 +44,9 @@ dispatcher 不在 `createApp()`/`start()` 内部启动（测试反复调用会�
 空闲时**主动拉取**待投递内容（agent 侧无长驻连接可被 Hub 推送）。Hub 侧登记的厂商列表由 `AGENTCHAT_ADAPTERS`
 控制（逗号分隔，如 `AGENTCHAT_ADAPTERS=opencode,claude-code`；空/未设 = 不登记，仅测试用 fake）。
 
-一条命令安装（在**仓库根目录**执行；先 `npm start` 让 Hub 写出 `hub_token`。安装器本身不读 `HUB_TOKEN`，
-但**运行 agent 时**需让 `HUB_TOKEN` 对其进程可见，见各文档）：
+一条命令安装（在**仓库根目录**执行；先 `npm start` 让 Hub 写出 `hub_token`。安装器不读 `HUB_TOKEN`；
+**OpenCode 适配器运行时无需手动 export** —— 插件与本地桥都自动读 `<AGENTCHAT_HOME>/hub_token`
+（`HUB_TOKEN` 非空时覆盖）；**Claude Code 适配器的 hooks** 仍需 `HUB_TOKEN` 对其进程可见。见各文档）：
 
 | 厂商 | 安装命令（可直接复制） | 详细文档 |
 |---|---|---|

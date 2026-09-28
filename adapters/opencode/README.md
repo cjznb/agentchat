@@ -9,10 +9,11 @@
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `HUB_TOKEN` | 运行插件时是 | Hub 传输门 token，取 `<AGENTCHAT_HOME>/hub_token` 内容（**插件**读 `process.env`；**MCP 桥不读它**，逐请求从磁盘读盘） |
+| `HUB_TOKEN` | 否 | 传输门 token **覆盖**（非空优先）。缺省时**插件与 MCP 桥都自动读** `<AGENTCHAT_HOME>/hub_token`（trim），通常无需设置 |
 | `AGENTCHAT_HOME` | 否 | 数据目录，默认 `~/.agentchat`（与 Hub 一致） |
 | `AGENTCHAT_URL` | 否 | Hub 地址，默认 `http://127.0.0.1:<AGENTCHAT_PORT 或 4646>` |
 | `AGENTCHAT_PORT` | 否 | 仅用于推导默认 `AGENTCHAT_URL` |
+| `AGENTCHAT_MCP_TIMEOUT_MS` | 否 | MCP 桥单次上游请求超时，默认 `30000`（钳制到 `[100, 600000]`） |
 
 ## 事件映射（实测 `@opencode-ai/plugin@1.18.32`）
 
@@ -36,6 +37,8 @@
 
 - 每次 HTTP 调用 3s 超时；5xx/429/网络错误指数退避重试（base 250ms×2ⁿ、上限 30s、含 jitter）；
   401/404 等确定性错误不重试，记录并降级。
+- **传输门 token 解析**：`env.HUB_TOKEN`（非空优先）→ `<AGENTCHAT_HOME>/hub_token`（trim）→ 空；
+  两处皆空时打明确 warn、调用按既有 401 路径失败（无需手动 `export HUB_TOKEN`）。
 - 所有事件处理入队即返回（fire-and-forget，串行保序），网络重试在后台推进，**不阻塞宿主事件循环**。
 - token 写失败仅记录、不中断（尽力而为）。
 - 根注册成功后把**节点 agent id** 落盘 `<home>/agents/opencode.id`（供本地 MCP 桥**逐请求**读作
@@ -69,6 +72,8 @@
 - **逐请求读盘**：`Authorization: Bearer <home>/hub_token`、`x-agent-id: <home>/agents/opencode.id`
   （文件不存在则省略该头，绝不因环境缺失而拒绝启动）。
 - 会话 id 取自 initialize 响应头并在后续请求回带；`404 session_not_found` → 自动重新 initialize 一次重试。
+- 每次上游请求带显式超时（默认 30s，`AGENTCHAT_MCP_TIMEOUT_MS` 覆盖）：Hub 卡住时以 JSON-RPC error 返回，
+  不让严格串行链无限阻塞。
 - 失败只在首次工具调用时以清晰 JSON-RPC error 回给宿主，桥进程保持存活。
 - 配置里**不含任何 `{file:}` 引用与机密**（这正是旧结构让 OpenCode 无法启动的根因）。
 

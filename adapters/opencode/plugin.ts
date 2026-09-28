@@ -72,6 +72,7 @@ function createRuntime(
   const hub: Hub = createHubClient({
     env: deps.env,
     fetch: deps.fetch,
+    log,
     ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
     ...(deps.random === undefined ? {} : { random: deps.random }),
   })

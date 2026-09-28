@@ -17,13 +17,15 @@
 
 | 变量 | 必填 | 默认值 | 说明 |
 |---|---|---|---|
-| `HUB_TOKEN` | 运行**插件**时是 | — | Hub 传输门 token，取 `<AGENTCHAT_HOME>/hub_token` 的内容。**插件**（register / wake / internal 上报）读 `process.env`；**MCP 桥不读它**（见下） |
+| `HUB_TOKEN` | 否 | 自动读磁盘 | 传输门 token **覆盖**：非空时优先。缺省时**插件与 MCP 桥都自动读** `<AGENTCHAT_HOME>/hub_token` —— 通常无需设置 |
 | `AGENTCHAT_HOME` | 否 | `~/.agentchat` | 数据目录；`hub_token` 与节点 id 的落盘根（与 Hub 一致） |
 | `AGENTCHAT_URL` | 否 | `http://127.0.0.1:<AGENTCHAT_PORT 或 4646>` | Hub 地址；桥与插件据此定位 `/mcp` 与 `/internal/*` |
 | `AGENTCHAT_PORT` | 否 | `4646` | 仅用于推导默认 `AGENTCHAT_URL` |
+| `AGENTCHAT_MCP_TIMEOUT_MS` | 否 | `30000` | MCP 桥单次上游请求超时（钳制到 `[100, 600000]`，非法值回落默认） |
 
-`HUB_TOKEN` 只需在**启动 OpenCode 的进程环境**里可见（插件读 `process.env`）。**安装步骤本身不需要它**
-（安装器不读 `HUB_TOKEN`）。OpenCode 配置里**不再**出现 `{env:HUB_TOKEN}` —— 也绝不出现 token 明文。
+**token 解析顺序（插件与 MCP 桥一致）**：`env.HUB_TOKEN`（非空优先）→ `<AGENTCHAT_HOME>/hub_token`（trim）
+→ 空。安装器不写任何 token，**安装步骤无需 `export HUB_TOKEN`**；两处都拿不到时插件会打明确 warn，调用按
+既有 401 路径失败（启动 Hub 会自动写出 `hub_token`）。OpenCode 配置里**不含** `{env:HUB_TOKEN}`，也绝不含 token 明文。
 
 ## MCP 接入：本地 stdio 桥（为什么不再是 `remote` + `{file:}`）
 
@@ -45,6 +47,8 @@
   `x-agent-id: <home>/agents/opencode.id`（**文件不存在则省略该头**，不报错、不拒绝启动）。
 - 会话 id 取自 initialize 响应头 `Mcp-Session-Id` 并在后续请求回带；`404 session_not_found`
   （30min TTL 淘汰 / Hub 重启）→ 自动**重新 initialize 一次**并重试。
+- 每次上游请求带**显式超时**（默认 30s，`AGENTCHAT_MCP_TIMEOUT_MS` 覆盖）：Hub「收下却不回」时以
+  清晰的 JSON-RPC error 返回，而非让严格的串行链无限阻塞；桥进程保持存活，后续请求照常。
 - 环境缺失（Hub 未启动 / token 缺失 / 401 / `400 agent_not_found`）只在**首次工具调用**时以
   清晰的 JSON-RPC error 回给宿主，**桥进程不崩溃、不影响 OpenCode 启动**。
 
@@ -142,7 +146,7 @@ export default { id: "agentchat", server: AgentChatPlugin }
 
 | 文件 | 位置 | 作用 |
 |---|---|---|
-| `hub_token` | `<AGENTCHAT_HOME>/hub_token` | Hub 传输门 token：**插件**（`HUB_TOKEN`）与 **MCP 桥**（逐请求读盘）都用它 |
+| `hub_token` | `<AGENTCHAT_HOME>/hub_token` | Hub 传输门 token：**插件与 MCP 桥都自动读盘**（`HUB_TOKEN` 非空时覆盖插件侧） |
 | `join_token` | `<AGENTCHAT_HOME>/agents/opencode.token`（0600 尽力而为） | 重连认领根节点（`register` 的 `join_token`） |
 | 节点 agent id | `<AGENTCHAT_HOME>/agents/opencode.id` | 桥逐请求读作 `x-agent-id`（文件缺失仅省略该头，不影响启动） |
 
@@ -176,11 +180,13 @@ export default { id: "agentchat", server: AgentChatPlugin }
 | 症状 | 可能原因 | 处理 |
 |---|---|---|
 | MCP 工具调用报「读不到 Hub 传输门 token（…hub_token）」 | Hub 还没写过 `hub_token`（未启动或 `AGENTCHAT_HOME` 不一致） | 先 `npm start` 启动 Hub；确认 `AGENTCHAT_HOME` 与 Hub 一致（桥会逐请求重读，启动 Hub 后重试即可，无需重启 OpenCode） |
+| 插件注册 `401` / 节点始终不出现 | `HUB_TOKEN` 与 `<AGENTCHAT_HOME>/hub_token` 都缺失或与 Hub 不一致 | 确认 `AGENTCHAT_HOME` 与 Hub 一致并先启动 Hub 写出 `hub_token`；插件按 `env.HUB_TOKEN` → `<home>/hub_token` 解析，两者皆空时日志会打明确 warn |
 | MCP 工具调用报「401 unauthorized」 | 磁盘 `hub_token` 与 Hub 的 token 不一致（换了 `AGENTCHAT_HOME`/重置过 Hub） | 用 Hub 当前 `<AGENTCHAT_HOME>/hub_token` 覆盖；桥逐请求读盘，改对后重试即可 |
+| MCP 工具调用报「请求 Hub 超时」 | Hub 收下请求却不回（卡住） | 默认 30s 超时并回 JSON-RPC error（不阻塞后续请求）；可用 `AGENTCHAT_MCP_TIMEOUT_MS` 调大 |
 | MCP `400 agent_not_found` | `agents/opencode.id` 陈旧或尚未注册 | 删除 `agents/opencode.id`，让插件重新注册写入；桥逐请求读盘，无需重启 |
 | MCP 会话 `session_not_found` | 30min TTL 淘汰 / Hub 重启清空会话表 | **桥会自动重新 initialize 并重试一次**；一般无需人工干预 |
 | MCP 命令找不到 / 启动失败 | 换过 node 或升级后旧 `command[0]` 失效 | **重跑安装器**刷新 node 绝对路径 |
-| 插件未注册 / 节点不在 `GET /api/roster` | 插件未加载 / 导出形态不符 / `HUB_TOKEN` 未对其进程可见 | 确认 `plugin` 含本目录且默认导出 `{id,server}`；在启动 OpenCode 的终端设置 `HUB_TOKEN`；查 OpenCode 日志中 `[agentchat-opencode]` 前缀行 |
+| 插件未注册 / 节点不在 `GET /api/roster` | 插件未加载 / 导出形态不符 / token 未解析到 | 确认 `plugin` 含本目录且默认导出 `{id,server}`；确认 `AGENTCHAT_HOME` 与 Hub 一致（插件自动读 `<home>/hub_token`，也可用 `HUB_TOKEN` 覆盖）；查 OpenCode 日志中 `[agentchat-opencode]` 前缀行 |
 | 空闲未被唤醒（idle 未触发） | 宿主未发 `session.idle`/`session.status`（版本差异） | 核对 `@opencode-ai/plugin` 版本（实测 1.18.32）；`session.idle` 是主要触发，`session.status` 仅补 busy 起点 |
 | 回信似乎「开了新回合」 | 注入走 `client.session.promptAsync`，会开启新回合（符合「唤醒即续跑」语义） | 预期行为：busy 期间到达的消息会在**下一次 idle** 才被认领注入 |
 | 子节点在 roster 中长期残留 | 退役依赖宿主发 `session.deleted`（子会话）事件 | 子会话删除时插件调 `/internal/retire`（幂等；`404` 视为已退役）；若宿主版本不发该事件则节点留待下一次清理（已知限制，见 `adapters/opencode/README.md` 健壮性） |

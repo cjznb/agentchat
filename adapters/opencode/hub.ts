@@ -9,8 +9,10 @@ import { HubToolError, mcpRegister, type RegisterArgs, type RegisterResult } fro
 import {
   createHttpTransport,
   expectStatus,
+  hubTokenPath,
   HubError,
   resolveHubConfig,
+  resolveHubToken,
   type HubClientOptions,
   type HubConfig,
   type HubErrorKind,
@@ -76,8 +78,15 @@ function parseWake(text: string): WakeResult {
 /** 建 Hub 客户端；确定性 4xx 经 `expectStatus` 抛 `HubError("http")` 供调用方降级。 */
 export function createHubClient(options: HubClientOptions): Hub {
   const transport: HttpTransport = createHttpTransport(options)
+  const token = resolveHubToken(options.env)
+  if (token === "") {
+    options.log?.(
+      `传输门 token 未解析到：未设 HUB_TOKEN 且 ${hubTokenPath(options.env)} 不存在或为空；` +
+        `对 Hub 的调用将因 401 失败（启动 Hub 会自动写出该文件）`,
+    )
+  }
   const bearer: Record<string, string> = {
-    authorization: `Bearer ${resolveHubConfig(options.env).token}`,
+    authorization: `Bearer ${token}`,
     "content-type": "application/json",
   }
   return {

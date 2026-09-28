@@ -5,6 +5,8 @@
  * （base 250ms×2^n，上限 30s，含 jitter）、`4xx`/`401`/`404` 等确定性错误原样返回交调用方降级
  * （不重试）；重试耗尽以 `HubError` 抛出。
  */
+import { join } from "node:path"
+import { readToken, resolveHome } from "./token"
 
 export type HubErrorKind = "network" | "timeout" | "http" | "protocol" | "exhausted"
 
@@ -25,11 +27,27 @@ export interface HubConfig {
   readonly token: string
 }
 
+/** 传输门 token 的磁盘兜底路径（`<AGENTCHAT_HOME>/hub_token`，与 Hub 写出位置一致）。 */
+export function hubTokenPath(env: Readonly<Record<string, string | undefined>>): string {
+  return join(resolveHome(env), "hub_token")
+}
+
+/**
+ * 传输门 token 解析顺序：`env.HUB_TOKEN`（非空优先）→ 读 `<AGENTCHAT_HOME>/hub_token`（trim）
+ * → 空串。使新用户**无需手动 `export HUB_TOKEN`**（与 MCP 桥、Claude `mcp-headers.mjs` 对齐）；
+ * 两处都拿不到时空串照旧走既有 401 路径（调用方给明确 warn）。
+ */
+export function resolveHubToken(env: Readonly<Record<string, string | undefined>>): string {
+  const fromEnv = env["HUB_TOKEN"]
+  if (fromEnv !== undefined && fromEnv !== "") return fromEnv
+  return readToken(hubTokenPath(env)) ?? ""
+}
+
 /** 从环境解析 Hub 地址与传输门 token（`AGENTCHAT_URL` 优先，否则 `127.0.0.1:AGENTCHAT_PORT`）。 */
 export function resolveHubConfig(env: Readonly<Record<string, string | undefined>>): HubConfig {
   const port = env["AGENTCHAT_PORT"] ?? "4646"
   const raw = env["AGENTCHAT_URL"] ?? `http://127.0.0.1:${port}`
-  return { baseUrl: raw.replace(/\/+$/, ""), token: env["HUB_TOKEN"] ?? "" }
+  return { baseUrl: raw.replace(/\/+$/, ""), token: resolveHubToken(env) }
 }
 
 export interface HubClientOptions {
@@ -37,6 +55,8 @@ export interface HubClientOptions {
   readonly fetch: typeof fetch
   readonly sleep?: (ms: number) => Promise<void>
   readonly random?: () => number
+  /** 传输门 token 解析到空时的告警出口（缺省静默；插件注入宿主日志）。 */
+  readonly log?: (message: string) => void
   readonly timeoutMs?: number
   readonly maxAttempts?: number
   readonly baseDelayMs?: number

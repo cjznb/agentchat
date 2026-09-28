@@ -119,19 +119,42 @@ function parseMessages(text, contentType) {
   return Array.isArray(parsed) ? parsed : [parsed]
 }
 
+/** 上游请求超时：默认 30s；`AGENTCHAT_MCP_TIMEOUT_MS` 覆盖，钳制到 [100ms, 600000ms]，非法回落默认。 */
+function requestTimeoutMs() {
+  const parsed = Number.parseInt(env("AGENTCHAT_MCP_TIMEOUT_MS") ?? "", 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) return 30_000
+  return Math.min(Math.max(parsed, 100), 600_000)
+}
+
 /** POST 一个 JSON-RPC 消息；返回 `{status, messages}`；确定性错误抛带诊断的 Error。 */
 async function post(message, includeSession) {
   const headers = buildHeaders()
   if (includeSession && sessionId !== undefined) headers["mcp-session-id"] = sessionId
   const url = hubMcpUrl()
+  const timeoutMs = requestTimeoutMs()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   let response
+  let text
   try {
-    response = await fetch(url, { method: "POST", headers, body: JSON.stringify(message) })
+    response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(message),
+      signal: controller.signal,
+    })
+    text = await response.text()
   } catch (error) {
+    const aborted = error instanceof Error && error.name === "AbortError"
     const detail = error instanceof Error ? error.message : String(error)
-    throw new Error(`无法连接 AgentChat Hub（${url}）：${detail}；请确认 Hub 已启动`)
+    throw new Error(
+      aborted
+        ? `请求 Hub 超时（${timeoutMs}ms）：${url}；可用 AGENTCHAT_MCP_TIMEOUT_MS 调大窗口`
+        : `无法连接 AgentChat Hub（${url}）：${detail}；请确认 Hub 已启动`,
+    )
+  } finally {
+    clearTimeout(timer)
   }
-  const text = await response.text()
   const newSession = response.headers.get("mcp-session-id")
   if (newSession !== null && newSession !== "") sessionId = newSession
   if (response.status === 202) return { status: 202, messages: [] }
@@ -143,7 +166,11 @@ async function post(message, includeSession) {
       `Hub 返回 400 agent_not_found：${join(resolveHome(), "agents", "opencode.id")} 中的 id 陈旧或尚未注册；删除该文件并让插件重新注册`,
     )
   }
-  if (response.status === 404) return { status: 404, messages: [] }
+  if (response.status === 404) {
+    // 仅「会话被 TTL 淘汰 / Hub 重启」才自愈重 init；其它 404 按普通错误返回，不误开新会话。
+    if (text.includes("session_not_found")) return { status: 404, sessionLost: true, messages: [] }
+    throw new Error(`Hub /mcp 返回 404：${text.slice(0, 300)}`)
+  }
   if (!response.ok) throw new Error(`Hub /mcp 返回 ${response.status}：${text.slice(0, 300)}`)
   return { status: response.status, messages: parseMessages(text, response.headers.get("content-type")) }
 }
@@ -176,7 +203,7 @@ async function forward(message) {
     await ensureSession()
   }
   let result = await post(message, sessionId !== undefined)
-  if (result.status === 404 && sessionId !== undefined) {
+  if (result.status === 404 && result.sessionLost === true && sessionId !== undefined) {
     log("MCP 会话已失效（404 session_not_found），重新 initialize 后重试一次")
     await ensureSession()
     result = await post(message, sessionId !== undefined)

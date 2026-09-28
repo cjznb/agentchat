@@ -228,7 +228,7 @@ interface StubReply {
   readonly sessionId?: string
   readonly body?: string
 }
-type StubHandler = (request: StubRequest, index: number) => StubReply
+type StubHandler = (request: StubRequest, index: number) => StubReply | undefined
 
 async function startStub(handler: StubHandler): Promise<{
   url: string
@@ -249,6 +249,7 @@ async function startStub(handler: StubHandler): Promise<{
       const index = requests.length
       requests.push({ headers: req.headers, body })
       const reply = handler({ headers: req.headers, body }, index)
+      if (reply === undefined) return // 接受连接但永不响应（模拟 Hub「收下却不回」）
       const headers: Record<string, string> = {}
       if (reply.sessionId !== undefined) headers["mcp-session-id"] = reply.sessionId
       if (reply.body !== undefined) {
@@ -267,6 +268,7 @@ async function startStub(handler: StubHandler): Promise<{
   if (address === null || typeof address === "string") throw new Error("stub has no address")
   const close = (): Promise<void> =>
     new Promise((resolve) => {
+      server.closeAllConnections()
       server.close(() => resolve())
     })
   stubs.push(close)
@@ -419,6 +421,45 @@ describe("session_not_found 自愈", () => {
 })
 
 // ── ④ 失败可诊断且不拖垮宿主 ────────────────────────────────────────
+
+describe("上游超时与 404 收紧", () => {
+  it("times out a hung upstream with a JSON-RPC error, keeps the process alive and the serial chain usable", async () => {
+    const stub = await startStub((request, index) => {
+      if (index === 0) return undefined // 接受连接但永不响应
+      return stubInitializeFor(request.body, "stub-after-timeout")
+    })
+    const client = bridge({ AGENTCHAT_URL: stub.url, AGENTCHAT_MCP_TIMEOUT_MS: "300" })
+
+    const first = await client.request("initialize", initializeParams())
+    expect(errorMessage(first)).toContain("超时")
+    expect(client.alive).toBe(true)
+
+    // 串行链未被毒化：超时后的下一个请求照常成功。
+    const second = await client.request("initialize", initializeParams())
+    expect(second.error).toBeUndefined()
+    expect(isRecord(second.result)).toBe(true)
+  })
+
+  it("does not re-initialize on a 404 that is not session_not_found", async () => {
+    let initializeCount = 0
+    const stub = await startStub((request, index) => {
+      if (methodOf(request.body) === "initialize") {
+        initializeCount += 1
+        return stubInitializeFor(request.body, "stub-s1")
+      }
+      if (index === 1) return { status: 202, body: "" }
+      return { status: 404, json: { ok: false, error: "other_not_found" } }
+    })
+    const client = bridge({ AGENTCHAT_URL: stub.url })
+    await client.request("initialize", initializeParams())
+    client.notify("notifications/initialized", {})
+
+    const list = await client.request("tools/list", {})
+    expect(errorMessage(list)).toContain("404")
+    expect(initializeCount).toBe(1) // 未因普通 404 重开会话
+    expect(stub.requests).toHaveLength(3)
+  })
+})
 
 describe("失败路径可诊断且不使宿主启动失败", () => {
   it("reports a missing hub_token without crashing", async () => {

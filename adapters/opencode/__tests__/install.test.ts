@@ -193,6 +193,23 @@ describe("install.mjs 幂等安装", () => {
     expect(result.stderr).toContain("已保留")
   })
 
+  it("refuses to overwrite a user-owned local mcp.agentchat whose bridge lives elsewhere", () => {
+    const cfg = join(tempDir(), "opencode.json")
+    const home = join(tempDir(), "home")
+    const foreign = { type: "local", command: ["node", "/somewhere/else/mcp-bridge.mjs"], enabled: true }
+    writeFileSync(cfg, `${JSON.stringify({ mcp: { agentchat: foreign, other: OTHER_MCP } }, null, 2)}\n`)
+
+    const refused = run(["--config", cfg], { AGENTCHAT_HOME: home })
+    expect(refused.status).not.toBe(0)
+    expect(refused.stderr).toContain("结构不同")
+    expect(mcpEntry(readConfig(cfg), "agentchat")).toEqual(foreign) // 未被改动
+
+    const uninstalled = run(["--config", cfg, "--uninstall"], { AGENTCHAT_HOME: home })
+    expect(uninstalled.status).toBe(0)
+    expect(mcpEntry(readConfig(cfg), "agentchat")).toEqual(foreign) // 异路径同名 → 不视为本产物，保留
+    expect(uninstalled.stderr).toContain("已保留")
+  })
+
   it("fails with a clear message and non-zero exit when the path is missing", () => {
     const dir = tempDir()
 
