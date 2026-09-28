@@ -8,7 +8,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createPluginHandle, type PluginDeps, type PluginHandle } from "../plugin"
-import type { Hooks, OpencodeClient, OpencodeEvent, PluginInput } from "../types"
+import type { Hooks, OpencodeClient, OpencodeEvent, OpencodeSession, PluginInput, SessionListQuery } from "../types"
 import { isRecord } from "../util"
 
 // ── mock fetch ──────────────────────────────────────────────────────
@@ -109,6 +109,16 @@ function buildFetch(overrides: FetchOverrides = {}): FetchKit {
 class RecordingClient {
   readonly texts: string[] = []
   failInjections = 0
+  /** A/B 收养用：`sessionID → Session`（预置未映射会话）。 */
+  readonly sessions = new Map<string, OpencodeSession>()
+  /** `session.list` 返回体（默认空）。 */
+  listResult: readonly OpencodeSession[] = []
+  /** 非空则 `session.get` 抛错（模拟 404/不可用）。 */
+  getError: Error | undefined
+  /** 非空则 `session.list` 抛错（模拟老宿主）。 */
+  listError: Error | undefined
+  readonly getCalls: string[] = []
+  readonly listCalls: Array<{ readonly query?: SessionListQuery } | undefined> = []
   readonly client: OpencodeClient = {
     session: {
       promptAsync: async (input) => {
@@ -117,6 +127,18 @@ class RecordingClient {
           this.failInjections -= 1
           throw new Error("inject boom")
         }
+      },
+      get: async (input) => {
+        this.getCalls.push(input.path.id)
+        if (this.getError !== undefined) throw this.getError
+        const session = this.sessions.get(input.path.id)
+        if (session === undefined) throw new Error(`session not found: ${input.path.id}`)
+        return session
+      },
+      list: async (input) => {
+        this.listCalls.push(input)
+        if (this.listError !== undefined) throw this.listError
+        return this.listResult
       },
     },
   }
@@ -449,6 +471,182 @@ describe("会话映射与状态归属", () => {
     expect(harness.kit.internalCalls.some((call) => call.path === "/internal/wake")).toBe(false)
     expect(harness.client.texts).toEqual([])
     expect(harness.logs.filter((line) => line.includes("unmapped session"))).toHaveLength(2)
+  })
+})
+
+// ── 已存在/被恢复会话的收养（缺陷：未映射即跳过 → 历史会话永不出现在 AgentChat）──
+
+describe("会话收养（A 懒收养 / B 启动枚举）", () => {
+  const wakeOne = {
+    internal: (path: string) =>
+      path === "/internal/wake"
+        ? jsonResponse({ messages: [{ id: "m1", fromAgentId: "peer", conversationId: "c1", body: "hi" }] })
+        : undefined,
+  }
+
+  it("A/根：adopts an unmapped existing root via token claim then processes the event", async () => {
+    const home = tempHome()
+    const tokenPath = join(home, "agents", "opencode.token")
+    mkdirSync(dirname(tokenPath), { recursive: true })
+    writeFileSync(tokenPath, "existing-token")
+    const harness = setup({
+      home,
+      overrides: { toolsCall: () => toolReply(registerText("agent-1")), ...wakeOne },
+    })
+    harness.client.sessions.set("old-root", { id: "old-root" })
+    await emit(harness, sessionStatus("old-root", "idle"), sessionIdle("old-root"))
+    expect(harness.client.getCalls).toEqual(["old-root"])
+    expect(harness.kit.toolCalls).toEqual([
+      { vendor: "opencode", purpose: "coding-agent", join_token: "existing-token" },
+    ])
+    expect(readFileSync(tokenPath, "utf8")).toBe("existing-token") // 复用旧 token，未新建节点/新 token
+    expect(stateCalls(harness.kit)).toContainEqual({ agentId: "agent-1", state: "idle" })
+    expect(harness.client.texts).toHaveLength(1)
+    expect(harness.client.texts[0]).toContain("hi")
+  })
+
+  it("A/子（父已映射）：registers the child with parent_ref=parent agent", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(harness, rootCreated())
+    harness.client.sessions.set("child-x", { id: "child-x", parentID: "root-sess" })
+    await emit(harness, sessionStatus("child-x", "busy"))
+    expect(harness.client.getCalls).toEqual(["child-x"])
+    expect(harness.kit.toolCalls[1]).toEqual({
+      vendor: "opencode",
+      parent_ref: "agent-1",
+      task_ref: "child-x",
+    })
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
+  })
+
+  it("A/子（父未映射）：skips with warn and never falls back to the root", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.sessions.set("child-y", { id: "child-y", parentID: "ghost-parent" })
+    await emit(harness, sessionStatus("child-y", "busy"), sessionIdle("child-y"))
+    expect(harness.kit.toolCalls).toEqual([])
+    expect(stateCalls(harness.kit)).toEqual([])
+    expect(harness.kit.internalCalls.some((call) => call.path === "/internal/wake")).toBe(false)
+    expect(harness.logs.some((line) => line.includes("adopt child child-y skipped"))).toBe(true)
+    expect(harness.logs.filter((line) => line.includes("unmapped session"))).toHaveLength(2)
+  })
+
+  it("A/查询失败：keeps skip+warn and does not crash when session.get throws (404)", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.getError = new Error("404 not found")
+    await emit(harness, rootCreated(), sessionStatus("ghost-sess", "busy"))
+    expect(harness.client.getCalls).toEqual(["ghost-sess"])
+    expect(stateCalls(harness.kit)).toEqual([])
+    expect(harness.logs.some((line) => line.includes("session lookup failed for ghost-sess"))).toBe(true)
+    expect(harness.logs.some((line) => line.includes("unmapped session"))).toBe(true)
+  })
+
+  it("A/幂等：adopts a session only once across repeated events", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.sessions.set("old-root", { id: "old-root" })
+    await emit(
+      harness,
+      sessionStatus("old-root", "busy"),
+      sessionStatus("old-root", "idle"),
+      sessionStatus("old-root", "busy"),
+    )
+    expect(harness.client.getCalls).toEqual(["old-root"])
+    expect(harness.kit.toolCalls).toHaveLength(1)
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-1", state: "busy" },
+      { agentId: "agent-1", state: "idle" },
+      { agentId: "agent-1", state: "busy" },
+    ])
+  })
+
+  it("session.updated：adopts a restored session that never emitted session.created", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.sessions.set("revived", { id: "revived" })
+    await emit(harness, { type: "session.updated", properties: { info: { id: "revived" } } })
+    expect(harness.client.getCalls).toEqual(["revived"])
+    expect(harness.kit.toolCalls).toHaveLength(1)
+  })
+
+  it("B/枚举：lists bounded roots, filters archived, tolerates a failed root", async () => {
+    const home = tempHome()
+    let registers = 0
+    const harness = setup({
+      home,
+      deps: {
+        env: {
+          AGENTCHAT_HOME: home,
+          HUB_TOKEN: "hub-token",
+          AGENTCHAT_URL: "http://hub.test",
+          AGENTCHAT_ADOPT_LIMIT: "3",
+        },
+      },
+      overrides: {
+        toolsCall: () => {
+          registers += 1
+          return registers === 1
+            ? toolReply("RegistrationError: boom [name_taken]", true)
+            : toolReply(registerText("agent-ok"))
+        },
+      },
+    })
+    harness.client.listResult = [
+      { id: "r1" },
+      { id: "r2" },
+      { id: "r3", time: { archived: 1 } }, // 归档：客户端过滤
+      { id: "r4" },
+      { id: "r5" }, // 超出 limit=3：未收养
+    ]
+    await harness.handle.flush()
+    expect(harness.client.listCalls).toHaveLength(1)
+    expect(harness.client.listCalls[0]?.query).toEqual({ scope: "project", roots: true, limit: 3 })
+    await emit(
+      harness,
+      sessionStatus("r2", "busy"),
+      sessionStatus("r4", "idle"),
+      sessionStatus("r5", "busy"),
+      sessionStatus("r3", "busy"),
+    )
+    // r1 注册失败被容忍，r2 成功，r4 挂同一节点；r5/r3 未收养 → 各自 warn
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-ok", state: "busy" },
+      { agentId: "agent-ok", state: "idle" },
+    ])
+    expect(harness.logs.some((line) => line.includes("root register failed"))).toBe(true)
+    expect(harness.logs.filter((line) => line.includes("unmapped session"))).toHaveLength(2)
+  })
+
+  it("B/降级：keeps lazy adoption working when session.list throws", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.listError = new Error("list unavailable")
+    harness.client.sessions.set("old-root", { id: "old-root" })
+    await emit(harness, sessionStatus("old-root", "busy"))
+    expect(harness.logs.some((line) => line.includes("startup adoption list failed"))).toBe(true)
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "busy" }])
+  })
+
+  it("B/关闭：does not call session.list when AGENTCHAT_ADOPT=0 (A still effective)", async () => {
+    const home = tempHome()
+    const harness = setup({
+      home,
+      deps: {
+        env: {
+          AGENTCHAT_HOME: home,
+          HUB_TOKEN: "hub-token",
+          AGENTCHAT_URL: "http://hub.test",
+          AGENTCHAT_ADOPT: "0",
+        },
+      },
+    })
+    await harness.handle.flush()
+    expect(harness.client.listCalls).toHaveLength(0)
+    harness.client.sessions.set("old-root", { id: "old-root" })
+    await emit(harness, sessionStatus("old-root", "busy"))
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-1", state: "busy" }])
   })
 })
 

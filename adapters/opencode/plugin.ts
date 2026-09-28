@@ -16,6 +16,7 @@
  * 所有事件处理入队即返回（fire-and-forget，串行保序），网络重试在后台推进，
  * 不阻塞宿主事件循环。详见 README.md。
  */
+import { createAdopter } from "./adopt"
 import { createIdleFlush, describe } from "./flush"
 import {
   createHubClient,
@@ -209,18 +210,24 @@ function createRuntime(
     }
   }
 
+  // 收养器：A 懒收养 + B 启动枚举（构造即 fire-and-forget 枚举，不阻塞宿主）。配置见 README。
+  const adopter = createAdopter({
+    env: deps.env, client: input.client, hub, vendor: ADAPTER_VENDOR,
+    state: { get: (id) => state.sessionToAgent.get(id), set: (id, a) => state.sessionToAgent.set(id, a), rootAgentId: () => state.agentId },
+    rootRegister, enqueue: (task) => queue.push(task), log,
+  })
+
   const onCreated = async (session: OpencodeSession): Promise<void> => {
     if (session.parentID === undefined) {
-      if (state.agentId === undefined) await rootRegister(session)
-      else state.sessionToAgent.set(session.id, state.agentId)
+      await adopter.adoptRoot(session)
       return
     }
     await childRegister(session)
   }
 
   const onStatus = async (sessionID: string, status: "idle" | "busy" | "retry"): Promise<void> => {
-    // 不回落根：未映射会话的状态若记到根会错配；跳过并 warn，待该子会话注册后自然恢复。
-    const agentId = state.sessionToAgent.get(sessionID)
+    // 未映射会话先尝试懒收养（已存在/被恢复的会话不会再发 `session.created`）；仍失败才跳过并 warn。
+    const agentId = await adopter.resolve(sessionID)
     if (agentId === undefined) {
       log(`status for unmapped session ${sessionID}; skipped`)
       return
@@ -232,8 +239,8 @@ function createRuntime(
   }
 
   const onIdle = async (sessionID: string): Promise<void> => {
-    // 不回落根：否则会「给根取件、往子会话注入」；未映射即跳过并 warn。
-    const agentId = state.sessionToAgent.get(sessionID)
+    // 未映射会话先尝试懒收养；仍失败才跳过并 warn（不回落根，避免「给根取件、往子会话注入」）。
+    const agentId = await adopter.resolve(sessionID)
     if (agentId === undefined) {
       log(`idle for unmapped session ${sessionID}; skipped`)
       return
@@ -267,6 +274,10 @@ function createRuntime(
     switch (event.type) {
       case "session.created":
         await onCreated(event.properties.info)
+        return
+      // 被恢复的旧会话一旦被使用（touch/setTitle 等）就会发 `session.updated`：借它懒收养。
+      case "session.updated":
+        await adopter.resolve(event.properties.info.id)
         return
       case "session.status":
         await onStatus(event.properties.sessionID, event.properties.status.type)
