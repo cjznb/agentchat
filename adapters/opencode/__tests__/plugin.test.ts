@@ -369,7 +369,8 @@ const childCreated = (id: string, parentID: string, title = "子会话标题"): 
 })
 
 /**
- * 实例节点（根）注册入参期望：`opencode@<host>` 可读名（主机名缺失回退 `opencode`）。
+ * 实例节点（根）注册入参期望：`opencode@<host>` 可读名（主机名缺失回退 `opencode`）；
+ * `role_tag="container"` 标记为分组容器（不是聊天对象）。
  */
 function instanceArgs(joinToken?: string): Record<string, unknown> {
   const host = osHostname()
@@ -378,6 +379,7 @@ function instanceArgs(joinToken?: string): Record<string, unknown> {
     vendor: "opencode",
     purpose: "coding-agent",
     name,
+    role_tag: "container",
     ...(joinToken === undefined ? {} : { join_token: joinToken }),
   }
 }

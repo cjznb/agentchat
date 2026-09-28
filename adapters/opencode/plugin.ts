@@ -147,11 +147,13 @@ function createRuntime(
     poller.start()
   }
 
-  /** 实例节点（根）注册入参：可读名 `opencode@<host>`，主机名缺失回退 `opencode`。 */
+  /** 实例节点（根）注册入参：可读名 `opencode@<host>`，主机名缺失回退 `opencode`；
+   * `role_tag="container"` 标记其为分组容器（不是聊天对象，spec §11.2 Task 2）。 */
   const registerArgs = (joinToken: string | undefined): RegisterArgs => ({
     vendor: ADAPTER_VENDOR,
     purpose: "coding-agent",
     name: instanceName(resolveHostname()),
+    role_tag: "container",
     ...(joinToken === undefined ? {} : { join_token: joinToken }),
   })
 

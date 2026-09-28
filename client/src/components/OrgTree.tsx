@@ -1,42 +1,31 @@
 /**
- * 通讯录 · 组织树（spec §11.2；Plan 3 T6）——折叠计算全在 `treeFold.ts` 纯函数；
- * 本组件只渲染 + 管理展开态（手风琴，持久化 `agentchat:expandedTree`）。
+ * 通讯录 · 组织树（spec §11.2；Plan 3 T6）——**单层扁平列表**。
  *
- * - 默认折叠：第一层仅根主 agent（+ 逻辑节点），子级折叠在根行下，`▸` 原地展开
- * - 折叠行摘要 `N子·M忙` + 聚合未读徽标（随 WS `agent` 事件重拉 roster 实时刷新）
- * - 节点视觉：状态点/厂商徽标/role 彩色标签；逻辑节点特殊图标
- * - 退役节点灰显、留原位、**仍可点开资料卡**（仅「发消息」禁用）；退役父节点仍可展开看后代
- * - human 节点经 `foldTree` 完全过滤
- * - 行徽标 = human 观察者全子树聚合未读（`unread.ts`，与会话列表同口径）
+ * - 所有可见节点（human 过滤后）在同一视觉层级逐行排列，DFS 顺序
+ * - 父节点的行加淡色 `↳ <父节点名>` 来源标注（同一视觉层级靠相邻 + 标注判归属）
+ * - 容器节点（`role_tag === "container"`）显示「容器」徽标；**不可 DM**
+ *   （`ContactCard`/`App.tsx` 双层拦截 `openDm`，本组件仅作展示）
+ * - 保留：状态点（online/busy/offline/retired）、未读徽标、`treeFold` 摘要
+ *   （`N子·M忙`）、点击选中回调、退役节点灰显 + 仍可点开资料卡
+ * - human 节点经 `visibleChildren` 语义完全过滤（不变）
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useMemo } from "react"
 import type { RosterNode } from "../../../shared/contracts"
 import { vendorBadge } from "../chat"
 import { useStore } from "../store"
 import { aggregateUnread } from "../unread"
 import {
+  flattenTree,
   foldTree,
-  loadExpandedTree,
   roleTone,
-  saveExpandedTree,
   statusGlyph,
   statusLabel,
-  toggleTreeRow,
-  type StorageLike,
   type TreeRow,
 } from "../treeFold"
 
 export interface OrgTreeProps {
   readonly selectedId: string | null
   readonly onSelect: (nodeId: string) => void
-}
-
-function safeStorage(): StorageLike | null {
-  try {
-    return typeof localStorage === "undefined" ? null : localStorage
-  } catch {
-    return null // 隐私模式禁用存储：不持久化展开态
-  }
 }
 
 function NodeStatus({ node }: { readonly node: RosterNode }) {
@@ -78,116 +67,80 @@ function Badge({ count }: { readonly count: number }) {
   )
 }
 
-function NodeRow({
+function FlatNodeRow({
   row,
-  expandedIds,
   selectedId,
-  onToggle,
   onSelect,
 }: {
   readonly row: TreeRow
-  readonly expandedIds: readonly string[]
   readonly selectedId: string | null
-  readonly onToggle: (nodeId: string) => void
   readonly onSelect: (nodeId: string) => void
 }) {
-  const { node, summary, children, retired, logical } = row
-  const expanded = expandedIds.includes(node.id)
-  // 退役父节点仍可展开（F3：灰显保留但保留查看后代的能力）。
-  const expandable = children.length > 0
+  const { node, summary, retired, logical } = row
+  const isContainer = node.role_tag === "container"
   return (
     <li className="org-row" data-testid="org-row" data-node-id={node.id}>
-      <div className="org-head" data-expanded={expanded} data-retired={retired}>
-        {expandable ? (
-          <button
-            className="org-toggle"
-            data-testid="org-toggle"
-            aria-expanded={expanded}
-            aria-label={`${expanded ? "收起" : "展开"} ${node.name}`}
-            onClick={() => onToggle(node.id)}
-            type="button"
-          >
-            <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
-          </button>
-        ) : (
-          <span className="org-toggle is-placeholder" aria-hidden="true" />
-        )}
-        <button
-          className="org-node"
-          data-testid="org-node"
-          data-node-id={node.id}
-          data-kind={node.kind}
-          data-status={node.status}
-          data-retired={retired}
-          data-selected={node.id === selectedId}
-          aria-label={`查看 ${node.name} 资料卡`}
-          onClick={() => onSelect(node.id)}
-          type="button"
+      <button
+        className="org-node"
+        data-testid="org-node"
+        data-node-id={node.id}
+        data-kind={node.kind}
+        data-status={node.status}
+        data-retired={retired}
+        data-selected={node.id === selectedId}
+        data-container={isContainer || undefined}
+        aria-label={`查看 ${node.name} 资料卡`}
+        onClick={() => onSelect(node.id)}
+        type="button"
+      >
+        <span
+          className={`node-icon${logical ? " is-logical" : ""}`}
+          data-vendor={node.vendor}
+          aria-hidden="true"
         >
-          <span
-            className={`node-icon${logical ? " is-logical" : ""}`}
-            data-vendor={node.vendor}
-            aria-hidden="true"
-          >
-            {logical ? "◆" : vendorBadge(node.vendor)}
-          </span>
-          <span className="node-body">
-            <span className="node-name">{node.name}</span>
-            <span className="node-meta">
-              <NodeStatus node={node} />
-              <span className="vendor-badge">{node.vendor}</span>
-              <RoleTag tag={node.role_tag} />
-            </span>
-          </span>
-          <span className="org-meta">
-            {summary.count > 0 ? (
-              <span className="fold-summary" data-testid="org-summary">
-                {summary.text}
+          {logical ? "◆" : vendorBadge(node.vendor)}
+        </span>
+        <span className="node-body">
+          <span className="node-name">{node.name}</span>
+          <span className="node-meta">
+            <NodeStatus node={node} />
+            <span className="vendor-badge">{node.vendor}</span>
+            {isContainer ? (
+              <span
+                className="container-badge"
+                data-testid="container-badge"
+                title="分组容器，不是聊天对象"
+              >
+                容器
               </span>
             ) : null}
-            <Badge count={row.unread} />
+            <RoleTag tag={node.role_tag} />
           </span>
-        </button>
-      </div>
-      {expanded && children.length > 0 ? (
-        <ul className="org-children">
-          {children.map((child) => (
-            <NodeRow
-              key={child.node.id}
-              row={child}
-              expandedIds={expandedIds}
-              selectedId={selectedId}
-              onToggle={onToggle}
-              onSelect={onSelect}
-            />
-          ))}
-        </ul>
-      ) : null}
+          {row.parentName !== null ? (
+            <span className="org-source" data-testid="org-source" aria-hidden="true">
+              ↳ {row.parentName}
+            </span>
+          ) : null}
+        </span>
+        <span className="org-meta">
+          {summary.count > 0 ? (
+            <span className="fold-summary" data-testid="org-summary">
+              {summary.text}
+            </span>
+          ) : null}
+          <Badge count={row.unread} />
+        </span>
+      </button>
     </li>
   )
 }
 
 export function OrgTree({ selectedId, onSelect }: OrgTreeProps) {
   const { state } = useStore()
-  const [expanded, setExpanded] = useState<readonly string[]>(() => loadExpandedTree(safeStorage()))
   const rows = useMemo(
-    () => foldTree(state.roster, aggregateUnread(state.conversations, state.roster)),
+    () => flattenTree(foldTree(state.roster, aggregateUnread(state.conversations, state.roster))),
     [state.roster, state.conversations],
   )
-
-  // 展开态持久化移入 effect（F6）：updater 保持纯函数，StrictMode 双挂载仅幂等重写。
-  const toggle = useCallback((nodeId: string) => {
-    setExpanded((previous) => toggleTreeRow(previous, nodeId))
-  }, [])
-
-  // 值未变不重复持久化（StrictMode 双挂载同值幂等）。
-  const persistedRef = useRef("")
-  useEffect(() => {
-    const serialized = JSON.stringify(expanded)
-    if (persistedRef.current === serialized) return
-    persistedRef.current = serialized
-    saveExpandedTree(safeStorage(), expanded)
-  }, [expanded])
 
   if (rows.length === 0) {
     return (
@@ -202,14 +155,7 @@ export function OrgTree({ selectedId, onSelect }: OrgTreeProps) {
   return (
     <ul className="org-tree" data-testid="org-tree">
       {rows.map((row) => (
-        <NodeRow
-          key={row.node.id}
-          row={row}
-          expandedIds={expanded}
-          selectedId={selectedId}
-          onToggle={toggle}
-          onSelect={onSelect}
-        />
+        <FlatNodeRow key={row.node.id} row={row} selectedId={selectedId} onSelect={onSelect} />
       ))}
     </ul>
   )

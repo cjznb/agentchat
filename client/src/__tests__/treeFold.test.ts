@@ -7,6 +7,7 @@ import type { AgentStatus, RosterNode } from "../../../shared/contracts"
 import type { StorageLike } from "../accordion"
 import {
   EXPANDED_TREE_KEY,
+  flattenTree,
   foldTree,
   isHuman,
   loadExpandedTree,
@@ -101,6 +102,47 @@ describe("foldTree", () => {
   it("isHuman 按 vendor 判定", () => {
     expect(isHuman(node("h", { vendor: "human" }))).toBe(true)
     expect(isHuman(node("a"))).toBe(false)
+  })
+})
+
+describe("flattenTree（扁平 DFS 列表）", () => {
+  it("展平后父行在前、子行紧随，DFS 顺序", () => {
+    const flat = flattenTree(foldTree(roster))
+    expect(flat.map((row) => row.node.id)).toEqual([
+      "root1",
+      "child1",
+      "child2",
+      "child3",
+      "root2",
+      "child4",
+      "logi",
+    ])
+  })
+
+  it("每行携带 parentName（根为 null，非根为父节点名）", () => {
+    const flat = flattenTree(foldTree(roster))
+    const child1 = flat.find((row) => row.node.id === "child1")
+    expect(child1?.parentName).toBe("root1")
+    const root1 = flat.find((row) => row.node.id === "root1")
+    expect(root1?.parentName).toBe(null)
+    const logi = flat.find((row) => row.node.id === "logi")
+    expect(logi?.parentName).toBe(null)
+  })
+
+  it("human 过滤仍在（human 不出现在展平结果）", () => {
+    const flat = flattenTree(foldTree(roster))
+    expect(flat.some((row) => row.node.id === "human")).toBe(false)
+  })
+
+  it("展平行不携带 depth/缩进层级字段（UI 单层无缩进）", () => {
+    const flat = flattenTree(foldTree(roster))
+    for (const row of flat) {
+      expect(row).not.toHaveProperty("depth")
+      expect(row.node.id).toBeTypeOf("string")
+    }
+    // 来自父节点的标注可通过 parentName 推导 `↳ <父节点>`。
+    const child2 = flat.find((row) => row.node.id === "child2")
+    expect(child2?.parentName).toBe("root1")
   })
 })
 

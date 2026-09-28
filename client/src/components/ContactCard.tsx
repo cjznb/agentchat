@@ -5,6 +5,8 @@
  * - 操作：`发消息`（确保 human↔节点 DM 并打开）、`查看它的会话`（该节点参与会话的过滤视图）
  * - 会话来自 `GET /api/agents/:id`（`agentCard.conversations`），点条目经 `onOpenConversation` 打开
  * - 退役节点：`发消息` 禁用（不可开聊），仍可查看资料与会话
+ * - **容器节点**（`role_tag === "container"`）：隐藏 `发消息`，显示「容器」徽标与
+ *   「分组容器，不是聊天对象」说明；仅 `查看它的会话` 可用。
  */
 import { useCallback, useEffect, useState } from "react"
 import type { AgentCard, RosterNode } from "../../../shared/contracts"
@@ -73,6 +75,7 @@ export function ContactCard({
 
   const toggleConversations = useCallback(() => setShowConversations((value) => !value), [])
   const retired = node.status === "retired"
+  const isContainer = node.role_tag === "container"
   const role = roleTone(node.role_tag)
   const skills = node.skills
 
@@ -157,15 +160,24 @@ export function ContactCard({
       </section>
 
       <div className="contact-actions">
-        <button
-          className="contact-action is-primary"
-          data-testid="contact-message"
-          disabled={retired}
-          onClick={() => onMessage(node.id)}
-          type="button"
-        >
-          发消息
-        </button>
+        {isContainer ? (
+          <p className="contact-container-note" data-testid="contact-container-note">
+            <span className="container-badge" title="分组容器，不是聊天对象">
+              容器
+            </span>
+            这是分组容器，不能发起对话。
+          </p>
+        ) : (
+          <button
+            className="contact-action is-primary"
+            data-testid="contact-message"
+            disabled={retired}
+            onClick={() => onMessage(node.id)}
+            type="button"
+          >
+            发消息
+          </button>
+        )}
         <button
           className="contact-action"
           data-testid="contact-conversations"

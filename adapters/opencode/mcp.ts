@@ -28,6 +28,7 @@ export interface RegisterArgs {
   readonly model?: string
   readonly purpose?: string
   readonly skills?: readonly string[]
+  readonly role_tag?: string
 }
 
 export interface RegisterResult {

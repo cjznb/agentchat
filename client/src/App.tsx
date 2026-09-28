@@ -136,8 +136,14 @@ export function App() {
   }, [])
 
   // 资料卡「发消息」：确保 DM 后切到聊天视图；失败（含退役目标 409）显示错误且不切视图（F3③）。
+  // 容器节点（role_tag === "container"）不可 DM 作聊天对象（spec §11.2 Task 2）。
   const handleMessage = useCallback(
     (nodeId: string) => {
+      const target = findRosterNode(state.roster, nodeId)
+      if (target !== null && target.role_tag === "container") {
+        setContactActionError("这是分组容器，不能发起私聊。")
+        return
+      }
       setContactActionError(null)
       void openDm(nodeId)
         .then(() => {
@@ -146,7 +152,7 @@ export function App() {
         })
         .catch(() => setContactActionError("无法发起会话，对方可能已退役或连接失败。"))
     },
-    [openDm],
+    [openDm, state.roster],
   )
 
   // 资料卡「查看它的会话」条目：打开该会话并切到聊天视图。
