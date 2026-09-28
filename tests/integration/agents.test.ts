@@ -29,6 +29,7 @@ import { createApp } from "../../server/index"
 import { AgentNotFoundError, getAgent, touchAgent } from "../../server/store/agents"
 import { createDm } from "../../server/store/conversations"
 import { send } from "../../server/store/messages"
+import { currentWsSeq, resetWsHub } from "../../server/ws"
 
 let home = ""
 let db: Db
@@ -212,6 +213,92 @@ describe("rosterTree", () => {
     const rootNode = rosterTree(db).find((n) => n.id === root.id)
 
     expect(rootNode?.children.find((n) => n.id === child.id)?.status).toBe("retired")
+  })
+})
+
+// ── 重注册更新卡片字段（会话标题漂移等；Part 1）────────────────────
+
+describe("重注册更新卡片字段", () => {
+  it("join_token 认领时按已提供字段更新名字，未提供字段与身份字段保持不动", () => {
+    const first = registerRoot(db, home, {
+      name: "claim-old",
+      vendor: "opencode",
+      model: "m0",
+      purpose: "旧目的",
+      remark: "备注0",
+      roleTag: "标签0",
+      skills: ["go"],
+    }).joinToken
+    const claimed = registerRoot(db, home, {
+      joinToken: first,
+      name: "claim-new",
+      vendor: "claude-code", // 身份字段：不得改写
+      model: "m1",
+      purpose: "新目的",
+    }).agent
+
+    expect(claimed.name).toBe("claim-new")
+    expect(claimed.model).toBe("m1")
+    expect(claimed.purpose).toBe("新目的")
+    // 未提供 → 不动。
+    expect(claimed.remark).toBe("备注0")
+    expect(claimed.roleTag).toBe("标签0")
+    expect(claimed.skills).toEqual(["go"])
+    // 身份/结构字段不动。
+    expect(claimed.vendor).toBe("opencode")
+    expect(claimed.kind).toBe("runtime")
+    expect(claimed.status).toBe("online")
+    expect(claimed.parentId).toBeUndefined()
+  })
+
+  it("子 task_ref 幂等重注册时更新名字，parent/kind/vendor/status/未提供字段均不动", () => {
+    const parentOne = registerRoot(db, home, { name: "cp-root-1" }).agent
+    const parentTwo = registerRoot(db, home, { name: "cp-root-2" }).agent
+    const first = registerChild(db, {
+      taskRef: "cp-task",
+      parentId: parentOne.id,
+      name: "child-old",
+      vendor: "v0",
+      model: "m0",
+      remark: "r0",
+    })
+    const again = registerChild(db, {
+      taskRef: "cp-task",
+      parentId: parentTwo.id,
+      name: "child-new",
+      vendor: "v1",
+      purpose: "p1",
+    })
+
+    expect(again.id).toBe(first.id)
+    expect(again.name).toBe("child-new")
+    expect(again.purpose).toBe("p1")
+    // 未提供 → 不动；vendor（身份）→ 不动。
+    expect(again.model).toBe("m0")
+    expect(again.remark).toBe("r0")
+    expect(again.vendor).toBe("v0")
+    expect(again.kind).toBe("runtime")
+    expect(again.status).toBe("online")
+    // parent 不改写（既有幂等裁决）。
+    expect(again.parentId).toBe(parentOne.id)
+  })
+
+  it("重注册每次恰好发一次 agent 树事件", () => {
+    const res = registerRoot(db, home, { name: "emit-root" })
+    resetWsHub()
+    const before = currentWsSeq()
+    registerRoot(db, home, { joinToken: res.joinToken, name: "emit-root-renamed" })
+    expect(currentWsSeq()).toBe(before + 1)
+  })
+
+  it("重注册仍拒绝已退役节点（改名不绕过退役）", () => {
+    const res = registerRoot(db, home, { name: "retire-rename" })
+    retire(db, res.agent.id)
+    expect(() =>
+      registerRoot(db, home, { joinToken: res.joinToken, name: "retire-renamed" }),
+    ).toThrow(RegistrationError)
+    expect(getAgent(db, res.agent.id)?.name).toBe("retire-rename")
+    expect(getAgent(db, res.agent.id)?.status).toBe("retired")
   })
 })
 

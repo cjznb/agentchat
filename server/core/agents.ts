@@ -27,7 +27,9 @@ import {
   listAgents,
   touchAgent,
   unreadCounts,
+  updateAgentCard,
   type Agent,
+  type AgentCardPatch,
   type InsertAgentInput,
 } from "../store/agents"
 import { makeJobsDue } from "../store/wake"
@@ -119,6 +121,21 @@ function cardToInsert(
   }
 }
 
+/**
+ * 卡片字段白名单投影：只带**已提供**（非 `undefined`）的项，供重注册更新既有节点。
+ * `vendor`/`kind`/`parentId`/`taskRef`/`status` 等身份结构字段**永不在内**（不因重注册改写）。
+ */
+function cardPatch(input: CardInput): AgentCardPatch {
+  return {
+    name: input.name,
+    ...(input.model === undefined ? {} : { model: input.model }),
+    ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
+    ...(input.skills === undefined ? {} : { skills: input.skills }),
+    ...(input.roleTag === undefined ? {} : { roleTag: input.roleTag }),
+    ...(input.remark === undefined ? {} : { remark: input.remark }),
+  }
+}
+
 function joinTokenHash(joinToken: string): string {
   return createHash("sha256").update(joinToken).digest("hex")
 }
@@ -140,7 +157,7 @@ function assertParentExists(db: Db, parentId: string): void {
 /**
  * 注册/认领 runtime 根（spec §5.2）：
  * - 无 `joinToken`：新建根，生成 join_token（哈希入 `agent_keys`，明文入 token 文件）
- * - 有 `joinToken`：认领同一根（同 id），非退役则激活 online；退役拒绝
+ * - 有 `joinToken`：认领同一根（同 id），非退役则激活 online 并按已提供卡片字段更新；退役拒绝
  */
 export function registerRoot(
   db: Db,
@@ -158,7 +175,9 @@ export function registerRoot(
     if (existing.status === "retired") {
       throw new RegistrationError("retired", `agent ${existing.id} retired, claim rejected`)
     }
-    const agent = touchAgent(db, existing.id, "online")
+    touchAgent(db, existing.id, "online")
+    // 重认领可更新卡片字段（名字随会话标题漂移等）；身份/结构字段不动（cardPatch 白名单）。
+    const agent = updateAgentCard(db, existing.id, cardPatch(input))
     // 重连补投（spec §7）：pending 积压（含 pending(offline)）立即到期，由 dispatcher 补投。
     makeJobsDue(db, { agentId: agent.id, now: Date.now() })
     emitAgentTree(db)
@@ -179,7 +198,8 @@ export function registerRoot(
 
 /**
  * 注册 runtime 子节点（spec §5.2：`task_ref` 幂等键）：
- * 重复注册返回原节点（`parent_id` 不改写）并激活 online；退役节点拒绝复活。
+ * 重复注册返回原节点（`parent_id` 不改写）、激活 online，并按**已提供**卡片字段更新名字等；
+ * 退役节点拒绝复活。
  */
 export function registerChild(db: Db, input: RegisterChildInput): Agent {
   const existing = getAgentByTaskRef(db, input.taskRef)
@@ -187,7 +207,9 @@ export function registerChild(db: Db, input: RegisterChildInput): Agent {
     if (existing.status === "retired") {
       throw new RegistrationError("retired", `agent ${existing.id} retired, register rejected`)
     }
-    const reactivated = touchAgent(db, existing.id, "online")
+    touchAgent(db, existing.id, "online")
+    // 幂等重注册可更新卡片字段（名字随会话标题漂移）；parent/kind/vendor/status 不动。
+    const reactivated = updateAgentCard(db, existing.id, cardPatch(input))
     emitAgentTree(db)
     return reactivated
   }

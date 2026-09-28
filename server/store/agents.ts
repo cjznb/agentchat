@@ -164,6 +164,66 @@ export function insertAgent(db: Db, input: InsertAgentInput): Agent {
   }
 }
 
+/**
+ * 重注册（认领/task_ref 幂等）可更新的卡片字段（spec §5.1）。
+ *
+ * **白名单仅卡片字段**：`kind`/`parent_id`/`root_id`/`task_ref`/`status`/`vendor`
+ * 等身份与结构字段永不在此；`undefined` = 不改动（只写已提供项）。
+ */
+export interface AgentCardPatch {
+  readonly name?: string
+  readonly model?: string
+  readonly purpose?: string
+  readonly skills?: readonly string[]
+  readonly roleTag?: string
+  readonly remark?: string
+}
+
+/**
+ * 更新节点卡字段（重注册路径）：只写 `patch` 中**已提供**（非 `undefined`）的项，
+ * 其余字段与库中原值一律不动。`skills` 序列化为 JSON；行不存在抛 `AgentNotFoundError`。
+ */
+export function updateAgentCard(db: Db, id: string, patch: AgentCardPatch): Agent {
+  const assignments: string[] = []
+  const params: Record<string, string | null> = { id }
+  if (patch.name !== undefined) {
+    assignments.push("name = $name")
+    params["name"] = patch.name
+  }
+  if (patch.model !== undefined) {
+    assignments.push("model = $model")
+    params["model"] = patch.model
+  }
+  if (patch.purpose !== undefined) {
+    assignments.push("purpose = $purpose")
+    params["purpose"] = patch.purpose
+  }
+  if (patch.skills !== undefined) {
+    assignments.push("skills = $skills")
+    params["skills"] = JSON.stringify(patch.skills)
+  }
+  if (patch.roleTag !== undefined) {
+    assignments.push("role_tag = $roleTag")
+    params["roleTag"] = patch.roleTag
+  }
+  if (patch.remark !== undefined) {
+    assignments.push("remark = $remark")
+    params["remark"] = patch.remark
+  }
+  if (assignments.length === 0) {
+    const current = getAgent(db, id)
+    if (current === undefined) throw new AgentNotFoundError(id)
+    return current
+  }
+  const row = db
+    .prepare<Record<string, string | null>, AgentRow>(
+      `UPDATE agents SET ${assignments.join(", ")} WHERE id = $id RETURNING *`,
+    )
+    .get(params)
+  if (row === undefined) throw new AgentNotFoundError(id)
+  return toAgent(row)
+}
+
 export function getAgent(db: Db, id: string): Agent | undefined {
   const row = db.prepare<[string], AgentRow>("SELECT * FROM agents WHERE id = ?").get(id)
   return row === undefined ? undefined : toAgent(row)
