@@ -8,25 +8,27 @@
  * - `session.status`（回合始/末）→ `POST /internal/state {busy|idle}`
  * - `session.idle` → `POST /internal/wake` → 经 `client.session.promptAsync` 逐条注入
  *   → `POST /internal/result {items:[{messageId, result:"delivered"|"refused"}]}`
+ * - idle 期间**周期轮询**（默认 10s，`AGENTCHAT_POLL_MS` 覆盖）：消息在「已经 idle 之后」
+ *   到达时无事件可依，靠轮询补拉；走与 `session.idle` **同一**路径，`messageId` 有界去重防重复注入；
+ *   转 busy 即停、`dispose` 清理（见 `poll.ts`）。
  * - `session.deleted`（根）/ `dispose` → `POST /internal/state {offline}`
  *
  * 所有事件处理入队即返回（fire-and-forget，串行保序），网络重试在后台推进，
  * 不阻塞宿主事件循环。详见 README.md。
  */
+import { createIdleFlush, describe } from "./flush"
 import {
   createHubClient,
-  HubError,
   HubToolError,
   type AdapterState,
   type Hub,
   type RegisterArgs,
   type RegisterResult,
-  type ResultItem,
-  type WakeMessage,
 } from "./hub"
+import { IdlePoller, parsePollMs } from "./poll"
 import { agentIdPath, clearToken, readToken, resolveHome, tokenPath, writeToken } from "./token"
 import type { Hooks, OpencodeEvent, OpencodeSession, Plugin, PluginInput } from "./types"
-import { createBoundedSet, createTaskQueue, formatInjection, type BoundedSet, type TaskQueue } from "./util"
+import { createBoundedSet, createTaskQueue, type BoundedSet, type TaskQueue } from "./util"
 
 export const ADAPTER_VENDOR = "opencode"
 
@@ -61,6 +63,8 @@ interface RuntimeState {
   readonly lastState: Map<string, AdapterState>
   /** 已成功注入的 messageId 去重集合（有界 FIFO）：Hub 的在途租约重投不重复注入。 */
   readonly seenMessages: BoundedSet
+  /** 各 idle 会话的空闲轮询器（消息在「已经 idle 之后」到达时无事件可依，靠它补拉）。 */
+  readonly pollers: Map<string, IdlePoller>
 }
 
 function createRuntime(
@@ -78,11 +82,13 @@ function createRuntime(
   })
   const path = tokenPath(resolveHome(deps.env))
   const idPath = agentIdPath(resolveHome(deps.env))
+  const pollMs = parsePollMs(deps.env["AGENTCHAT_POLL_MS"])
   const state: RuntimeState = {
     agentId: undefined,
     sessionToAgent: new Map(),
     lastState: new Map(),
     seenMessages: createBoundedSet(256),
+    pollers: new Map(),
   }
 
   /** 上报状态并去重同态（同态即心跳，重复信号无需再发）；失败不记账以便下次重试。 */
@@ -94,6 +100,41 @@ function createRuntime(
     } catch (error) {
       log(`state ${next} failed: ${describe(error)}`)
     }
+  }
+
+  /**
+   * idle 心跳：**每次**都上报（同态上报在 Hub 侧即 `touchAgent`），刷新 `last_seen`，
+   * 修复「长时间空闲被判 offline」；与 `reportState` 的同态去重刻意不同（心跳需要周期性发出）。
+   */
+  const heartbeatIdle = async (agentId: string): Promise<void> => {
+    try {
+      await hub.reportState(agentId, "idle")
+      state.lastState.set(agentId, "idle")
+    } catch (error) {
+      log(`idle heartbeat failed: ${describe(error)}`)
+    }
+  }
+
+  /** 与 `session.idle` 事件完全同一路径的拉取闭环（供事件与空闲轮询共用）。 */
+  const flush = createIdleFlush({
+    hub,
+    client: input.client,
+    seen: state.seenMessages,
+    heartbeat: heartbeatIdle,
+    log,
+  })
+
+  const stopPolling = (sessionID: string): void => {
+    state.pollers.get(sessionID)?.stop()
+    state.pollers.delete(sessionID)
+  }
+
+  /** 会话进入 idle 时启动（幂等）；每轮走与 idle 事件同一的 `flush` 拉取路径。 */
+  const ensurePolling = (sessionID: string, agentId: string): void => {
+    if (state.pollers.has(sessionID)) return
+    const poller = new IdlePoller({ intervalMs: pollMs, run: () => flush(sessionID, agentId) })
+    state.pollers.set(sessionID, poller)
+    poller.start()
   }
 
   const registerArgs = (joinToken: string | undefined): RegisterArgs => ({
@@ -184,7 +225,10 @@ function createRuntime(
       log(`status for unmapped session ${sessionID}; skipped`)
       return
     }
-    await reportState(agentId, status === "idle" ? "idle" : "busy")
+    const next = status === "idle" ? "idle" : "busy"
+    await reportState(agentId, next)
+    if (next === "idle") ensurePolling(sessionID, agentId)
+    else stopPolling(sessionID)
   }
 
   const onIdle = async (sessionID: string): Promise<void> => {
@@ -195,43 +239,14 @@ function createRuntime(
       return
     }
     // 回合末兜底：即使宿主只发 `session.idle`（未发 `session.status`），也保证报 idle。
-    await reportState(agentId, "idle")
-    let messages: readonly WakeMessage[]
-    try {
-      messages = (await hub.wake(agentId)).messages
-    } catch (error) {
-      log(`wake failed: ${describe(error)}`)
-      return
-    }
-    if (messages.length === 0) return
-    const items: ResultItem[] = []
-    for (const message of messages) {
-      if (state.seenMessages.has(message.id)) {
-        // 租约重投的重复消息：已注入过，绝不重复注入，仅补回执（幂等）。
-        items.push({ messageId: message.id, result: "delivered" })
-        continue
-      }
-      try {
-        await input.client.session.promptAsync({
-          path: { id: sessionID },
-          body: { parts: [{ type: "text", text: formatInjection(message) }] },
-        })
-        state.seenMessages.add(message.id)
-        items.push({ messageId: message.id, result: "delivered" })
-      } catch (error) {
-        log(`inject failed for ${message.id}: ${describe(error)}`)
-        items.push({ messageId: message.id, result: "refused" })
-      }
-    }
-    try {
-      await hub.reportResult(agentId, items)
-    } catch (error) {
-      log(`result report failed: ${describe(error)}`)
-    }
+    await flush(sessionID, agentId)
+    // 已 idle：启动空闲轮询，补拉「本轮 idle 之后」才到达的消息（无新事件可依）。
+    ensurePolling(sessionID, agentId)
   }
 
   const onDeleted = async (session: OpencodeSession): Promise<void> => {
     const agentId = state.sessionToAgent.get(session.id)
+    stopPolling(session.id)
     state.sessionToAgent.delete(session.id)
     if (agentId === undefined) return
     if (session.parentID === undefined) {
@@ -273,16 +288,12 @@ function createRuntime(
       queue.push(() => dispatch(event))
     },
     dispose: async () => {
+      for (const poller of state.pollers.values()) poller.stop()
+      state.pollers.clear()
       await queue.flush()
       if (state.agentId !== undefined) await reportState(state.agentId, "offline")
     },
   }
-}
-
-function describe(error: unknown): string {
-  if (error instanceof HubError) return `${error.kind}: ${error.message}`
-  if (error instanceof Error) return error.message
-  return String(error)
 }
 
 /** 宿主加载的插件导出（env 取 `process.env`，fetch 取全局 `fetch`）。 */

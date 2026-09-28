@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createPluginHandle, type PluginDeps, type PluginHandle } from "../plugin"
 import type { Hooks, OpencodeClient, OpencodeEvent, PluginInput } from "../types"
 import { isRecord } from "../util"
@@ -637,5 +637,107 @@ describe("子节点退役", () => {
     })
     await emit(harness, rootCreated(), childCreated("child-1", "root-sess"), childDeleted)
     expect(harness.logs.some((line) => line.includes("retire failed"))).toBe(true)
+  })
+})
+
+// ── 空闲轮询（缺陷 A：消息在「已经 idle 之后」到达）──────────────────
+
+describe("空闲轮询（idle 期间周期补拉）", () => {
+  afterEach(() => vi.useRealTimers())
+
+  function wakeCalls(kit: FetchKit): number {
+    return kit.internalCalls.filter((call) => call.path === "/internal/wake").length
+  }
+
+  it("polls while idle with no new event, injects the backlog, and reports delivered", async () => {
+    vi.useFakeTimers()
+    const home = tempHome()
+    let calls = 0
+    const harness = setup({
+      home,
+      overrides: {
+        internal: (path) => {
+          if (path !== "/internal/wake") return undefined
+          calls += 1
+          const messages =
+            calls === 1
+              ? []
+              : [{ id: "p1", fromAgentId: "peer", conversationId: "c1", body: "later" }]
+          return jsonResponse({ messages })
+        },
+      },
+    })
+    await emit(harness, rootCreated(), sessionIdle("root-sess"))
+    expect(harness.client.texts).toHaveLength(0)
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(harness.client.texts).toHaveLength(1)
+    expect(harness.client.texts[0]).toContain("later")
+    expect(resultItems(harness.kit)).toEqual([{ messageId: "p1", result: "delivered" }])
+    // 每次轮询都上报 idle（同态上报即心跳触碰，修复长时间空闲被判 offline）。
+    const idles = stateCalls(harness.kit).filter(
+      (body) => isRecord(body) && body["state"] === "idle",
+    )
+    expect(idles.length).toBeGreaterThanOrEqual(2)
+
+    await (await harness.hooks).dispose?.()
+  })
+
+  it("stops polling once the session turns busy", async () => {
+    vi.useFakeTimers()
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(harness, rootCreated(), sessionIdle("root-sess"))
+    const afterIdle = wakeCalls(harness.kit)
+
+    await emit(harness, sessionStatus("root-sess", "busy"))
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(wakeCalls(harness.kit)).toBe(afterIdle)
+    await (await harness.hooks).dispose?.()
+  })
+
+  it("clears the poll timer on dispose", async () => {
+    vi.useFakeTimers()
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(harness, rootCreated(), sessionIdle("root-sess"))
+    const afterIdle = wakeCalls(harness.kit)
+
+    await (await harness.hooks).dispose?.()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(wakeCalls(harness.kit)).toBe(afterIdle)
+  })
+
+  it("does not re-inject ids redelivered by a lease while polling", async () => {
+    vi.useFakeTimers()
+    const home = tempHome()
+    const redelivered = [
+      { id: "m1", fromAgentId: "peer", conversationId: "c1", body: "hello" },
+      { id: "m2", fromAgentId: "peer", conversationId: "c1", body: "world" },
+    ]
+    const harness = setup({
+      home,
+      overrides: {
+        internal: (path) =>
+          path === "/internal/wake" ? jsonResponse({ messages: redelivered }) : undefined,
+      },
+    })
+    await emit(harness, rootCreated(), sessionIdle("root-sess"))
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(harness.client.texts).toHaveLength(2) // 只注入一次
+    const results = harness.kit.internalCalls.filter((call) => call.path === "/internal/result")
+    expect(results.length).toBeGreaterThanOrEqual(2) // 每轮补回执（幂等）
+    await (await harness.hooks).dispose?.()
+  })
+
+  it("skips polling for unmapped sessions", async () => {
+    vi.useFakeTimers()
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(harness, rootCreated(), sessionIdle("ghost-sess"))
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(wakeCalls(harness.kit)).toBe(0)
+    expect(harness.logs.some((line) => line.includes("unmapped session"))).toBe(true)
+    await (await harness.hooks).dispose?.()
   })
 })
