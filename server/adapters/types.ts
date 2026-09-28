@@ -47,6 +47,20 @@ export function adapterFor(vendor: string): VendorAdapter | undefined {
 }
 
 /**
+ * 已注册的 **pull** 厂商 id（只读快照）。
+ * dispatcher 用它把 pull job 从「可派发」查询窗口排除：pull 分支只会 `continue`（不认领/不 defer），
+ * 若留在窗口内会长期占据 `LIMIT` 头部、饿死更高 id 的其它厂商 job（Plan 5 跟进 round 2）。
+ * 不影响 `VendorAdapter` 契约。
+ */
+export function pullAdapterIds(): readonly string[] {
+  const ids: string[] = []
+  for (const [id, adapter] of registry) {
+    if (adapter.mode === "pull") ids.push(id)
+  }
+  return ids
+}
+
+/**
  * 进程外 pull 占位适配器：仅表达“该厂商适配器可用，消息由适配器自行拉取”。
  * dispatcher 见 `mode === "pull"` 即跳过注入，故 `inject` 永不被调用；
  * 兜底返回 `"refused"`（若被误调也绝不挂起）。

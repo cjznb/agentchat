@@ -13,7 +13,7 @@
  */
 import { mkdirSync, readdirSync, rmSync, statSync } from "node:fs"
 import { basename, join } from "node:path"
-import { adapterFor } from "../adapters/types"
+import { adapterFor, pullAdapterIds } from "../adapters/types"
 import type { Db } from "../db"
 import { getAgent } from "../store/agents"
 import { getBySeq, send } from "../store/messages"
@@ -23,6 +23,7 @@ import {
   BUSY_TTL_MS,
   claimFailedNotice,
   claimWakeJob,
+  DUE_JOBS_PER_TICK,
   dueWakeJobs,
   NOTICE_WINDOW_MS,
   REFUSAL_LIMIT,
@@ -257,7 +258,9 @@ export class Dispatcher {
   }
 
   private async dispatchDue(now: number): Promise<void> {
-    for (const job of dueWakeJobs(this.db, now)) {
+    // 排除 pull 厂商：其 job 由 `/internal/wake` 认领，留在窗口内只会占满 LIMIT 且不推进 retry_at
+    // （饿死其它厂商）。`mode === "pull"` 守卫仍保留作纵深防御。
+    for (const job of dueWakeJobs(this.db, now, DUE_JOBS_PER_TICK, pullAdapterIds())) {
       if (job.recipientStatus === "busy" || job.recipientStatus === "offline") {
         deferWakeJob(this.db, { id: job.id, now, reason: job.recipientStatus })
         continue

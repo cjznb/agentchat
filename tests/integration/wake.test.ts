@@ -19,7 +19,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { FakeAdapter } from "../../server/adapters/fake"
-import { clearAdapters, registerAdapter } from "../../server/adapters/types"
+import {
+  clearAdapters,
+  pullAdapter,
+  pullAdapterIds,
+  registerAdapter,
+} from "../../server/adapters/types"
 import { loadConfig } from "../../server/config"
 import { openDb, type Db } from "../../server/db"
 import { registerRoot, retire } from "../../server/core/agents"
@@ -492,6 +497,66 @@ describe("dueWakeJobs per-tick limit (Plan 5 跟进)", () => {
     }
     expect(handled).toHaveLength(5)
     expect(handled).toEqual([...handled].sort((a, b) => a - b))
+  })
+})
+
+describe("dueWakeJobs 排除 pull 厂商（防饿死，Plan 5 跟进 round 2）", () => {
+  it("excludes pull vendors from the dispatcher set, keeping them claimable via /internal/wake", async () => {
+    clearAdapters()
+    registerAdapter(pullAdapter("opencode"))
+    const sender = makeAgent("pullx-sender")
+    const peer = makeAgent("pullx-peer") // vendor opencode（pull）
+    const { message } = sendMessage(db, { from: sender.id, to: peer.id, body: "pull 排他" })
+    const now = Date.now() + 10_000
+
+    expect(pullAdapterIds()).toEqual(["opencode"])
+    expect(dueWakeJobs(db, now, DUE_JOBS_PER_TICK, pullAdapterIds())).toEqual([])
+    // 查询本身仍能取到（排除是 dispatcher 调用处的显式选择，不是数据缺失）。
+    expect(dueWakeJobs(db, now).map((job) => job.messageId)).toContain(message.seq)
+
+    // pull job 仍可经 /internal/wake 认领投递（拉取路径不受影响）。
+    const res = await post("/internal/wake", { agentId: peer.id })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({
+      messages: [expect.objectContaining({ id: message.id })],
+    })
+    expect(expectJob(message.seq, peer.id).state).toBe("sending")
+  })
+
+  it("does not starve other vendors behind >LIMIT pull jobs (regression lock)", async () => {
+    clearAdapters()
+    registerAdapter(pullAdapter("opencode"))
+    const injected: string[] = []
+    registerAdapter({
+      id: "claude-code",
+      start: () => {},
+      reportState: () => {},
+      inject: async (_nodeId, msgs) => {
+        for (const message of msgs) injected.push(message.body)
+        return "delivered"
+      },
+    })
+    const sender = makeAgent("starve-sender")
+    const pullPeer = makeAgent("starve-pull") // opencode（pull，低 id）
+    for (let i = 0; i <= DUE_JOBS_PER_TICK; i += 1) {
+      sendMessage(db, { from: sender.id, to: pullPeer.id, body: `pull-${i}` })
+    }
+    const pushPeer = insertAgent(db, {
+      name: "starve-push",
+      kind: "runtime",
+      status: "online",
+      vendor: "claude-code",
+    })
+    const pushed = sendMessage(db, { from: sender.id, to: pushPeer.id, body: "push-1" }).message
+
+    const now = Date.now() + 10_000
+    const dispatchable = dueWakeJobs(db, now, DUE_JOBS_PER_TICK, pullAdapterIds())
+    expect(dispatchable.map((job) => job.recipientVendor)).toEqual(["claude-code"])
+
+    // 修复前：LIMIT 200 全被低 id 的 pull job 占满 → 高 id 的 claude-code job 永不被读到/投递。
+    await dispatcher.tick(now)
+    expect(injected).toEqual(["push-1"])
+    expect(expectJob(pushed.seq, pushPeer.id).state).toBe("accepted")
   })
 })
 

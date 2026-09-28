@@ -187,21 +187,29 @@ export interface DueWakeJob extends WakeJob {
 /**
  * 到期 `pending` job（含收件方状态/vendor，供 dispatcher 分流认领/退避）。
  * `ORDER BY id` + `LIMIT`（缺省 `DUE_JOBS_PER_TICK`）：老的先处理，其余下 tick 继续。
+ * `excludeVendors`（dispatcher 传 `pullAdapterIds()`）：pull job 由 `/internal/wake` 认领，
+ * 不进入本查询窗口——否则其不推进 `retry_at`、长期占据 `LIMIT` 头部，会饿死更高 id 的其它厂商
+ * job。空数组/未传时 SQL 不变（行为与之前一致）。
  */
 export function dueWakeJobs(
   db: Db,
   now: number,
   limit: number = DUE_JOBS_PER_TICK,
+  excludeVendors: readonly string[] = [],
 ): DueWakeJob[] {
+  const exclusion =
+    excludeVendors.length === 0
+      ? ""
+      : ` AND a.vendor NOT IN (${excludeVendors.map(() => "?").join(", ")})`
   const rows = db
-    .prepare<[number, number], WakeJobRow & { status: string; vendor: string }>(
+    .prepare<unknown[], WakeJobRow & { status: string; vendor: string }>(
       `SELECT j.*, a.status AS status, a.vendor AS vendor
          FROM wake_jobs j JOIN agents a ON a.id = j.agent_id
-        WHERE j.state = 'pending' AND j.retry_at <= ?
+        WHERE j.state = 'pending' AND j.retry_at <= ?${exclusion}
         ORDER BY j.id
         LIMIT ?`,
     )
-    .all(now, limit)
+    .all(now, ...excludeVendors, limit)
   return rows.map((row) => ({
     ...toWakeJob(row),
     recipientStatus: agentStatusSchema.parse(row.status),
