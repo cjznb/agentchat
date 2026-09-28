@@ -17,11 +17,23 @@ import { unwrapResult } from "./sdk-result"
 import type { OpencodeClient } from "./types"
 import { formatInjection, type BoundedSet } from "./util"
 
+/** 日志中 JSON 化上游错误体的最大长度（超出即截断，避免刷屏/泄漏大 payload）。 */
+const DESCRIBE_MAX = 200
+
 /** 上游错误的审计字符串（`HubError`/`HubToolError` 带 `kind`/`code`）。 */
 export function describe(error: unknown): string {
   if (error instanceof HubError) return `${error.kind}: ${error.message}`
   if (error instanceof HubToolError) return `${error.code}: ${error.message}`
   if (error instanceof Error) return error.message
+  // 实测：SDK 失败包装的 `error` 是**已解析的普通对象**（如 `{error:"not found"}`），
+  // 旧代码 `String(error)` 会得到 `[object Object]`；此处 JSON 化并截断以便审计。
+  if (typeof error === "string") return error
+  try {
+    const json = JSON.stringify(error)
+    if (json !== undefined) return json.length > DESCRIBE_MAX ? json.slice(0, DESCRIBE_MAX) : json
+  } catch {
+    // 循环引用 / BigInt 等不可序列化 → 回退 String。
+  }
   return String(error)
 }
 

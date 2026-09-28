@@ -109,26 +109,39 @@ function buildFetch(overrides: FetchOverrides = {}): FetchKit {
 class RecordingClient {
   readonly texts: string[] = []
   failInjections = 0
+  /** 注入失败时抛/包的错误体；未设置则用 `new Error("inject boom")`。可设为普通对象模拟实测失败体。 */
+  injectionError: unknown
   /** A/B 收养用：`sessionID → Session`（预置未映射会话）。 */
   readonly sessions = new Map<string, OpencodeSession>()
   /** `session.list` 返回体（默认空）。 */
   listResult: readonly OpencodeSession[] = []
   /** 非空则 `session.list` 返回该原始值（模拟非数组形状）。 */
   listRaw: unknown
-  /** 非空则 `session.get` 报错（模拟 404/不可用）：`bare` 抛错，`fields` 返回包装 `error`。 */
-  getError: Error | undefined
+  /**
+   * 非空则 `session.get` 报错（模拟 404/不可用）：`bare` 抛错，`fields` 返回包装 `error`。
+   * 类型放宽为 `unknown` 以覆盖**实测的真实失败体**（普通对象，非 `Error`）。
+   */
+  getError: unknown
   /** 非空则 `session.list` 报错（模拟老宿主）：`bare` 抛错，`fields` 返回包装 `error`。 */
-  listError: Error | undefined
+  listError: unknown
   /**
    * 返回形状：`"bare"` = 裸值/抛错（旧行为，默认）；`"fields"` = SDK 包装
-   * `{ data, error, request, response }`（宿主 `responseStyle!=="data"` / 不抛错时）。
+   * （宿主 `responseStyle!=="data"` / 不抛错时）。
    */
   shape: "bare" | "fields" = "bare"
   readonly getCalls: string[] = []
   readonly listCalls: Array<{ readonly query?: SessionListQuery } | undefined> = []
-  /** 把结果包成 SDK `fields` 形状。 */
+  /**
+   * 把结果包成 SDK `fields` 形状，**严格按实测键集**：
+   * - 成功（`error === undefined`）→ `{ data, request, response }`，**无 `error` 键**；
+   * - 失败（`error !== undefined`）→ `{ error, request, response }`，**无 `data` 键**。
+   *
+   * 旧 mock 恒含 `data` 键，与真实失败形状不符，导致「失败包装无 `data`」这一根因
+   * 从未被测试覆盖（修复前本用例集仍全绿）。
+   */
   private fields(data: unknown, error: unknown): unknown {
-    return { data, error, request: {}, response: {} }
+    if (error !== undefined) return { error, request: {}, response: {} }
+    return { data, request: {}, response: {} }
   }
   readonly client: OpencodeClient = {
     session: {
@@ -136,7 +149,7 @@ class RecordingClient {
         this.texts.push(input.body.parts[0]?.text ?? "")
         if (this.failInjections > 0) {
           this.failInjections -= 1
-          const error = new Error("inject boom")
+          const error = this.injectionError === undefined ? new Error("inject boom") : this.injectionError
           if (this.shape === "fields") return this.fields(undefined, error)
           throw error
         }
@@ -676,6 +689,10 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
 })
 
 // ── SDK 返回形状容错（fields 包装 / bare 裸值）──────────────────────
+//
+// mock 严格复刻 `@opencode-ai/sdk@1.18.32` 实测键集：成功包装 `{data,request,response}`（无 `error`）、
+// 失败包装 `{error,request,response}`（**无 `data`**）。后者是缺陷根因——旧判定以 `data` 存在为包装前提，
+// 会把失败包装误判为「裸值成功」。
 
 describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
   const wakeOne = {
@@ -702,6 +719,21 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
     expect(harness.kit.toolCalls).toHaveLength(1) // 仅 rootCreated 的根注册；ghost 未被误判为根
     expect(harness.logs.some((line) => line.includes("session lookup failed for ghost-sess"))).toBe(true)
     expect(harness.logs.filter((line) => line.includes("unmapped session"))).toHaveLength(2)
+    expect(harness.kit.internalCalls.some((call) => call.path === "/internal/wake")).toBe(false)
+  })
+
+  it("fields/get + 普通对象 error（真实失败体，无 data）：无既有根时绝不注册根", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.shape = "fields"
+    harness.client.getError = { error: "not found" } // 实测：错误体为普通对象，非 Error
+    await emit(harness, sessionStatus("ghost-sess", "busy"), sessionIdle("ghost-sess"))
+    // 无既有根：若把失败包装误判为裸值 Session，会走 adoptRoot → 触发根注册（toolCalls 增加）。
+    expect(harness.kit.toolCalls).toEqual([])
+    expect(harness.client.getCalls).toEqual(["ghost-sess", "ghost-sess"])
+    expect(harness.logs.filter((line) => line.includes("session lookup failed for ghost-sess"))).toHaveLength(2)
+    expect(harness.logs.some((line) => line.includes('{"error":"not found"}'))).toBe(true)
+    expect(harness.logs.every((line) => !line.includes("[object Object]"))).toBe(true)
     expect(harness.kit.internalCalls.some((call) => call.path === "/internal/wake")).toBe(false)
   })
 
@@ -839,6 +871,8 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
       { messageId: "m1", result: "refused" },
       { messageId: "m2", result: "delivered" },
     ])
+    // 失败者绝不报 delivered、绝不写 seen。
+    expect(reportItems()[0]).not.toContainEqual({ messageId: "m1", result: "delivered" })
     expect(harness.logs.some((line) => line.includes("inject failed for m1"))).toBe(true)
     // m1 未写入 seen → 第二次 idle 会重新注入 m1（m2 已在 seen，不重复注入）。
     await emit(harness, sessionIdle("root-sess"))
@@ -848,6 +882,18 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
       { messageId: "m1", result: "delivered" },
       { messageId: "m2", result: "delivered" },
     ])
+  })
+
+  it("fields/promptAsync + 普通对象 error：refused，日志为 JSON 而非 [object Object]", async () => {
+    const home = tempHome()
+    const harness = setup({ home, overrides: wakeOne })
+    harness.client.shape = "fields"
+    harness.client.failInjections = 1
+    harness.client.injectionError = { error: "rejected" } // 实测真实失败体
+    await emit(harness, rootCreated(), sessionIdle("root-sess"))
+    expect(resultItems(harness.kit)).toEqual([{ messageId: "m1", result: "refused" }])
+    expect(harness.logs.some((line) => line.includes('{"error":"rejected"}'))).toBe(true)
+    expect(harness.logs.every((line) => !line.includes("[object Object]"))).toBe(true)
   })
 
   it("fields/promptAsync + data：204 语义，视为 delivered", async () => {
