@@ -22,3 +22,6 @@ artifacts/
 # BEGIN oh-my-opencode-slim clonedeps
 .slim/clonedeps/repos/
 # END oh-my-opencode-slim clonedeps
+
+# AI 规划/规格内部文档（plans/specs）：本地保留，永不入库
+docs/superpowers/
