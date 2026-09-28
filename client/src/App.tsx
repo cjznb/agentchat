@@ -34,6 +34,7 @@ const connectionLabel = {
   connected: "已连接",
   reconnecting: "重连中",
   resync: "同步中",
+  retrying: "后台重试中",
   error: "连接失败",
 } as const satisfies Record<ConnectionStatus, string>
 
@@ -100,9 +101,10 @@ export function App() {
   const notificationBadge = unreadCount(state.notifications)
   // 首屏/重连期间数据未就绪：空态面板显示加载态（真实可达路径，替代 T2 不可达骨架）。
   const initialSync = state.connection !== "connected"
-  // 错误态真实可达：REST 重拉失败（`loadError`）或 WS 重连超限（`connection === "error"`）。
+  // 错误态真实可达：REST 重拉失败（`loadError`）或连接失败/后台重试（`retrying`，缺陷 B——不再永久无提示）。
+  const disconnected = state.connection === "error" || state.connection === "retrying"
   const contentState: ContentState =
-    state.loadError || state.connection === "error" ? "error" : initialSync ? "loading" : "empty"
+    state.loadError || disconnected ? "error" : initialSync ? "loading" : "empty"
 
   // 深链入口（spec §11.5）：挂载时带 `?conversation=` 则自动承载该会话（消息由其内部重拉）。
   useEffect(() => {

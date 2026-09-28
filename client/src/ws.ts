@@ -17,9 +17,16 @@ import {
 
 /**
  * 连接状态（store 的 `connection` 字段直接复用）。
- * `error` = 重连次数超限后的终态（真实错误信号，驱动 UI 错误态与重试）。
+ * `retrying` = 重连次数超限后转入**慢速后台重试**（不再永久停止；UI 据此提示正在重试）。
+ * `error` 保留作错误信号（当前 WsClient 不再产生终态 error，供 REST 失败等其它来源）。
  */
-export type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "resync" | "error"
+export type ConnectionStatus =
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "resync"
+  | "retrying"
+  | "error"
 
 /** 浏览器 WebSocket 的最小结构（测试可注入假实现）。 */
 export interface WsSocketLike {
@@ -32,8 +39,10 @@ export interface WsSocketLike {
 
 export const WS_RECONNECT_BASE_MS = 1_000
 export const WS_RECONNECT_MAX_MS = 30_000
-/** 默认最大重连次数：超过即进入 `error` 终态（不再无限重试）。 */
+/** 默认最大「快速退避」重连次数：超过即转入固定慢速后台重试。 */
 export const WS_RECONNECT_MAX_ATTEMPTS = 8
+/** 超出快速重连上限后的慢速重试间隔（缺陷 B：永不永久停止）。 */
+export const WS_RECONNECT_SLOW_MS = 30_000
 
 /**
  * 退避时长：`base * 2^attempt` 封顶 `max`，再叠加 `[0, base)` jitter（并按 `max` 封顶）。
@@ -52,7 +61,7 @@ export interface WsClientOptions {
   readonly onStatus?: (status: ConnectionStatus) => void
   readonly random?: () => number
   readonly warn?: (message: string, detail?: unknown) => void
-  /** 重连次数上限；达上限后 `onStatus("error")` 并停止（默认 `WS_RECONNECT_MAX_ATTEMPTS`）。 */
+  /** 快速退避重连次数上限；达上限后转 `retrying` 慢速重连（默认 `WS_RECONNECT_MAX_ATTEMPTS`）。 */
   readonly maxReconnectAttempts?: number
 }
 
@@ -77,6 +86,11 @@ export class WsClient {
     return this.appliedSeq
   }
 
+  /** 是否已停止（`stop()` 后为 true；供测试与外部触发判断）。 */
+  get isStopped(): boolean {
+    return this.stopped
+  }
+
   start(): void {
     this.stopped = false
     this.attempt = 0
@@ -92,6 +106,22 @@ export class WsClient {
     }
     this.socket?.close()
     this.socket = undefined
+  }
+
+  /**
+   * 立即重连（供页面转可见 / `window.online` 等外部触发）：已连接/正在连接则 no-op；
+   * 否则清掉待触发定时器并立刻 `connect()`（退避复位）。
+   */
+  reconnectNow(): void {
+    if (this.socket !== undefined) return
+    this.stopped = false
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer)
+      this.timer = undefined
+    }
+    this.attempt = 0
+    this.options.onStatus?.("reconnecting")
+    this.connect()
   }
 
   private connect(): void {
@@ -142,14 +172,10 @@ export class WsClient {
   private scheduleReconnect(): void {
     if (this.stopped) return
     this.socket = undefined
-    // 重连超限：进入 `error` 终态并停止（真实错误信号，UI 据此显示错误态 + 重试）。
-    if (this.attempt >= this.maxAttempts) {
-      this.stopped = true
-      this.options.onStatus?.("error")
-      return
-    }
-    this.options.onStatus?.("reconnecting")
-    const delay = backoffDelay(this.attempt, this.random)
+    // 重连超限：**不再永久停止**——转固定慢速后台重试（缺陷 B），成功即复位。
+    const slow = this.attempt >= this.maxAttempts
+    const delay = slow ? WS_RECONNECT_SLOW_MS : backoffDelay(this.attempt, this.random)
+    this.options.onStatus?.(slow ? "retrying" : "reconnecting")
     this.attempt += 1
     this.timer = setTimeout(() => {
       this.timer = undefined

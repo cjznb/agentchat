@@ -18,8 +18,10 @@ import {
 } from "react"
 import { INITIAL_RELOAD_PLAN, loadReload, type ReloadPlan } from "./api"
 import { createActions, type StoreActions } from "./actions"
+import { createConnectionHandler } from "./connection"
 import { initialState, planReload, reducer, type AppState } from "./reducers"
-import { browserSocketFactory, currentWsUrl, WsClient, type ConnectionStatus } from "./ws"
+import { installReconnectTriggers } from "./visibility"
+import { browserSocketFactory, currentWsUrl, WsClient } from "./ws"
 
 /** UI 组件消费面：状态 + 动作（动作定义在 `actions.ts`）。 */
 export interface StoreValue extends StoreActions {
@@ -61,9 +63,9 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
       })
   }, [dispatch])
 
-  /** 错误态重试：全量重拉；若 WS 已进入 error 终态则一并重启连接。 */
+  /** 错误态重试：全量重拉；未连接时立即重连（已连接则 no-op）。 */
   const retry = useCallback((): void => {
-    if (stateRef.current.connection === "error") wsRef.current?.start()
+    if (stateRef.current.connection !== "connected") wsRef.current?.reconnectNow()
     reload(INITIAL_RELOAD_PLAN)
   }, [reload])
 
@@ -84,11 +86,19 @@ export function StoreProvider({ children }: { readonly children: ReactNode }) {
         dispatch({ type: "frame", frame })
         reload(plan)
       },
-      onStatus: (status: ConnectionStatus) => dispatch({ type: "connection", status }),
+      // 连接成功且此前首屏加载失败 → 补跑全量重拉（缺陷 B：首屏失败后不再恢复）。
+      onStatus: createConnectionHandler({
+        dispatch: (status) => dispatch({ type: "connection", status }),
+        isLoadingFailed: () => stateRef.current.loadError,
+        reload,
+      }),
     })
     wsRef.current = client
     client.start()
+    // 页面转可见 / 网络恢复在线 → 立即重连（后台节流/长断网后的自愈）。
+    const disposeTriggers = installReconnectTriggers(() => client.reconnectNow())
     return () => {
+      disposeTriggers()
       client.stop()
       wsRef.current = undefined
     }

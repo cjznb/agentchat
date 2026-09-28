@@ -13,7 +13,7 @@ import type {
   WsServerFrame,
 } from "../../../shared/contracts"
 import { initialState, planReload, reducer, reduceFrame, type AppState } from "../reducers"
-import { backoffDelay, WsClient, type ConnectionStatus, type WsSocketLike } from "../ws"
+import { backoffDelay, WS_RECONNECT_SLOW_MS, WsClient, type ConnectionStatus, type WsSocketLike } from "../ws"
 
 const humanConv: ConversationSummary = {
   id: "c1",
@@ -311,7 +311,7 @@ describe("WsClient", () => {
     client.stop()
   })
 
-  it("重连超过上限后进入 error 终态并停止（不再新建 socket）", () => {
+  it("重连超过上限后转入慢速后台重试（不再永久停止）", () => {
     vi.useFakeTimers()
     const statuses: ConnectionStatus[] = []
     const urls: string[] = []
@@ -337,11 +337,12 @@ describe("WsClient", () => {
     vi.advanceTimersByTime(2000)
     sockets[2]!.onclose?.()
 
-    expect(statuses[statuses.length - 1]).toBe("error")
+    // 超限：转「后台重试中」并持续慢速重连（非永久 error）。
+    expect(statuses[statuses.length - 1]).toBe("retrying")
+    expect(client.isStopped).toBe(false)
     expect(urls).toHaveLength(3)
-    // 终态后不再重连。
-    vi.advanceTimersByTime(60_000)
-    expect(urls).toHaveLength(3)
+    vi.advanceTimersByTime(WS_RECONNECT_SLOW_MS)
+    expect(urls).toHaveLength(4)
     client.stop()
   })
 
