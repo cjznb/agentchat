@@ -14,12 +14,13 @@
  *   绝不直接 `accepted`
  *
  * 生成规则（binding）：仅 `kind='runtime' AND status IN (online,busy)` 收件方建 job，
- * `logical`（含 human）与 offline/retired 收件方纯收件箱；另要求该 vendor 已注册
- * 适配器（推送通道缺失时由 `POST /internal/wake` 拉取积压时补建）。
+ * `logical`（含 human）与 offline/retired 收件方纯收件箱。
+ * **不**再要求该 vendor 已注册适配器（Plan 5 修复 2）：无论推送通道存否，发送时一律为
+ * 合格收件方建 job，使回执阶段从此真实（`pending → queued`，而非「无 job 也 queued」）；
+ * pull 适配器在 `/internal/wake` 认领、dispatcher 对无适配器 vendor 退避跳过（绝不误注入）。
  * 所有状态写入以条件更新（`WHERE state = ...`）或 `canWakeTransition` 白名单守卫。
  */
 import { z } from "zod"
-import { adapterFor } from "../adapters/types"
 import { agentStatusSchema, type AgentStatus } from "../../shared/contracts"
 import type { Db } from "../db"
 import { getBySeq } from "./messages"
@@ -146,15 +147,15 @@ export interface EnqueueInput {
 /**
  * 发送即生成唤醒任务（spec §7）：`INSERT OR IGNORE` 幂等（幂等重发安全）；
  * `retry_at = now + backoff(0)`；`status='busy'` 落 `pending_reason='busy'`。
- * 仅 runtime + online/busy + vendor 有适配器的收件方建 job（见文件头规则）。
+ * 仅 runtime + online/busy 的收件方建 job（**不**看 vendor 是否已注册适配器；见文件头规则）。
  */
 export function enqueueWakeJobs(db: Db, input: EnqueueInput): number {
   if (input.recipientIds.length === 0) return 0
   const now = input.now ?? Date.now()
   const placeholders = input.recipientIds.map(() => "?").join(",")
   const candidates = db
-    .prepare<string[], { id: string; status: string; vendor: string }>(
-      `SELECT id, status, vendor FROM agents
+    .prepare<string[], { id: string; status: string }>(
+      `SELECT id, status FROM agents
         WHERE kind = 'runtime' AND status IN ('online','busy') AND id IN (${placeholders})`,
     )
     .all(...input.recipientIds)
@@ -165,7 +166,6 @@ export function enqueueWakeJobs(db: Db, input: EnqueueInput): number {
   )
   let created = 0
   for (const candidate of candidates) {
-    if (adapterFor(candidate.vendor) === undefined) continue // 无推送通道 → /internal/wake 拉取时补建
     const reason = candidate.status === "busy" ? "busy" : null
     created += insert.run(input.messageId, candidate.id, now + backoffMs(0), reason, now).changes
   }

@@ -37,6 +37,7 @@ MCP server 的官方 JSON 位置是 `~/.claude.json`、项目 `.mcp.json`、或 
 | `AGENTCHAT_URL` | 否 | `http://127.0.0.1:<AGENTCHAT_PORT 或 4646>` | Hub 地址；安装器用它推导 MCP `url` |
 | `AGENTCHAT_PORT` | 否 | `4646` | 仅用于推导默认 `AGENTCHAT_URL` |
 | `AGENTCHAT_HOOK_TIMEOUT_MS` | 否 | `3000` | hook HTTP 超时覆盖（仅测试用途；生产恒 3s） |
+| `AGENTCHAT_ADAPTERS` | **建议设** | — | **Hub 侧**环境变量（不是 hook 环境变量）：启动 Hub 时设 `claude-code`，把它登记为 pull 厂商。不设的历史后果是发送时不建 wake_job、界面一直「排队中」；本版已改为发送即建 job，但建议显式登记以免 dispatcher 对每条消息做无谓退避 |
 
 hook 由 Claude Code 进程派生，故 `HUB_TOKEN` 需出现在**启动 `claude` 的环境**里（`export HUB_TOKEN=…`）。
 
@@ -71,7 +72,8 @@ hook 由 Claude Code 进程派生，故 `HUB_TOKEN` 需出现在**启动 `claude
 ### PowerShell（Windows）
 
 ```powershell
-# 1) 运行 Hub，使其写出 token（另开终端；可保持运行）
+# 1) 运行 Hub：登记 claude-code 为 pull 厂商，并写出 token（另开终端；可保持运行）
+$env:AGENTCHAT_ADAPTERS = "claude-code"
 npm start
 
 # 2) 导出环境变量（当前终端）
@@ -88,6 +90,8 @@ node adapters/claude-code/install.mjs --config "$HOME\.claude\settings.json"
 ### POSIX（macOS / Linux）
 
 ```bash
+# 启动 Hub（另开终端，登记 claude-code 为 pull 厂商）：AGENTCHAT_ADAPTERS="claude-code" npm start
+
 export AGENTCHAT_HOME="$HOME/.agentchat"
 export HUB_TOKEN="$(cat "$AGENTCHAT_HOME/hub_token")"
 export AGENTCHAT_URL="http://127.0.0.1:4646"   # 可选

@@ -14,6 +14,7 @@
 | `AGENTCHAT_URL` | 否 | Hub 地址，默认 `http://127.0.0.1:<AGENTCHAT_PORT 或 4646>` |
 | `AGENTCHAT_PORT` | 否 | 仅用于推导默认 `AGENTCHAT_URL` |
 | `AGENTCHAT_MCP_TIMEOUT_MS` | 否 | MCP 桥单次上游请求超时，默认 `30000`（钳制到 `[100, 600000]`） |
+| `AGENTCHAT_POLL_MS` | 否 | **插件**空闲轮询间隔，默认 `10000`（钳制到 `[1000, 3600000]`，非法值回落默认） |
 
 ## 事件映射（实测 `@opencode-ai/plugin@1.18.32`）
 
@@ -24,7 +25,8 @@
 | `session.created`（`info.parentID` 缺失） | MCP `register`（根）：无 token → 首注册并把返回的 `join_token` 写 `<home>/agents/opencode.token`（0600）；有 token → 带 `join_token` 重连认领 |
 | `session.created`（`info.parentID` 存在） | MCP `register{parent_ref, task_ref: info.id}`（`parent_ref` = 父会话已映射的节点 id；缺失时按「当前根 = 父回合窗口」兜底） |
 | `session.status`（`busy`/`retry`/`idle`） | `POST /internal/state {busy\|idle}`（同态去重） |
-| `session.idle` | 报 `idle`（同态去重，兜底宿主只发此事件的情况）→ `POST /internal/wake` → 逐条 `client.session.promptAsync` 注入（**按 `messageId` 有界去重**，租约重投不重复注入）→ `POST /internal/result {items:[{messageId,result:"delivered"\|"refused"}]}`（注入抛错记 `refused`） |
+| `session.idle` | 报 `idle`（心跳上报）→ `POST /internal/wake` → 逐条 `client.session.promptAsync` 注入（**按 `messageId` 有界去重**，租约重投不重复注入）→ `POST /internal/result {items:[{messageId,result:"delivered"\|"refused"}]}`（注入抛错记 `refused`）；随后为该会话**启动空闲轮询** |
+| **（idle 期间·无事件）** | **空闲轮询**（默认 10s，`AGENTCHAT_POLL_MS` 覆盖）：每次执行与 `session.idle` **同一路径**并上报 `idle` 心跳（刷新 `last_seen`）；转 `busy`/`retry` 即停；`dispose`/会话删除时清理定时器 |
 | `session.deleted`（根） | `POST /internal/state {offline}`（根保持 offline 语义） |
 | `session.deleted`（子）/ `dispose` | `POST /internal/retire {agentId:<子节点>}` 退役子节点（**幂等**；`404` 视为已退役，不重试）；子节点不报 `offline`（Hub 侧 409 拒绝） |
 
@@ -40,6 +42,11 @@
 - **传输门 token 解析**：`env.HUB_TOKEN`（非空优先）→ `<AGENTCHAT_HOME>/hub_token`（trim）→ 空；
   两处皆空时打明确 warn、调用按既有 401 路径失败（无需手动 `export HUB_TOKEN`）。
 - 所有事件处理入队即返回（fire-and-forget，串行保序），网络重试在后台推进，**不阻塞宿主事件循环**。
+- **空闲轮询（缺陷 A 修复）**：仅靠 `session.idle`/`session.status(idle)` **事件**时，消息若在 agent
+  **已经 idle 之后**到达则没有触发者，永久停在「排队中」。故 idle 时启动周期轮询（默认 10s）走同一拉取
+  路径；每次轮询都上报 `idle`（Hub 侧同态上报 = `touchAgent` 心跳，修复长时间空闲被判 offline）。
+  轮询失败按指数退避拉长（上限 60s）、成功后回到基础间隔，Hub 不可达时不刷屏；定时器 `unref` 且
+  `dispose` 清理，**不阻塞/不泄漏**。轮询与事件路径共用 `messageId` 有界去重，**绝不重复注入**。
 - token 写失败仅记录、不中断（尽力而为）。
 - 根注册成功后把**节点 agent id** 落盘 `<home>/agents/opencode.id`（供本地 MCP 桥**逐请求**读作
   `x-agent-id`）。陈旧 token 自愈**只清 token、保留该 id 文件**：曾因连删该文件（而旧配置以 `{file:…}`

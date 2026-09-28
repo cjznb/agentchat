@@ -5,7 +5,8 @@
  * - `reportState()`：适配器 → hub 的状态上报入口（fake 直连 `/internal/state` 同款处理器，
  *   真实适配器在独立进程经 `POST /internal/state` 上报）
  * - 注册表按 `agents.vendor` 匹配适配器 id；无适配器 = 无推送通道
- *   （收件方消息由 `POST /internal/wake` 拉取时补建 job，见 store/wake）
+ *   （发送时仍为合格收件方建 job，由 `POST /internal/wake` 认领；dispatcher 对无适配器
+ *   vendor 退避跳过，见 store/wake 与 core/dispatcher）
  * - `mode`：`"push"`（默认，dispatcher 主动注入）/ `"pull"`（进程外适配器自行拉取，
  *   dispatcher 只登记可用性、绝不注入，job 留给 `/internal/wake` 认领）
  */

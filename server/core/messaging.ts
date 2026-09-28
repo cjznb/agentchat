@@ -200,7 +200,7 @@ function deliver(db: Db, input: SendMessageInput): SendMessageResult {
   })
   publishMessage(db, conversation.id)
   const recipientIds = recipientsOf(db, conversation, input.from)
-  // 发送即生成唤醒任务（Task 6；资格与适配器门控见 store/wake.enqueueWakeJobs）。
+  // 发送即生成唤醒任务（Task 6；资格见 store/wake.enqueueWakeJobs：runtime+online/busy）。
   enqueueWakeJobs(db, { messageId: message.seq, recipientIds })
   const receipts = recipientIds.map((agentId) => ({
     agentId,

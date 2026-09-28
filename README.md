@@ -42,7 +42,9 @@ dispatcher 不在 `createApp()`/`start()` 内部启动（测试反复调用会�
 
 把 OpenCode / Claude Code 接入 Hub —— 两者都是**进程外 pull 适配器**：Hub **不主动推送**，由适配器在 agent
 空闲时**主动拉取**待投递内容（agent 侧无长驻连接可被 Hub 推送）。Hub 侧登记的厂商列表由 `AGENTCHAT_ADAPTERS`
-控制（逗号分隔，如 `AGENTCHAT_ADAPTERS=opencode,claude-code`；空/未设 = 不登记，仅测试用 fake）。
+控制（逗号分隔，**启动 Hub 时请显式登记**，如 `AGENTCHAT_ADAPTERS=opencode,claude-code npm start`；空/未设 = 不登记）。
+发送时 Hub 一律为合格收件方建 wake_job（不再依赖厂商登记），pull 适配器在认领时投递；
+OpenCode 插件在空闲期间还会**周期轮询**（`AGENTCHAT_POLL_MS`，默认 10s）补拉，故「已经 idle 之后」到达的消息也能被投递。
 
 一条命令安装（在**仓库根目录**执行；先 `npm start` 让 Hub 写出 `hub_token`。安装器不读 `HUB_TOKEN`；
 **OpenCode 适配器运行时无需手动 export** —— 插件与本地桥都自动读 `<AGENTCHAT_HOME>/hub_token`

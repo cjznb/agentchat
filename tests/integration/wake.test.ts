@@ -402,6 +402,56 @@ describe("housekeeping", () => {
   })
 })
 
+describe("no-adapter job creation (Plan 5 修复 2)", () => {
+  it("creates a wake job for an online runtime recipient even with no registered adapter", () => {
+    const sender = makeAgent("noad-sender")
+    const peer = makeAgent("noad-peer")
+    clearAdapters()
+
+    const { message } = sendMessage(db, { from: sender.id, to: peer.id, body: "无适配器也要建 job" })
+
+    // 去掉适配器门禁后，回执阶段从此真实：有 job（pending）→ queued，而非「无 job 也 queued」。
+    expect(expectJob(message.seq, peer.id)).toMatchObject({ state: "pending", attempts: 0 })
+    expect(receiptState(db, message, peer.id)).toBe("queued")
+  })
+
+  it("defers a job for an unknown vendor without injecting or throwing", async () => {
+    const sender = makeAgent("unknown-sender")
+    const peer = makeAgent("unknown-peer")
+    clearAdapters()
+    const { message } = sendMessage(db, { from: sender.id, to: peer.id, body: "未知厂商" })
+
+    await expect(dispatcher.tick(Date.now() + 1000)).resolves.toBeUndefined()
+    expect(fake.injections).toHaveLength(0)
+    const job = expectJob(message.seq, peer.id)
+    expect(job.state).toBe("pending")
+    expect(job.attempts).toBeGreaterThan(0) // 退避重投（而非抛错/误注入）
+    expect(receiptState(db, message, peer.id)).toBe("queued")
+  })
+
+  it("lets the pull path claim the send-time job and accept it on result delivered", async () => {
+    const sender = makeAgent("claim-sender")
+    const peer = makeAgent("claim-peer")
+    clearAdapters()
+    const { message } = sendMessage(db, { from: sender.id, to: peer.id, body: "发送即建 job" })
+
+    const wakeRes = await post("/internal/wake", { agentId: peer.id })
+    expect(wakeRes.status).toBe(200)
+    expect(await wakeRes.json()).toMatchObject({
+      messages: [expect.objectContaining({ id: message.id })],
+      receipts: [{ messageId: message.id, stage: "sending" }],
+    })
+    expect(expectJob(message.seq, peer.id).state).toBe("sending")
+
+    const result = await post("/internal/result", {
+      agentId: peer.id,
+      items: [{ messageId: message.id, result: "delivered" }],
+    })
+    expect(await result.json()).toEqual({ ok: true, applied: 1 })
+    expect(receiptState(db, message, peer.id)).toBe("delivered")
+  })
+})
+
 describe("review fixes: round error isolation and terminal guard", () => {
   it("keeps tick() from rejecting when a round step throws, then runs the next round normally", async () => {
     const brokenHome = mkdtempSync(join(tmpdir(), "agentchat-dispatch-"))

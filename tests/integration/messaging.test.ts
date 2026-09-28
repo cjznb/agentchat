@@ -66,10 +66,14 @@ function approved<T>(result: Gated<T>): T {
   return result.approved
 }
 
-/** wake_jobs 行手工落库（Task 6 才提供 store）——证明回执派生透传。 */
-function insertWakeJob(messageSeq: number, agentId: string, state: string): void {
+/**
+ * 设置 wake_jobs 状态以驱动回执派生透传（Plan 5 修复 2 后发送即建 job，
+ * 故 upsert 而非裸 INSERT，兼容「行已存在」）。
+ */
+function setWakeJobState(messageSeq: number, agentId: string, state: string): void {
   db.prepare<[number, string, string, number, number], void>(
-    "INSERT INTO wake_jobs (message_id, agent_id, state, retry_at, created_at) VALUES (?, ?, ?, ?, ?)",
+    `INSERT INTO wake_jobs (message_id, agent_id, state, retry_at, created_at) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(message_id, agent_id) DO UPDATE SET state = excluded.state`,
   ).run(messageSeq, agentId, state, Date.now(), Date.now())
 }
 
@@ -240,7 +244,7 @@ describe("ack and receipts", () => {
     expect(receipts).toHaveLength(2)
     expect(receipts.every((r) => r.stage === "queued")).toBe(true)
 
-    insertWakeJob(message.seq, b.id, "sending")
+    setWakeJobState(message.seq, b.id, "sending")
     expect(receiptState(db, message, b.id)).toBe("sending")
     expect(receiptState(db, message, c.id)).toBe("queued")
 
@@ -249,7 +253,7 @@ describe("ack and receipts", () => {
     ).run("accepted", message.seq, b.id)
     expect(receiptState(db, message, b.id)).toBe("delivered")
 
-    insertWakeJob(message.seq, c.id, "refused")
+    setWakeJobState(message.seq, c.id, "refused")
     expect(receiptState(db, message, c.id)).toBe("queued") // 失败态不新增阶段
 
     // read 仅由 ack 触发，且优先于 job 状态；b 的 ack 不串扰 c
