@@ -32,7 +32,7 @@ import {
 } from "./hub"
 import { IdlePoller, parsePollMs } from "./poll"
 import { agentIdPath, clearToken, readToken, resolveHome, tokenPath, writeToken } from "./token"
-import type { Hooks, OpencodeEvent, OpencodeSession, Plugin, PluginInput } from "./types"
+import type { Hooks, OpencodeEvent, Plugin, PluginInput } from "./types"
 import { createBoundedSet, createTaskQueue, type BoundedSet, type TaskQueue } from "./util"
 
 export const ADAPTER_VENDOR = "opencode"
@@ -209,6 +209,25 @@ function createRuntime(
     }
   }
 
+  /**
+   * 会话节点退役（`session.deleted` 与**会话归档**共用）：停轮询 + 清映射 + `/internal/retire`
+   * （幂等，`404` 视为已退役）。会话节点皆为实例节点的**子节点**：退役**绝不报 offline**
+   * （子节点 offline 会被 Hub `409 child_never_offline` 拒绝），且退役后不再往该会话注入。
+   */
+  const retireSession = async (sessionID: string): Promise<void> => {
+    const agentId = state.sessionToAgent.get(sessionID)
+    stopPolling(sessionID)
+    state.sessionToAgent.delete(sessionID)
+    state.sessionTitles.delete(sessionID)
+    if (agentId === undefined) return
+    state.lastState.delete(agentId)
+    try {
+      await hub.retire(agentId)
+    } catch (error) {
+      log(`retire failed for ${agentId}: ${describe(error)}`)
+    }
+  }
+
   // 收养器：A 懒收养 + B 启动枚举（构造即 fire-and-forget 枚举，不阻塞宿主）。配置见 README。
   const adopter = createAdopter({
     env: deps.env, client: input.client, hub, vendor: ADAPTER_VENDOR,
@@ -218,7 +237,8 @@ function createRuntime(
       getTitle: (id) => state.sessionTitles.get(id),
       setTitle: (id, name) => state.sessionTitles.set(id, name),
     },
-    ensureInstance: registerInstance, enqueue: (task) => queue.push(task), log,
+    ensureInstance: registerInstance, retire: retireSession,
+    enqueue: (task) => queue.push(task), log,
   })
 
   const onStatus = async (sessionID: string, status: "idle" | "busy" | "retry"): Promise<void> => {
@@ -247,25 +267,10 @@ function createRuntime(
     ensurePolling(sessionID, agentId)
   }
 
-  const onDeleted = async (session: OpencodeSession): Promise<void> => {
-    const agentId = state.sessionToAgent.get(session.id)
-    stopPolling(session.id)
-    state.sessionToAgent.delete(session.id)
-    state.sessionTitles.delete(session.id)
-    if (agentId === undefined) return
-    // 会话节点皆为实例节点的**子节点**：删除即退役（不可复活；Hub 侧取消待投递 job），
-    // 避免名单残留与向已死参与者投递。**绝不报 offline**（子节点 offline 会被 Hub 409 拒绝）。
-    state.lastState.delete(agentId)
-    try {
-      await hub.retire(agentId)
-    } catch (error) {
-      log(`retire failed for ${agentId}: ${describe(error)}`)
-    }
-  }
-
   const dispatch = async (event: OpencodeEvent): Promise<void> => {
     switch (event.type) {
-      // 建会话即登记为实例节点的子节点；被恢复/改标题的旧会话经 `session.updated` 收养或改名。
+      // 建会话即登记为实例节点的子节点；被恢复/改标题的旧会话经 `session.updated` 收养或改名；
+      // **归档会话**（`time.archived`）在 `adoptSession` 内被拦下：未映射不注册、已映射即退役。
       case "session.created":
       case "session.updated":
         await adopter.adoptSession(event.properties.info)
@@ -277,7 +282,7 @@ function createRuntime(
         await onIdle(event.properties.sessionID)
         return
       case "session.deleted":
-        await onDeleted(event.properties.info)
+        await retireSession(event.properties.info.id)
         return
       // OpenCode 事件面很宽；其余事件与本适配器无关，刻意忽略。
       default:

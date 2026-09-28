@@ -462,6 +462,52 @@ describe("register 首次与认领（DoD ④）", () => {
       await client.close()
     }
   })
+  it("claims without a name and keeps the generated vendor-model-hex name (Claude SessionStart)", async () => {
+    const client = await connect()
+    try {
+      const first = MCP_TOOL_OUTPUTS.register.parse(
+        JSON.parse(
+          textOf(await callTool(client, "register", { vendor: "claude-code", purpose: "coding-agent" })),
+        ),
+      )
+      // 新建未提供 name → core 生成 `vendor-model-hex` 兜底名（MCP 层不再注入随机名）。
+      expect(first.agent.name).toMatch(/^claude-code-unknown-[0-9a-f]{4}$/)
+      if (first.join_token === undefined) throw new Error("register did not return join_token")
+
+      const second = MCP_TOOL_OUTPUTS.register.parse(
+        JSON.parse(
+          textOf(
+            await callTool(client, "register", {
+              vendor: "claude-code",
+              purpose: "coding-agent",
+              join_token: first.join_token,
+            }),
+          ),
+        ),
+      )
+      // 不带 name 的认领**不得**改名（Part 1 之前的认领路径语义）。
+      expect(second.agent.id).toBe(first.agent.id)
+      expect(second.agent.name).toBe(first.agent.name)
+
+      const third = MCP_TOOL_OUTPUTS.register.parse(
+        JSON.parse(
+          textOf(
+            await callTool(client, "register", {
+              vendor: "claude-code",
+              purpose: "coding-agent",
+              join_token: first.join_token,
+              name: "mcp-renamed",
+            }),
+          ),
+        ),
+      )
+      // 带 name 的认领照常改名（既有语义）。
+      expect(third.agent.name).toBe("mcp-renamed")
+      expect(getAgent(db, first.agent.id)?.name).toBe("mcp-renamed")
+    } finally {
+      await client.close()
+    }
+  })
 })
 
 describe("会话 TTL 淘汰（Important #2）", () => {

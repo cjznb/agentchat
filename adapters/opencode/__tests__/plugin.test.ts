@@ -810,9 +810,10 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
       overrides: {
         toolsCall: () => {
           registers += 1
-          // 第 1 次是实例节点（成功）；第 2 次（r1 会话）失败被容忍。
+          // 第 1 次是实例节点（成功）；第 2 次（r1 会话）**不可恢复**失败被容忍。
+          // 注意：`name_taken` 不再是终态（会带稳定后缀重试一次），故此处用别的 code 表达「失败」。
           return registers === 2
-            ? toolReply("RegistrationError: boom [name_taken]", true)
+            ? toolReply("RegistrationError: boom [parent_not_found]", true)
             : toolReply(registerText("agent-ok"))
         },
       },
@@ -1377,6 +1378,122 @@ describe("会话即联系人", () => {
   })
 })
 
+// ── 同名标题冲突（#1：`name_taken` → 稳定别名重试，绝不丢会话）──────────
+
+describe("同名标题冲突（name_taken → 稳定别名重试）", () => {
+  /** 按 `index` 定点返回 `name_taken` 错误，其余照常成功（`agent-<index+1>`）。 */
+  function nameTakenOn(...failures: number[]) {
+    return (_args: unknown, index: number): Response =>
+      failures.includes(index)
+        ? toolReply("McpToolError: agent name already taken [name_taken]", true)
+        : toolReply(registerText(`agent-${index + 1}`))
+  }
+
+  const titled = (id: string, title: string): OpencodeEvent => ({
+    type: "session.created",
+    properties: { info: { id, title } },
+  })
+  const sessionNode = (id: string, title: string): Record<string, unknown> => ({
+    vendor: "opencode",
+    parent_ref: "agent-1",
+    task_ref: id,
+    name: title,
+  })
+
+  it("两个同标题会话都成为联系人（第二个用 `<标题> · <sessionid 前 4 位>`）", async () => {
+    const home = tempHome()
+    const harness = setup({ home, overrides: { toolsCall: nameTakenOn(2) } })
+    await emit(harness, titled("aaaa-sess", "同名标题"), titled("bbbb-sess", "同名标题"))
+
+    // 实例 + A + B(冲突) + B(别名重试)：B 不被吞。
+    expect(harness.kit.toolCalls).toHaveLength(4)
+    expect(harness.kit.toolCalls[1]).toEqual(sessionNode("aaaa-sess", "同名标题"))
+    expect(harness.kit.toolCalls[3]).toEqual(sessionNode("bbbb-sess", "同名标题 · bbbb"))
+    expect(harness.logs.some((line) => line.includes('registered as "同名标题 · bbbb"'))).toBe(true)
+
+    // 两个都成为联系人：各自状态上报到各自节点。
+    await emit(harness, sessionStatus("aaaa-sess", "busy"), sessionStatus("bbbb-sess", "idle"))
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-4", state: "idle" },
+    ])
+  })
+
+  it("别名注册幂等：重复事件不重复改名、不重复注册", async () => {
+    const home = tempHome()
+    const harness = setup({ home, overrides: { toolsCall: nameTakenOn(2) } })
+    await emit(harness, titled("aaaa-sess", "同名标题"), titled("bbbb-sess", "同名标题"))
+    const after = harness.kit.toolCalls.length
+
+    await emit(
+      harness,
+      { type: "session.updated", properties: { info: { id: "bbbb-sess", title: "同名标题" } } },
+      sessionStatus("bbbb-sess", "busy"),
+      sessionStatus("bbbb-sess", "busy"),
+    )
+    // 标题台账记的是**派生名** → 同标题重注册恒 no-op；同态状态去重。
+    expect(harness.kit.toolCalls).toHaveLength(after)
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-4", state: "busy" }])
+  })
+
+  it("标题变化的重注册同样在 name_taken 时带稳定别名重试", async () => {
+    const home = tempHome()
+    const harness = setup({ home, overrides: { toolsCall: nameTakenOn(2) } })
+    await emit(harness, rootCreated("root-sess", "初始标题")) // index0 实例 / index1 会话
+    const before = harness.kit.toolCalls.length
+    const info = (title: string): OpencodeEvent => ({
+      type: "session.updated",
+      properties: { info: { id: "root-sess", title } },
+    })
+
+    await emit(harness, info("新标题"))
+    expect(harness.kit.toolCalls).toHaveLength(before + 2)
+    expect(harness.kit.toolCalls[before]).toEqual(sessionNode("root-sess", "新标题"))
+    expect(harness.kit.toolCalls[before + 1]).toEqual(sessionNode("root-sess", "新标题 · root"))
+
+    await emit(harness, info("新标题"))
+    expect(harness.kit.toolCalls).toHaveLength(before + 2)
+  })
+
+  it("标题恰好等于实例节点名（opencode@<host>）同样不被吞", async () => {
+    const home = tempHome()
+    const harness = setup({ home, overrides: { toolsCall: nameTakenOn(1) } })
+    const host = osHostname()
+    const title = host === undefined ? "opencode" : `opencode@${host}`
+    await emit(harness, titled("same-sess", title))
+
+    expect(harness.kit.toolCalls[1]).toEqual(sessionNode("same-sess", title))
+    expect(harness.kit.toolCalls[2]).toEqual(sessionNode("same-sess", `${title} · same`))
+
+    await emit(harness, sessionStatus("same-sess", "busy"))
+    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-3", state: "busy" }])
+  })
+
+  it("别名仍冲突（极小概率）→ 保持既有 skip+warn，不落映射、不崩", async () => {
+    const home = tempHome()
+    const harness = setup({
+      home,
+      overrides: {
+        toolsCall: (_args, index) =>
+          index === 0
+            ? toolReply(registerText("agent-1"))
+            : toolReply("McpToolError: agent name already taken [name_taken]", true),
+      },
+    })
+    await emit(harness, rootCreated("root-sess", "同名标题"))
+    expect(harness.kit.toolCalls).toHaveLength(3) // 实例 + 首次 + 别名重试
+    expect(
+      harness.logs.some(
+        (line) => line.includes("session register failed for root-sess") && line.includes("name_taken"),
+      ),
+    ).toBe(true)
+
+    await emit(harness, sessionStatus("root-sess", "busy"))
+    expect(stateCalls(harness.kit)).toEqual([])
+    expect(harness.logs.some((line) => line.includes("unmapped session"))).toBe(true)
+  })
+})
+
 // ── 空闲轮询（缺陷 A：消息在「已经 idle 之后」到达）──────────────────
 
 describe("空闲轮询（idle 期间周期补拉）", () => {
@@ -1478,3 +1595,93 @@ describe("空闲轮询（idle 期间周期补拉）", () => {
     await (await harness.hooks).dispose?.()
   })
 })
+
+// ── 归档会话（#2：A 懒收养与 B 启动枚举口径一致）─────────────────────
+
+describe("归档会话（A 与 B 口径一致）", () => {
+  afterEach(() => vi.useRealTimers())
+
+  const wakeOne = {
+    internal: (path: string) =>
+      path === "/internal/wake"
+        ? jsonResponse({ messages: [{ id: "m1", fromAgentId: "peer", conversationId: "c1", body: "hi" }] })
+        : undefined,
+  }
+  const retires = (kit: FetchKit): unknown[] =>
+    kit.internalCalls.filter((call) => call.path === "/internal/retire").map((call) => call.body)
+  const wakes = (kit: FetchKit): number =>
+    kit.internalCalls.filter((call) => call.path === "/internal/wake").length
+
+  it("A/未映射的归档会话事件 → 不注册、不注入，且有 warn", async () => {
+    const home = tempHome()
+    const harness = setup({ home, overrides: wakeOne })
+    harness.client.sessions.set("arch-sess", {
+      id: "arch-sess",
+      title: "已归档",
+      time: { archived: 1 },
+    })
+    await emit(
+      harness,
+      sessionStatus("arch-sess", "busy"),
+      sessionIdle("arch-sess"),
+      { type: "session.updated", properties: { info: { id: "arch-sess", title: "已归档", time: { archived: 1 } } } },
+    )
+
+    // 事件本身照常查询（A 路径），但归档判定在收养入口拦下。
+    expect(harness.client.getCalls).toEqual(["arch-sess", "arch-sess"])
+    expect(harness.kit.toolCalls).toEqual([]) // 连实例节点都未注册（未走到 ensureInstance）
+    expect(stateCalls(harness.kit)).toEqual([])
+    expect(wakes(harness.kit)).toBe(0)
+    expect(harness.client.texts).toEqual([])
+    expect(retires(harness.kit)).toEqual([]) // 未映射 = 无节点可退役
+    expect(harness.logs.filter((line) => line.includes("archived session arch-sess skipped"))).toHaveLength(3)
+  })
+
+  it("已映射会话变归档 → 退役、清映射、停轮询，之后不再上报与注入", async () => {
+    vi.useFakeTimers()
+    const home = tempHome()
+    const harness = setup({ home, overrides: wakeOne })
+    await emit(harness, rootCreated("root-sess", "活跃会话"))
+    await emit(harness, sessionIdle("root-sess"))
+    expect(harness.client.texts).toHaveLength(1) // 归档前照常注入
+    const wakesBefore = wakes(harness.kit)
+
+    await emit(harness, {
+      type: "session.updated",
+      properties: { info: { id: "root-sess", title: "活跃会话", time: { archived: 1 } } },
+    })
+    expect(retires(harness.kit)).toEqual([{ agentId: "agent-2" }])
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(wakes(harness.kit)).toBe(wakesBefore) // 轮询已停
+
+    await emit(harness, sessionIdle("root-sess"))
+    expect(harness.client.texts).toHaveLength(1) // 映射已清：不再注入
+    expect(
+      stateCalls(harness.kit).filter((body) => isRecord(body) && body["agentId"] === "agent-2"),
+    ).toHaveLength(1) // 只剩归档前那一次 idle 上报
+    expect(retires(harness.kit)).toEqual([{ agentId: "agent-2" }]) // 不重复退役
+    await (await harness.hooks).dispose?.()
+  })
+
+  it("非归档会话行为不变：session.updated 不退役，未映射的历史会话照常收养", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(harness, rootCreated())
+    await emit(harness, {
+      type: "session.updated",
+      properties: { info: { id: "root-sess", title: "根会话标题" } },
+    })
+    expect(retires(harness.kit)).toEqual([])
+
+    await emit(harness, sessionStatus("root-sess", "busy"))
+    harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
+    await emit(harness, sessionStatus("old-root", "busy"))
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-3", state: "busy" },
+    ])
+    expect(retires(harness.kit)).toEqual([])
+  })
+})
+

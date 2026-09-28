@@ -12,6 +12,13 @@
  *   `AGENTCHAT_ADOPT_LIMIT` 可覆盖；`AGENTCHAT_ADOPT=0` 关闭），客户端过滤 `time.archived` 后
  *   逐个按同一规则收为**实例节点的子节点**；`session.list` 不可用/报错即记录并静默降级，只保留 A。
  *
+ * **归档口径 A/B 一致**：`adoptSession` 是两条路径与 `session.updated` 的共同入口——归档会话
+ * 未映射即跳过并 warn（不注册、不注入），已映射即退役（`deps.retire`：停轮询 + 清映射 + `/internal/retire`）。
+ *
+ * **同名标题**：`agents.name` 全局 UNIQUE，两个同标题会话（或标题恰等于实例节点名）会撞 `name_taken`；
+ * 此时以**稳定**别名 `<标题> · <sessionid 前 4 位>` 重试一次（见 `aliasedName`），保证「同名会话都成为
+ * 联系人」且重复事件幂等；仍冲突则保持既有 skip+warn 不崩。
+ *
  * **标题同步**：每会话记录「上次已知标题」，仅当标题真的变化时重注册（`session.updated` 会频繁
  * touch，未变即 no-op，避免刷屏）；重注册靠 Hub 侧「重注册可更新卡片字段」（Part 1）落到名字。
  *
@@ -23,8 +30,8 @@
  */
 import { hostname } from "node:os"
 import { describe } from "./flush"
+import { HubToolError, type Hub } from "./hub"
 import { unwrapResult } from "./sdk-result"
-import type { Hub } from "./hub"
 import type { OpencodeClient, OpencodeSession } from "./types"
 import { isRecord } from "./util"
 
@@ -88,6 +95,24 @@ function isSessionArray(value: unknown): value is readonly OpencodeSession[] {
   return Array.isArray(value)
 }
 
+/** `name_taken`：MCP 层把 `agents.name` UNIQUE 冲突映射为该稳定 code（见 `server/mcp/tools.ts`）。 */
+function isNameTaken(error: unknown): boolean {
+  return error instanceof HubToolError && error.code === "name_taken"
+}
+
+/**
+ * 同名冲突的**稳定**别名：`<名字> · <sessionid 前 4 位>`。
+ * 仅由 `session.id` 派生 → 同一会话每次重试得到同一别名，**重复事件幂等**（不会反复改名/重复注册）。
+ */
+export function aliasedName(name: string, sessionID: string): string {
+  return `${name} · ${sessionID.slice(0, 4)}`
+}
+
+/** 会话是否已归档（`time.archived` 非空；发布类型陈旧但运行期有值，与 B 的过滤口径一致）。 */
+export function isArchived(session: OpencodeSession): boolean {
+  return session.time?.archived != null
+}
+
 /** 会话映射与标题台账（由 `plugin.ts` 的运行时状态实现）。 */
 export interface AdoptState {
   /** sessionID → 会话节点 id。 */
@@ -106,6 +131,8 @@ export interface AdoptDeps {
   readonly state: AdoptState
   /** 确保实例节点（根）已注册并返回其 id（含 join_token 认领与 token/id 落盘）。 */
   readonly ensureInstance: () => Promise<string | undefined>
+  /** 已映射会话退役（`session.deleted` 与**归档**共用）：停轮询 + 清映射 + `/internal/retire`。 */
+  readonly retire: (sessionID: string) => Promise<void>
   /** 与事件处理共用的串行队列（避免同一会话并发注册两次）。 */
   readonly enqueue: (task: () => Promise<void>) => void
   readonly log: (message: string) => void
@@ -139,26 +166,58 @@ export function createAdopter(deps: AdoptDeps): Adopter {
     }
     const name = sessionName(session)
     const model = sessionModel(session)
-    try {
-      const result = await deps.hub.register({
+    const attempt = (registerName: string): Promise<{ agentId: string }> =>
+      deps.hub.register({
         vendor: deps.vendor,
         parent_ref: parentId,
         task_ref: session.id,
-        name,
+        name: registerName,
         ...(model === undefined ? {} : { model }),
       })
+    /** 成功落账：映射 + 标题台账（台账恒记**派生名**，使同标题重复事件仍 no-op）。 */
+    const settle = (result: { agentId: string }, registerName: string): string => {
       deps.state.set(session.id, result.agentId)
       deps.state.setTitle(session.id, name)
+      if (registerName !== name) {
+        deps.log(`session ${session.id} name taken; registered as "${registerName}"`)
+      }
       return result.agentId
+    }
+    try {
+      return settle(await attempt(name), name)
     } catch (error) {
-      deps.log(`session register failed for ${session.id}: ${describe(error)}`)
-      return undefined
+      if (!isNameTaken(error)) {
+        deps.log(`session register failed for ${session.id}: ${describe(error)}`)
+        return undefined
+      }
+      // 同名标题已被占用（另一会话同标题 / 恰好等于实例节点名）→ 以**稳定**别名重试一次。
+      const alias = aliasedName(name, session.id)
+      try {
+        return settle(await attempt(alias), alias)
+      } catch (retryError) {
+        // 仍冲突（极小概率）：保持既有 skip+warn，不崩、不半途落账。
+        deps.log(`session register failed for ${session.id}: ${describe(retryError)}`)
+        return undefined
+      }
     }
   }
 
-  /** 已映射：标题未变即 no-op；变了则重注册以更新名字（其余字段由已有节点保留）。 */
+  /**
+   * 收养/重登记会话（A 懒收养与 `session.updated` 共用入口）：**归档会话一律不进名单**——
+   * 未映射 → 跳过并 warn（不注册、不注入）；已映射 → 退役该节点（清映射 + 停轮询），
+   * 与 B 的归档过滤语义对齐（退役后 `resolve` 不再命中，也就不会再往该会话注入）。
+   */
   const adoptSession = async (session: OpencodeSession): Promise<string | undefined> => {
     const mapped = deps.state.get(session.id)
+    if (isArchived(session)) {
+      if (mapped === undefined) {
+        deps.log(`archived session ${session.id} skipped: not adopted`)
+        return undefined
+      }
+      deps.log(`session ${session.id} archived; retiring ${mapped}`)
+      await deps.retire(session.id)
+      return undefined
+    }
     if (mapped === undefined) return register(session)
     if (deps.state.getTitle(session.id) === sessionName(session)) return mapped
     return register(session)
@@ -217,7 +276,7 @@ export function createAdopter(deps: AdoptDeps): Adopter {
         deps.log(`startup adoption list unavailable: ${summary}`)
         return
       }
-      const roots = data.filter((session) => session.time?.archived == null).slice(0, limit)
+      const roots = data.filter((session) => !isArchived(session)).slice(0, limit)
       for (const session of roots) {
         if (deps.state.get(session.id) !== undefined) continue
         await adoptSession(session)

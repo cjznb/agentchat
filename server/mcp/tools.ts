@@ -4,7 +4,6 @@
  * 路由层零手写类型（约束：全部 io 经 `shared/contracts.ts`）。读/策略工具在 `read-tools.ts`，
  * 请求批示工具在 `ask-tools.ts`（本模块仅分发）。
  */
-import { randomBytes } from "node:crypto"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import {
   MCP_TOOLS,
@@ -32,16 +31,9 @@ function resolveAgentRef(db: ToolContext["db"], ref: string): string {
   throw new RegistrationError("parent_not_found", `parent agent not found: ${ref}`)
 }
 
-function resolveName(input: McpToolInput<"register">): string {
-  return (
-    input.name ??
-    `${input.vendor ?? "unknown"}-${input.model ?? "unknown"}-${randomBytes(2).toString("hex")}`
-  )
-}
-
-function definedCard(name: string, input: McpToolInput<"register">) {
+function definedCard(input: McpToolInput<"register">) {
   return {
-    name,
+    ...(input.name === undefined ? {} : { name: input.name }),
     ...(input.vendor === undefined ? {} : { vendor: input.vendor }),
     ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
@@ -76,13 +68,16 @@ function registerAgent(
 }
 
 function runRegister(ctx: ToolContext, input: McpToolInput<"register">): unknown {
-  const name = resolveName(input)
   let registered: { agent: Agent; joinToken?: string }
   try {
-    registered = registerAgent(ctx, input, definedCard(name, input))
+    registered = registerAgent(ctx, input, definedCard(input))
   } catch (error) {
     if (error instanceof Error && error.message.includes("UNIQUE constraint failed: agents.name")) {
-      throw new McpToolError("name_taken", `agent name already taken: ${name}`)
+      // 未提供 name 时 core 走兜底名（几乎不可能冲突）；提示仍给出可审计的入参名。
+      throw new McpToolError(
+        "name_taken",
+        `agent name already taken: ${input.name ?? "(generated fallback name)"}`,
+      )
     }
     throw error
   }

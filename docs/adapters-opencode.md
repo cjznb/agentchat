@@ -60,6 +60,7 @@
 
 ```
 实例节点（根）            opencode@<主机名>            ← 一份进程/机器身份，join_token 认领
+                                                      ← **分组容器，不是聊天对象**（见下方说明）
 └─ 会话节点（子）         <OpenCode 会话标题>          ← task_ref = session.id（幂等稳定）
    └─ 子代理会话节点（子） <子会话标题>                 ← subagent 会话（parentID 指向父会话）
 ```
@@ -72,6 +73,12 @@
 - **标题同步**：插件记录每会话「上次已知标题」，**仅当标题真的变化**时才重注册
   （`session.updated` 每次 touch 都会触发事件，未变即 no-op，避免刷屏）；重注册依赖 Hub 侧
   「重注册可更新卡片字段」把新标题落到节点名。
+- **同名标题**：`agents.name` 全局 UNIQUE，两个同标题会话（或标题恰等于实例节点名 `opencode@<host>`）
+  会撞 `name_taken` → 插件以**稳定**别名 `<标题> · <sessionid 前 4 位>` **重试一次**（别名只由
+  `session.id` 派生，重复事件幂等、不会反复改名）；仍冲突则 skip + warn。**同名会话不会被吞掉。**
+- **归档（A/B 同口径）**：`time.archived` 非空的会话不进名单——**A 懒收养/`session.updated`**：未映射
+  → 跳过 + warn（不注册、不注入），已映射 → 退役该会话节点（`/internal/retire` + 清映射 + 停该会话
+  空闲轮询）；**B 启动枚举**在客户端过滤同一条件。**不是「只有 B 过滤归档」**。
 - **状态 / 投递按会话节点**：`/internal/state`（busy/idle）、`/internal/wake`、`/internal/result`
   一律用**该会话的节点 id**；`session.deleted` → `/internal/retire` 退役该会话节点
   （**绝不报 offline**：子节点 offline 会被 Hub `409 child_never_offline` 拒绝）。
@@ -80,6 +87,12 @@
 > （本地 stdio 桥），桥逐请求读 `<home>/agents/opencode.id` 作 `x-agent-id` —— 故它是**实例节点**身份；
 > 而某个会话收/发消息时的状态与投递归属其**会话节点**。二者由插件分别维护（实例 id 单独保存，
 > `sessionToAgent` = sessionID → 会话节点 id）。
+
+> **实例节点是分组容器，不是聊天对象。** 插件拉取积压（`POST /internal/wake`）的 `agentId`
+> **只**来自 `resolve(sessionID)`（会话节点），实例 id 仅用于 `register`/`dispose` 的上下线上报 ——
+> 因此**发往实例节点的消息不会被拉取、也不会被投递**（它是可见联系人，承载的是**历史实例级 DM**
+> 的归档留痕）；**会话节点才是聊天端点**。不实现「实例也 wake 并路由给最近活跃会话」（路由归属有歧义，
+> 由 controller 另行决策）；UI 把容器节点标记为不可 DM 同样属 controller 侧改造。
 
 **无需迁移**：升级后旧的 `session.created` 子节点/历史实例节点**保留无害**；新逻辑按下述规则
 新建实例节点并把会话收为其子节点，最多在 roster 里多出一个可读的实例分组节点。
@@ -234,7 +247,9 @@ export default { id: "agentchat", server: AgentChatPlugin }
 | 消息一直「排队中」（agent 已 idle 很久） | 旧版只在 idle **事件**拉取：消息在「已经 idle 之后」到达时无触发者；或 Hub 未登记该厂商（无 job） | 本版已修：idle 期间**周期轮询**补拉（`AGENTCHAT_POLL_MS`，默认 10s）；并建议 Hub 启动时 `AGENTCHAT_ADAPTERS=opencode`。核对插件日志中 `[agentchat-opencode]` 的 `wake failed`/`idle heartbeat failed` |
 | 空闲未被唤醒（idle 未触发） | 宿主未发 `session.idle`/`session.status`（版本差异） | 核对 `@opencode-ai/plugin` 版本（实测 1.18.32）；`session.idle` 是主要触发，`session.status` 仅补 busy 起点；即便两者都缺，空闲轮询仍会补拉 |
 | 回信似乎「开了新回合」 | 注入走 `client.session.promptAsync`，会开启新回合（符合「唤醒即续跑」语义） | 预期行为：busy 期间到达的消息会在**下一次 idle** 才被认领注入 |
-| 会话节点在 roster 中长期残留 | 退役依赖宿主发 `session.deleted` 事件 | 会话删除时插件调 `/internal/retire`（幂等；`404` 视为已退役）；若宿主版本不发该事件则节点留待下一次清理（已知限制，见 `adapters/opencode/README.md` 健壮性） |
+| 会话节点在 roster 中长期残留 | 退役依赖宿主发 `session.deleted` 事件 | 会话删除时插件调 `/internal/retire`（幂等；`404` 视为已退役）；**会话被归档**（`time.archived`）时插件同样退役该节点并停其轮询；若宿主版本两者都不发则节点留待下一次清理（已知限制，见 `adapters/opencode/README.md` 健壮性） |
+| 同标题的两个会话只出现一个 | `agents.name` 全局 UNIQUE，第二个注册撞 `name_taken` | 插件已带**稳定别名** `<标题> · <sessionid 前 4 位>` 自动重试一次（幂等），两个会话都会成为联系人；日志可见 `name taken; registered as …` |
+| 发给实例节点 `opencode@<host>` 的消息一直排队 | 实例节点是**分组容器**，`/internal/wake` 只按会话节点 id 发起 → 它不会被拉取 | 预期行为：把消息发给**会话节点**（聊天端点）；历史实例 DM 只是归档留痕。UI 屏蔽容器节点 DM 由 controller 实现 |
 
 ## 约束
 

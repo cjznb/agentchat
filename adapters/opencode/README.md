@@ -33,14 +33,16 @@
 | `session.deleted`（任意会话） | `POST /internal/retire {agentId:<会话节点>}` 退役该会话节点（**幂等**；`404` 视为已退役，不重试）；会话节点是**子节点**故**绝不报 `offline`**（Hub 侧 409 `child_never_offline` 拒绝） |
 | `dispose` | `POST /internal/state {offline}`（**实例节点**是根，报 offline 合规） |
 | **`session.updated`（标题变化）** | 若映射且标题变化 → **重注册**（`task_ref` 不变、名字=新标题；靠 Hub「重注册可更新卡片字段」改名）；标题未变则 no-op |
-| **任何带会话事件指向未映射会话** | **懒收养（A）**：`client.session.get` 查询后登记（根会话父=实例节点；子代理父=其所属会话节点，父未映射则跳过并 warn，**绝不回落实例**），成功继续处理原事件 |
+| **`session.created`/`session.updated` 带 `time.archived`（会话归档）** | **归档不进名单（A/B 同口径）**：未映射 → 跳过并 warn（**不注册、不注入**）；已映射 → **退役**该会话节点（`/internal/retire` + 清映射 + 停该会话轮询；此后不再上报状态、不再注入） |
+| **任何带会话事件指向未映射会话** | **懒收养（A）**：`client.session.get` 查询后登记（根会话父=实例节点；子代理父=其所属会话节点，父未映射则跳过并 warn，**绝不回落实例**；**归档会话即使查到也不登记**，见上一行），成功继续处理原事件 |
 | **（启动·初始化后）** | **启动枚举收养（B）**：fire-and-forget `client.session.list{scope:"project", roots, limit}`，客户端过滤 `time.archived` 后逐个收为**实例节点的子节点**（名字=标题）；不可用/报错即静默降级 |
 
 ### 会话即联系人（层级 / 命名 / 标题同步）
 
 ```
 实例节点（根）        opencode@<主机名>           ← join_token 认领；MCP 出站身份（opencode.id）
-└─ 会话节点（子）     <OpenCode 会话标题>         ← task_ref=session.id；状态/投递按它
+                                              ← **分组容器，不是聊天对象**（发给它的消息不会被投递）
+└─ 会话节点（子）     <OpenCode 会话标题>         ← task_ref=session.id；状态/投递按它（**聊天端点**）
    └─ 子代理会话      <子会话标题>                ← subagent 会话
 ```
 
@@ -48,9 +50,21 @@
   会话节点取 `session.title`（trim 非空），空标题回退 `opencode:<sessionid 前 8 位>`。
 - **标题同步**：记录每会话「上次已知标题」，**仅当标题真的变化**才重注册，避免每次
   `session.updated`（频繁 touch）都重注册刷屏。
+- **同名标题（`name_taken` → 稳定别名重试）**：`agents.name` 全局 UNIQUE，两个同标题会话、或标题
+  恰好等于实例节点名（`opencode@<host>`）都会撞 `name_taken`。撞名时以**稳定**别名
+  `<标题> · <sessionid 前 4 位>` **重试一次**（别名只由 `session.id` 派生 → 重复事件幂等，
+  不会反复改名/重复注册）；仍冲突则保持既有 skip+warn，**绝不把会话吞掉、不崩**。
+  未撞名时行为与从前完全一致。
+- **归档会话（A/B 同口径）**：`time.archived` 非空的会话**不进名单**——A 懒收养与 `session.updated`
+  命中时**未映射即跳过并 warn**（不注册、不注入），**已映射即退役**（`/internal/retire` + 清映射 +
+  停该会话轮询，此后不再上报状态、不再注入）；B 启动枚举在客户端直接过滤。**不是「只有 B 过滤归档」。**
 - **身份分层**：OpenCode 一个进程只暴露**一个** MCP server（本地 stdio 桥），桥逐请求读
   `opencode.id` 作 `x-agent-id` → 故它是**实例级**身份；而状态（`/internal/state`）、投递
   （`/internal/wake`/`result`）按**会话节点 id**。
+- **实例节点是分组容器，不是聊天对象**：拉取积压（`/internal/wake`）的 `agentId` **只**来自
+  `resolve(sessionID)`（会话节点），实例 id 仅用于 `register`/`dispose` 上下线 → **发给实例节点的
+  消息不会被拉取、也不会被投递**；**会话节点才是聊天端点**。历史上的实例级 DM 归档保留在该
+  容器节点下（只读留痕）。（把容器节点在 UI 标记为「不可 DM」属 controller 侧改造，本适配器不做。）
 - **无需迁移**：旧的会话子节点/历史实例节点保留无害；升级后最多多出一个可读的实例分组节点。
 
 ### 已存在/被恢复会话的收养（缺陷修复）
@@ -61,15 +75,20 @@ OpenCode **不会**为已存在/被恢复的会话补发 `session.created`，而
 - **A 懒收养**：`session.status`/`session.idle` 等带会话 id 的事件指向**未映射**会话时，
   先 `client.session.get({path:{id}})` 查询（失败/404 → 保持既有「跳过 + warn」，不崩溃）：无 `parentID` 的
   根会话登记为**实例节点的子节点**（`task_ref=session.id`、名字=标题）；有 `parentID` 且**父会话已映射** →
-  登记为其**所属会话节点的子节点**；**父未映射 → 跳过 + warn（绝不回落实例）**。收养成功后**继续处理原事件**；
-  已映射会话（标题未变）不重复注册（映射表为准，同一串行队列保序）。`session.updated` 直接带完整 `info`，无需再查。
+  登记为其**所属会话节点的子节点**；**父未映射 → 跳过 + warn（绝不回落实例）**；**查到的会话若已归档
+  （`time.archived`）同样跳过 + warn，不注册、不注入**。收养成功后**继续处理原事件**；
+  已映射会话（标题未变）不重复注册（映射表为准，同一串行队列保序）。`session.updated` 直接带完整 `info`，无需再查；
+  其中**已映射但已归档**的会话在此**退役**（见上表）。
 - **B 启动枚举**：初始化后 fire-and-forget 取根会话（`roots:true` + `limit`，默认 5）并按同一规则逐个收为
   **实例节点的子节点**（名字=标题）；`session.list` 在旧宿主可能缺失/报错 → 记录并**静默降级**（只保留 A），插件不失效。
+- **归档口径 A/B 一致**：归档过滤的**唯一判定点**是收养入口（`adoptSession`），B 只是提前在客户端
+  过滤掉同一条件（`isArchived`）——**不存在「只在 B 过滤归档」的语义分叉**。
 
 依据：`@opencode-ai/sdk` 的 `client.session.list`（`GET /session`）与 `client.session.get`（`GET /session/{id}`）
-在 1.18.x 运行期存在且支持 `scope:"project"`/`roots`/`limit`（项目级 list **不过滤归档**，故客户端过滤
-`time.archived == null`）；**发布类型陈旧**未声明这些参数与 `slug`/`time.archived`，本仓在 `types.ts` 本地补声明
-（禁断言）。无 `session.selected`/切换事件，故「收养当前活动会话」只能靠**带 sessionID 的事件 + 启动枚举**。
+在 1.18.x 运行期存在且支持 `scope:"project"`/`roots`/`limit`（项目级 list **不过滤归档**，故 B 在客户端过滤
+`time.archived == null`，A 在收养入口按同一条件拦截）；**发布类型陈旧**未声明这些参数与 `slug`/`time.archived`，
+本仓在 `types.ts` 本地补声明（禁断言）。无 `session.selected`/切换事件，故「收养当前活动会话」只能靠
+**带 sessionID 的事件 + 启动枚举**。
 
 依据：`@opencode-ai/sdk@1.18.32` 的类型联合含 `EventSessionCreated`（`info.parentID` 即子会话父引用）、
 `EventSessionStatus`、`EventSessionIdle`、`EventSessionDeleted`；注入走 `client.session.promptAsync`
@@ -102,6 +121,13 @@ OpenCode **不会**为已存在/被恢复的会话补发 `session.created`，而
 - **运行期会话节点退役**：任何会话 `session.deleted` → `POST /internal/retire`（幂等，`404` 视为已退役不重试；失败只记日志、
   不阻塞主流程），避免名单残留与向已死参与者投递。退役**不可复活**：同一 `task_ref`（=`session.id`）再注册被 Hub 拒绝；
   OpenCode 会话 id 唯一，重派生即新节点。会话节点是**子节点**故**绝不报 `offline`**（实例节点是根，`dispose` 时才报 offline）。
+- **归档即退役（与 `session.deleted` 同一入口）**：已映射会话出现 `time.archived` → 同样走
+  `POST /internal/retire` + 清映射 + **停该会话空闲轮询**（不再 wake、不再上报状态、不再注入）；
+  未映射的归档会话则**根本不注册**。与 B 的启动枚举过滤同口径。
+- **同名标题撞 `name_taken` 不丢会话**：以稳定别名 `<标题> · <sessionid 前 4 位>` 重试一次
+  （幂等，重复事件不再重注册）；仍冲突则 skip + warn（与其它注册失败同路径），不崩、不半途落账。
+- **实例节点不参与投递**：`/internal/wake` 只按**会话节点 id** 发起（`resolve(sessionID)` 唯一来源），
+  故**发给实例节点的消息无人拉取**——它是分组容器而非聊天端点；会话节点才是聊天端点，历史实例 DM 归档于该节点。
 - Windows 上 `chmod 0600` 调用成功但权限位可能不生效（与 Hub 侧 token 同策略）。
 
 ## 安装
@@ -135,7 +161,7 @@ OpenCode **不会**为已存在/被恢复的会话补发 `session.created`，而
 | 文件 | 职责 |
 |---|---|
 | `plugin.ts` | 插件入口（`AgentChatPlugin`）；事件映射与队列调度 |
-| `adopt.ts` | 会话即联系人（实例/会话命名、标题同步、A 懒收养 + B 启动枚举、`AGENTCHAT_ADOPT[_LIMIT]` 解析） |
+| `adopt.ts` | 会话即联系人（实例/会话命名、标题同步、`name_taken` 稳定别名重试、归档退役、A 懒收养 + B 启动枚举、`AGENTCHAT_ADOPT[_LIMIT]` 解析） |
 | `mcp-bridge.mjs` | 本地 stdio MCP 桥：逐请求读盘身份/token，透明转发到 Hub `/mcp` |
 | `hub.ts` | 客户端门面：组合传输层与 MCP，暴露 `register` + `/internal/*` |
 | `transport.ts` | 传输层：HTTP POST、3s 超时、指数退避重试、`HubError` |

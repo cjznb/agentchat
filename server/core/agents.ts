@@ -66,9 +66,9 @@ export function canTransition(from: AgentStatus, to: AgentStatus): boolean {
   return ALLOWED_TRANSITIONS[from].includes(to)
 }
 
-/** 节点卡公共字段（spec §5.1 / A2A AgentCard）。 */
+/** 节点卡公共字段（spec §5.1 / A2A AgentCard）；`name` **可选**：未提供即视为「不改名」。 */
 interface CardInput {
-  readonly name: string
+  readonly name?: string
   readonly vendor?: string
   readonly model?: string
   readonly purpose?: string
@@ -97,6 +97,14 @@ export interface RegisterRootResult {
   readonly joinToken: string
 }
 
+/**
+ * 兜底名（调用方**未提供** `name` 且是**新建**时生成；重注册路径永不受影响）：
+ * `vendor-model-hex`（4 位 hex）——格式与旧 MCP 层 `resolveName` 完全一致，既有断言不变。
+ */
+function fallbackName(input: CardInput): string {
+  return `${input.vendor ?? "unknown"}-${input.model ?? "unknown"}-${randomBytes(2).toString("hex")}`
+}
+
 function cardToInsert(
   input: CardInput,
   fixed: {
@@ -107,7 +115,7 @@ function cardToInsert(
   },
 ): InsertAgentInput {
   return {
-    name: input.name,
+    name: input.name ?? fallbackName(input),
     vendor: input.vendor ?? "—",
     kind: fixed.kind,
     status: fixed.status,
@@ -124,10 +132,12 @@ function cardToInsert(
 /**
  * 卡片字段白名单投影：只带**已提供**（非 `undefined`）的项，供重注册更新既有节点。
  * `vendor`/`kind`/`parentId`/`taskRef`/`status` 等身份结构字段**永不在内**（不因重注册改写）。
+ * `name` 同样只在**调用方真的提供了**时才进投影——否则「不带 name 的认领」（如 Claude 每次
+ * SessionStart）会被兜底随机名改写（Part 1 回归）。
  */
 function cardPatch(input: CardInput): AgentCardPatch {
   return {
-    name: input.name,
+    ...(input.name === undefined ? {} : { name: input.name }),
     ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
     ...(input.skills === undefined ? {} : { skills: input.skills }),

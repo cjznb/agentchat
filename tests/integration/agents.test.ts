@@ -302,6 +302,55 @@ describe("重注册更新卡片字段", () => {
   })
 })
 
+describe("未提供 name 的注册与认领（Part 1 回归：不带 name 不得被改名）", () => {
+  it("join_token 认领未提供 name 时保持原名（Claude SessionStart 每次都不带 name）", () => {
+    const first = registerRoot(db, home, { name: "claude-root", vendor: "claude-code" })
+    const claimed = registerRoot(db, home, {
+      joinToken: first.joinToken,
+      vendor: "claude-code",
+      purpose: "coding-agent",
+    })
+
+    expect(claimed.agent.id).toBe(first.agent.id)
+    expect(claimed.agent.name).toBe("claude-root")
+    expect(claimed.agent.purpose).toBe("coding-agent")
+    expect(claimed.agent.vendor).toBe("claude-code")
+  })
+
+  it("子 task_ref 幂等重注册未提供 name 时保持原名，已提供字段照常更新", () => {
+    const root = registerRoot(db, home, { name: "nn-root" }).agent
+    const first = registerChild(db, {
+      taskRef: "nn-task",
+      parentId: root.id,
+      name: "子节点",
+      vendor: "claude-code",
+    })
+    const again = registerChild(db, {
+      taskRef: "nn-task",
+      parentId: root.id,
+      vendor: "claude-code",
+      purpose: "sub",
+    })
+
+    expect(again.id).toBe(first.id)
+    expect(again.name).toBe("子节点")
+    expect(again.purpose).toBe("sub")
+  })
+
+  it("新建未提供 name 时生成 vendor-model-hex 兜底名（格式与旧 MCP 层一致）", () => {
+    const root = registerRoot(db, home, { vendor: "claude-code" })
+    expect(root.agent.name).toMatch(/^claude-code-unknown-[0-9a-f]{4}$/)
+
+    const child = registerChild(db, {
+      taskRef: "nn-fallback",
+      parentId: root.agent.id,
+      vendor: "opencode",
+      model: "m1",
+    })
+    expect(child.name).toMatch(/^opencode-m1-[0-9a-f]{4}$/)
+  })
+})
+
 describe("canTransition", () => {
   it("permits exactly the whitelisted transitions", () => {
     expect(canTransition("online", "busy")).toBe(true)
