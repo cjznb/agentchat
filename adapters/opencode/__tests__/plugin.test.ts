@@ -105,8 +105,40 @@ function buildFetch(overrides: FetchOverrides = {}): FetchKit {
 }
 
 // ── mock 插件 API ───────────────────────────────────────────────────
+//
+// **忠实还原 `@opencode-ai/sdk@1.18.32` 的 `this` 依赖**（核心回归锁）：
+// 真实生成类 `_HeyApiClient` 持有 `_client`，`Session.get`/`list`/`promptAsync` 的方法体读
+// `this._client`（见 sdk `dist/gen/sdk.gen.js`）。因此把 `session` 做成**类实例**、经 `this._client`
+// 分派；`const g = mock.session.get` 这类**解绑**会 `this===undefined` → 抛
+// `Cannot read properties of undefined (reading '_client')`，与真机日志同源。
+// 旧 mock 用对象字面量（方法不依赖 `this`），解绑无害，故从未抓到该根因（第三次 mock 失真）。
 
-class RecordingClient {
+/** 忠实镜像 `_HeyApiClient`：持有 `_client`，方法体一律经 `this._client` 取值。 */
+class HeyApiClientLike {
+  protected readonly _client: RecordingBackend
+  constructor(client: RecordingBackend) {
+    this._client = client
+  }
+}
+
+/** 忠实镜像 `Session`：三个方法均为**非 async**（同步访问 `this._client`），解绑即同步抛错。 */
+class SessionLike extends HeyApiClientLike {
+  get(input: { readonly path: { readonly id: string } }): Promise<unknown> {
+    return this._client.fetchSession(input)
+  }
+  list(input?: { readonly query?: SessionListQuery }): Promise<unknown> {
+    return this._client.fetchList(input)
+  }
+  promptAsync(input: {
+    readonly path: { readonly id: string }
+    readonly body: { readonly parts: readonly { readonly type: "text"; readonly text: string }[] }
+  }): Promise<unknown> {
+    return this._client.inject(input)
+  }
+}
+
+/** 会话数据的后端（mock 的真实逻辑）；`SessionLike` 经 `this._client` 调它。 */
+class RecordingBackend {
   readonly texts: string[] = []
   failInjections = 0
   /** 注入失败时抛/包的错误体；未设置则用 `new Error("inject boom")`。可设为普通对象模拟实测失败体。 */
@@ -131,6 +163,49 @@ class RecordingClient {
   shape: "bare" | "fields" = "bare"
   readonly getCalls: string[] = []
   readonly listCalls: Array<{ readonly query?: SessionListQuery } | undefined> = []
+
+  /** 由 `get` 分派（经 `SessionLike.get` → `this._client.fetchSession`）。 */
+  async fetchSession(input: { readonly path: { readonly id: string } }): Promise<unknown> {
+    this.getCalls.push(input.path.id)
+    if (this.getError !== undefined) {
+      if (this.shape === "fields") return this.fields(undefined, this.getError)
+      throw this.getError
+    }
+    const session = this.sessions.get(input.path.id)
+    if (session === undefined) {
+      const error = new Error(`session not found: ${input.path.id}`)
+      if (this.shape === "fields") return this.fields(undefined, error)
+      throw error
+    }
+    return this.shape === "fields" ? this.fields(session, undefined) : session
+  }
+
+  /** 由 `list` 分派（经 `SessionLike.list` → `this._client.fetchList`）。 */
+  async fetchList(input?: { readonly query?: SessionListQuery }): Promise<unknown> {
+    this.listCalls.push(input)
+    if (this.listError !== undefined) {
+      if (this.shape === "fields") return this.fields(undefined, this.listError)
+      throw this.listError
+    }
+    const value = this.listRaw === undefined ? this.listResult : this.listRaw
+    return this.shape === "fields" ? this.fields(value, undefined) : value
+  }
+
+  /** 由 `promptAsync` 分派（经 `SessionLike.promptAsync` → `this._client.inject`）。 */
+  async inject(input: {
+    readonly path: { readonly id: string }
+    readonly body: { readonly parts: readonly { readonly type: "text"; readonly text: string }[] }
+  }): Promise<unknown> {
+    this.texts.push(input.body.parts[0]?.text ?? "")
+    if (this.failInjections > 0) {
+      this.failInjections -= 1
+      const error = this.injectionError === undefined ? new Error("inject boom") : this.injectionError
+      if (this.shape === "fields") return this.fields(undefined, error)
+      throw error
+    }
+    return this.shape === "fields" ? this.fields({}, undefined) : undefined
+  }
+
   /**
    * 把结果包成 SDK `fields` 形状，**严格按实测键集**：
    * - 成功（`error === undefined`）→ `{ data, request, response }`，**无 `error` 键**；
@@ -143,44 +218,109 @@ class RecordingClient {
     if (error !== undefined) return { error, request: {}, response: {} }
     return { data, request: {}, response: {} }
   }
-  readonly client: OpencodeClient = {
-    session: {
-      promptAsync: async (input) => {
-        this.texts.push(input.body.parts[0]?.text ?? "")
-        if (this.failInjections > 0) {
-          this.failInjections -= 1
-          const error = this.injectionError === undefined ? new Error("inject boom") : this.injectionError
-          if (this.shape === "fields") return this.fields(undefined, error)
-          throw error
-        }
-        return this.shape === "fields" ? this.fields({}, undefined) : undefined
-      },
-      get: async (input) => {
-        this.getCalls.push(input.path.id)
-        if (this.getError !== undefined) {
-          if (this.shape === "fields") return this.fields(undefined, this.getError)
-          throw this.getError
-        }
-        const session = this.sessions.get(input.path.id)
-        if (session === undefined) {
-          const error = new Error(`session not found: ${input.path.id}`)
-          if (this.shape === "fields") return this.fields(undefined, error)
-          throw error
-        }
-        return this.shape === "fields" ? this.fields(session, undefined) : session
-      },
-      list: async (input) => {
-        this.listCalls.push(input)
-        if (this.listError !== undefined) {
-          if (this.shape === "fields") return this.fields(undefined, this.listError)
-          throw this.listError
-        }
-        const value = this.listRaw === undefined ? this.listResult : this.listRaw
-        return this.shape === "fields" ? this.fields(value, undefined) : value
-      },
-    },
+}
+
+/** mock 的 `client`：`session` 为**类实例**（方法依赖 `this`），而非对象字面量。 */
+class RecordingClient {
+  readonly backend = new RecordingBackend()
+  readonly client: OpencodeClient = { session: new SessionLike(this.backend) }
+  /** 便于既有用例访问 mock 状态（转发到 backend）。 */
+  get texts(): string[] {
+    return this.backend.texts
+  }
+  get sessions(): Map<string, OpencodeSession> {
+    return this.backend.sessions
+  }
+  get getCalls(): string[] {
+    return this.backend.getCalls
+  }
+  get listCalls(): Array<{ readonly query?: SessionListQuery } | undefined> {
+    return this.backend.listCalls
+  }
+  set failInjections(value: number) {
+    this.backend.failInjections = value
+  }
+  get failInjections(): number {
+    return this.backend.failInjections
+  }
+  set injectionError(value: unknown) {
+    this.backend.injectionError = value
+  }
+  get injectionError(): unknown {
+    return this.backend.injectionError
+  }
+  set listResult(value: readonly OpencodeSession[]) {
+    this.backend.listResult = value
+  }
+  get listResult(): readonly OpencodeSession[] {
+    return this.backend.listResult
+  }
+  set listRaw(value: unknown) {
+    this.backend.listRaw = value
+  }
+  get listRaw(): unknown {
+    return this.backend.listRaw
+  }
+  set getError(value: unknown) {
+    this.backend.getError = value
+  }
+  get getError(): unknown {
+    return this.backend.getError
+  }
+  set listError(value: unknown) {
+    this.backend.listError = value
+  }
+  get listError(): unknown {
+    return this.backend.listError
+  }
+  set shape(value: "bare" | "fields") {
+    this.backend.shape = value
+  }
+  get shape(): "bare" | "fields" {
+    return this.backend.shape
   }
 }
+
+/**
+ * 解绑调用应同步抛错：V8 报 `Cannot read properties of undefined (reading '_client')`，
+ * JSC/终端粘贴可能显示 `undefined is not an object (evaluating 'this._client')`，
+ * 故只断言 `TypeError` + 措辞中出现 `_client`（对错误文案格式不敏感）。
+ */
+function expectUnboundThrows(call: () => unknown): void {
+  let thrown: unknown
+  try {
+    call()
+  } catch (error) {
+    thrown = error
+  }
+  expect(thrown).toBeInstanceOf(TypeError)
+  expect(String(thrown)).toMatch(/_client/)
+}
+
+describe("mock 忠实性（SDK this 依赖回归锁）", () => {
+  it("解绑 session.get / list / promptAsync 即抛 this._client 未定义（与真机同源）", () => {
+    const session = new SessionLike(new RecordingBackend())
+    const get = session.get
+    const list = session.list
+    const promptAsync = session.promptAsync
+    expectUnboundThrows(() => get({ path: { id: "s" } }))
+    expectUnboundThrows(() => list({ query: {} }))
+    expectUnboundThrows(() =>
+      promptAsync({ path: { id: "s" }, body: { parts: [{ type: "text", text: "x" }] } }),
+    )
+  })
+
+  it("经接收者调用（生产代码形态）则正常返回（get/list）", async () => {
+    const backend = new RecordingBackend()
+    const session = new SessionLike(backend)
+    backend.sessions.set("s1", { id: "s1" })
+    const got = await session.get({ path: { id: "s1" } })
+    expect(got).toEqual({ id: "s1" })
+    backend.listResult = [{ id: "s1" }]
+    const listed = await session.list({ query: { scope: "project", roots: true, limit: 5 } })
+    expect(listed).toEqual([{ id: "s1" }])
+  })
+})
 
 interface Harness {
   readonly handle: PluginHandle

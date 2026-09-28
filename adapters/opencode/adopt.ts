@@ -115,14 +115,16 @@ export function createAdopter(deps: AdoptDeps): Adopter {
   const resolve = async (sessionID: string): Promise<string | undefined> => {
     const mapped = deps.state.get(sessionID)
     if (mapped !== undefined) return mapped
-    const get = deps.client.session.get
-    if (get === undefined) {
+    // **必须经接收者调用**：SDK 生成类的方法体读 `this._client`，解绑（`const get = …get`）会丢 `this`
+    // 而抛 `undefined is not an object (evaluating 'this._client')`。故只做「方法存在」守卫，保留 `.get(...)` 形态。
+    const sessionApi = deps.client.session
+    if (sessionApi.get === undefined) {
       deps.log(`session lookup unavailable for ${sessionID}; skipped`)
       return undefined
     }
     let raw: unknown
     try {
-      raw = await get({ path: { id: sessionID } })
+      raw = await sessionApi.get({ path: { id: sessionID } })
     } catch (error) {
       deps.log(`session lookup failed for ${sessionID}: ${describe(error)}`)
       return undefined
@@ -141,16 +143,17 @@ export function createAdopter(deps: AdoptDeps): Adopter {
 
   const enumerate = (): void => {
     if (!isAdoptEnabled(deps.env)) return
-    const list = deps.client.session.list
-    if (list === undefined) {
-      deps.log("startup adoption skipped: session.list unavailable")
-      return
-    }
     const limit = parseAdoptLimit(deps.env["AGENTCHAT_ADOPT_LIMIT"])
     deps.enqueue(async () => {
+      // **必须经接收者调用**（同 `resolve`）：解绑 SDK 方法会丢 `this` 而抛 `this._client` 未定义。
+      const sessionApi = deps.client.session
+      if (sessionApi.list === undefined) {
+        deps.log("startup adoption skipped: session.list unavailable")
+        return
+      }
       let raw: unknown
       try {
-        raw = await list({ query: { scope: "project", roots: true, limit } })
+        raw = await sessionApi.list({ query: { scope: "project", roots: true, limit } })
       } catch (error) {
         deps.log(`startup adoption list failed: ${describe(error)}`)
         return
