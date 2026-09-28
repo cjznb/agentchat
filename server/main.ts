@@ -34,6 +34,8 @@ export interface BootstrapOptions {
   readonly startDispatcher?: boolean
   /** dispatcher 单轮异常回调（缺省 `console.error`）。 */
   readonly onDispatcherError?: (error: unknown) => void
+  /** 启动警告出口（缺省 `console.warn`）；测试注入收集器。 */
+  readonly log?: (message: string) => void
 }
 
 export interface HubHandle {
@@ -52,6 +54,16 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<HubHand
   const ownsDb = options.db === undefined
   const db = options.db ?? openDb(join(home, "agentchat.db"))
   const adapters = options.adapters ?? config.adapters
+  // 未登记任何厂商适配器时给一条明确启动警告（不阻塞、不改退出码）：用户会看到消息
+  // 一直停在「排队中」却毫无提示——这是最易踩的沉默配置。
+  if (adapters.length === 0) {
+    const log = options.log ?? ((message: string): void => console.warn(message))
+    log(
+      "[agentchat] AGENTCHAT_ADAPTERS 未设置（适配器列表为空）：消息会一直停在「排队中」且不会被投递。" +
+        ' 设置后重启 Hub —— Windows：`$env:AGENTCHAT_ADAPTERS = "opencode,claude-code"; npm start`；' +
+        "POSIX：`AGENTCHAT_ADAPTERS=opencode,claude-code npm start`。",
+    )
+  }
   // 先登记可用性，再拉起 dispatcher（避免首轮把 pull 目标误当无通道/推送处理）。
   registerConfiguredAdapters({ adapters })
   const dispatcher =

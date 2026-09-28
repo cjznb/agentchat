@@ -30,7 +30,14 @@ import { createApp } from "../../server/index"
 import { applyAgentState, ensureHubToken } from "../../server/routes/internal"
 import { getAgent, insertAgent, type Agent } from "../../server/store/agents"
 import type { Message } from "../../server/store/messages"
-import { backoffMs, applyDeliveryResult, getWakeJob, type WakeJob } from "../../server/store/wake"
+import {
+  backoffMs,
+  applyDeliveryResult,
+  DUE_JOBS_PER_TICK,
+  dueWakeJobs,
+  getWakeJob,
+  type WakeJob,
+} from "../../server/store/wake"
 
 let home = ""
 let db: Db
@@ -449,6 +456,42 @@ describe("no-adapter job creation (Plan 5 修复 2)", () => {
     })
     expect(await result.json()).toEqual({ ok: true, applied: 1 })
     expect(receiptState(db, message, peer.id)).toBe("delivered")
+  })
+})
+
+describe("dueWakeJobs per-tick limit (Plan 5 跟进)", () => {
+  it("caps a single call at the limit (id order preserved) and drains every due job across calls", () => {
+    expect(DUE_JOBS_PER_TICK).toBe(200)
+    const sender = makeAgent("limit-sender")
+    const peer = makeAgent("limit-peer")
+    for (let i = 0; i < 5; i += 1) sendMessage(db, { from: sender.id, to: peer.id, body: `m${i}` })
+    const now = Date.now() + 10_000
+
+    // 少量（< 默认上限）行为不变：全部返回、按 id 升序。
+    const all = dueWakeJobs(db, now)
+    expect(all.map((job) => job.id)).toEqual([...all.map((job) => job.id)].sort((a, b) => a - b))
+    expect(all).toHaveLength(5)
+
+    // 一次调用只取 limit 条。
+    const first = dueWakeJobs(db, now, 2)
+    expect(first).toHaveLength(2)
+    expect(first[0]!.id).toBeLessThan(first[1]!.id)
+
+    // 逐批「处理」（把已取 job 推到未来）→ 多次调用可把全部到期 job 处理完，不漏投。
+    const handled: number[] = []
+    let batch = dueWakeJobs(db, now, 2)
+    while (batch.length > 0) {
+      for (const job of batch) {
+        handled.push(job.id)
+        db.prepare<[number, number], void>("UPDATE wake_jobs SET retry_at = ? WHERE id = ?").run(
+          now + 999_999,
+          job.id,
+        )
+      }
+      batch = dueWakeJobs(db, now, 2)
+    }
+    expect(handled).toHaveLength(5)
+    expect(handled).toEqual([...handled].sort((a, b) => a - b))
   })
 })
 

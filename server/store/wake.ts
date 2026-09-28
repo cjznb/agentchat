@@ -38,6 +38,11 @@ export const NOTICE_WINDOW_MS = 1_800_000
 export const REFUSAL_LIMIT = 2
 /** 认领后在途时限：超时未回执则回 `pending` 重投。 */
 export const CLAIM_TIMEOUT_MS = 30_000
+/**
+ * 每 tick 处理的到期 job 上限：防未登记适配器时每 tick 全量遍历/写入（O(N) 无界、job churn）。
+ * 其余下 tick 继续（`ORDER BY id` 保证老的先处理），**不影响最终投递**（少量 job 行为不变）。
+ */
+export const DUE_JOBS_PER_TICK = 200
 
 // ── 类型与状态机白名单 ────────────────────────────────────────────
 
@@ -179,16 +184,24 @@ export interface DueWakeJob extends WakeJob {
   readonly recipientVendor: string
 }
 
-/** 到期 `pending` job（含收件方状态/vendor，供 dispatcher 分流认领/退避）。 */
-export function dueWakeJobs(db: Db, now: number): DueWakeJob[] {
+/**
+ * 到期 `pending` job（含收件方状态/vendor，供 dispatcher 分流认领/退避）。
+ * `ORDER BY id` + `LIMIT`（缺省 `DUE_JOBS_PER_TICK`）：老的先处理，其余下 tick 继续。
+ */
+export function dueWakeJobs(
+  db: Db,
+  now: number,
+  limit: number = DUE_JOBS_PER_TICK,
+): DueWakeJob[] {
   const rows = db
-    .prepare<[number], WakeJobRow & { status: string; vendor: string }>(
+    .prepare<[number, number], WakeJobRow & { status: string; vendor: string }>(
       `SELECT j.*, a.status AS status, a.vendor AS vendor
          FROM wake_jobs j JOIN agents a ON a.id = j.agent_id
         WHERE j.state = 'pending' AND j.retry_at <= ?
-        ORDER BY j.id`,
+        ORDER BY j.id
+        LIMIT ?`,
     )
-    .all(now)
+    .all(now, limit)
   return rows.map((row) => ({
     ...toWakeJob(row),
     recipientStatus: agentStatusSchema.parse(row.status),
