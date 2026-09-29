@@ -69,6 +69,12 @@ npm run build  # 构建前端到 client/dist（npm start 从该目录托管静�
 
 **E2E**：`npx playwright test` 需要 **4646 端口空闲**，并会**自举一个临时 `AGENTCHAT_HOME`**（`playwright.config.ts` 用 `os.tmpdir()` 下的隔离目录，**绝不触碰真实 `~/.agentchat`**）。CI 不跑 E2E（见 `.github/workflows/ci.yml` 注释）。
 
+## 测试隔离（重要）
+
+- 测试与临时脚本**必须显式隔离 `AGENTCHAT_HOME`**（指向一次性临时目录）。`vitest.config.ts` 已有全局 `setupFiles`（`tests/setup/isolate-home.ts`）兜底，但**新写的脚本 / CLI 手工验证不算在内**。
+- 原因：`server/config.ts` 的 `config` 在**导入期**求值一次。若开发机存在真实 `~/.agentchat/config.json`，其 `adapters` 会被读进 `config` 并渗进用例 —— 曾导致「本机红、CI 绿」的反向失败。
+- ⚠️ **PowerShell 陷阱**：`$home` 是**只读自动变量**，`$home = …` 会**静默失败** → 环境变量实际未设置 → 脚本会写进**真实数据目录 / 用户主目录**。请用 `$env:AGENTCHAT_HOME = …`，或换名（如 `$hubHome`）。历史上已两次因它误在用户主目录落文件。
+
 ## 硬约束（本仓红线）
 
 - **单文件 ≤ 250 纯行**（非空、非注释）；超限先拆分再合并。
