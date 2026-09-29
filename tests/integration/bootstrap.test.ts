@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { clearAdapters } from "../../server/adapters/types"
 import { openDb } from "../../server/db"
 import { bootstrap, type HubHandle } from "../../server/main"
 import { insertAgent } from "../../server/store/agents"
@@ -21,6 +22,7 @@ describe("bootstrap 生产入口（C1）", () => {
   const quiet = (): void => {}
 
   afterEach(async () => {
+    clearAdapters()
     await handle?.close()
     handle = undefined
     if (home !== "") rmSync(home, { recursive: true, force: true })
@@ -55,13 +57,14 @@ describe("bootstrap 生产入口（C1）", () => {
   })
 
   it("warns only when adapters are empty AND an eligible job has no adapter", async () => {
+    clearAdapters() // 隔离：更早用例可能已按开发者真实 config.json 注册过适配器（进程级注册表）
     const warnings: string[] = []
     const collect = (message: string): void => void warnings.push(message)
     const warns = (): string[] => warnings.filter((message) => message.includes("有界退避重试"))
 
     // ① 无适配器、无合格 job → 不输出警告
     home = mkdtempSync(join(tmpdir(), "agentchat-bootstrap-"))
-    ;(await bootstrap({ port: 0, home, startDispatcher: false, log: collect })).close()
+    ;(await bootstrap({ port: 0, home, startDispatcher: false, adapters: [], log: collect })).close()
     expect(warns()).toHaveLength(0)
 
     // ② 无适配器 + 存在「收件方 vendor 无适配器」的到期 pending job → 精确警告一次

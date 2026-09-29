@@ -70,9 +70,15 @@ function systemNotices(agentId: string, needle: string): Message[] {
 
 describe("AGENTCHAT_ADAPTERS parsing", () => {
   it("defaults to [] when unset or blank", () => {
-    expect(loadConfig({}).adapters).toEqual([])
-    expect(loadConfig({ AGENTCHAT_ADAPTERS: "" }).adapters).toEqual([])
-    expect(loadConfig({ AGENTCHAT_ADAPTERS: "   " }).adapters).toEqual([])
+    // 隔离：显式临时 home，避免读到开发者真实 ~/.agentchat/config.json 的 adapters
+    const home = mkdtempSync(join(tmpdir(), "agentchat-adapters-"))
+    try {
+      expect(loadConfig({ AGENTCHAT_HOME: home }).adapters).toEqual([])
+      expect(loadConfig({ AGENTCHAT_HOME: home, AGENTCHAT_ADAPTERS: "" }).adapters).toEqual([])
+      expect(loadConfig({ AGENTCHAT_HOME: home, AGENTCHAT_ADAPTERS: "   " }).adapters).toEqual([])
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
   it("trims entries, drops blanks, dedupes and preserves first-seen order", () => {
