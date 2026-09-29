@@ -75,7 +75,7 @@ CI / 管道 / 脚本一律不开。`--no-open` 与 `AGENTCHAT_NO_OPEN` 是同一
 OpenCode 插件在空闲期间还会**周期轮询**（`AGENTCHAT_POLL_MS`，默认 10s）补拉，故「已经 idle 之后」到达的消息也能被投递。
 
 **厂商登记免手动配置**：厂商列表按 **env `AGENTCHAT_ADAPTERS` > `<AGENTCHAT_HOME>/config.json` 的
-`adapters` 字段 > 空** 解析。两个安装器安装时会把**本厂商 id 自动合并**进 `config.json`（幂等、保留其它键、
+`adapters` 字段 > 空** 解析（**env 为空串 = 显式清空**并压过文件；只有**未设**才回落到文件）。两个安装器安装时会把**本厂商 id 自动合并**进 `config.json`（幂等、保留其它键、
 `--uninstall` 精确移除），因此**无需再手动 `$env:AGENTCHAT_ADAPTERS`**。即便完全未登记，Hub 在**首次**收到
 某厂商的 `POST /internal/wake` 时会**自动识别为 pull 适配器**（此后 dispatcher 不再对该厂商的到期消息做退避）；
 未登记的真实代价只是 dispatcher 对到期消息做**有界重试（每 ≤30s 一次）**，消息不会丢失。

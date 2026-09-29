@@ -67,6 +67,16 @@ describe("config.json 解析与优先级", () => {
     expect(config.port).toBe(2222)
   })
 
+  it("treats a blank AGENTCHAT_ADAPTERS as an explicit clear that overrides the file", () => {
+    const home = tempHome()
+    writeConfig(home, { adapters: ["claude-code"] })
+
+    expect(loadConfig({ AGENTCHAT_HOME: home, AGENTCHAT_ADAPTERS: "" }).adapters).toEqual([])
+    expect(loadConfig({ AGENTCHAT_HOME: home, AGENTCHAT_ADAPTERS: "   " }).adapters).toEqual([])
+    // 只有「未设」才回落到文件
+    expect(loadConfig({ AGENTCHAT_HOME: home }).adapters).toEqual(["claude-code"])
+  })
+
   it("applies openBrowser env flags with AGENTCHAT_NO_OPEN winning", () => {
     const home = tempHome()
     writeConfig(home, { openBrowser: true })

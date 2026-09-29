@@ -36,7 +36,11 @@ function normalizeAdapters(values: readonly string[]): string[] {
   return [...new Set(values.map((part) => part.trim()).filter((part) => part !== ""))]
 }
 
-/** env `AGENTCHAT_ADAPTERS`（逗号分隔）→ 列表；未设 = `undefined`（交由文件/默认）。 */
+/**
+ * env `AGENTCHAT_ADAPTERS`（逗号分隔）→ 列表。
+ * - **未设** = `undefined`（交由 `config.json` / 默认）；
+ * - **空串/纯空白** = **显式清空**（`[]`，**压过** `config.json` 的 `adapters`）—— 这是唯一"忽略文件登记"的手段。
+ */
 const adaptersEnvSchema = z
   .string()
   .optional()
