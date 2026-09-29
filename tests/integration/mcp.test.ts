@@ -33,7 +33,7 @@ import { createGroup, inbox, sendMessage } from "../../server/core/messaging"
 import { ask, ensureHuman, respondAsk } from "../../server/core/permissions"
 import { start, type RunningServer } from "../../server/index"
 import { applyAgentState, ensureHubToken } from "../../server/routes/internal"
-import { getAgent, insertAgent, type Agent } from "../../server/store/agents"
+import { getAgent, insertAgent, renameAgent, type Agent } from "../../server/store/agents"
 import { listApprovals } from "../../server/store/approvals"
 import { ensureShoutConversation } from "../../server/store/conversations"
 
@@ -838,6 +838,35 @@ describe("register 首次与认领（DoD ④）", () => {
       // 带 name 的认领照常改名（既有语义）。
       expect(third.agent.name).toBe("mcp-renamed")
       expect(getAgent(db, first.agent.id)?.name).toBe("mcp-renamed")
+    } finally {
+      await client.close()
+    }
+  })
+})
+
+// ── Task 6：name_taken 映射覆盖展示名唯一索引（adopt 稳定别名重试的输入契约） ────
+
+describe("register 撞名 → name_taken（展示名索引口径）", () => {
+  it("maps both a duplicate raw name and a display-name collision to [name_taken]", async () => {
+    const client = await connect()
+    try {
+      // 裸名重复：两行 custom_name 均为 NULL → 唯一索引与 agents.name 同时命中。
+      expect(toolFailed(await callTool(client, "register", { name: "t6-dup", vendor: "opencode" }))).toBe(false)
+      const dupRaw = await callTool(client, "register", { name: "t6-dup", vendor: "opencode" })
+      expect(toolFailed(dupRaw)).toBe(true)
+      expect(textOf(dupRaw)).toContain("[name_taken]")
+
+      // 展示名冲突：他人改名占用 t6-taken 后，裸名未撞、只撞展示名索引 → 同样 name_taken。
+      const holder = insertAgent(db, {
+        name: "t6-holder-raw",
+        kind: "runtime",
+        status: "online",
+        vendor: "opencode",
+      })
+      renameAgent(db, holder.id, "t6-taken")
+      const displayClash = await callTool(client, "register", { name: "t6-taken", vendor: "opencode" })
+      expect(toolFailed(displayClash)).toBe(true)
+      expect(textOf(displayClash)).toContain("[name_taken]")
     } finally {
       await client.close()
     }

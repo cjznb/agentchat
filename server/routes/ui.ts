@@ -39,6 +39,7 @@ import { getApproval, listApprovals, type Approval } from "../store/approvals"
 import { createDm, createGroup, getConversation } from "../store/conversations"
 import { latestInConversation } from "../store/messages"
 import { markRead } from "../store/read_states"
+import { handleAgentRename } from "./agent-rename"
 
 // 生产缺省连接：首个 roster 请求时按 `config.dbPath` 打开并复用（进程单例）。
 let defaultDb: Db | undefined
@@ -106,6 +107,7 @@ function executeApproved(db: Db, approval: Approval): void {
 /** 路由表：`db` 缺省时惰性取进程配置库（测试显式注入临时库）。 */
 export function uiRoutes(db?: Db): Hono {
   return new Hono()
+    .patch("/api/agents/:id", (c) => handleAgentRename(c, resolveDb(db)))
     .get("/api/roster", (c) => {
       const database = resolveDb(db)
       const human = ensureHuman(database)

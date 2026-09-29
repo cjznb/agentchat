@@ -17,6 +17,9 @@ const APPROVALS_NEW_COLUMNS = ["kind", "target", "result", "read_at"] as const
 /** `messages` 新增可空列（撤回；旧库 ADD COLUMN 即可，无需重建 —— 列可空且无 CHECK）。 */
 const MESSAGES_REVOKED_COLUMN = "revoked_at"
 
+/** `agents` 新增可空列（用户改名；旧库 ADD COLUMN 即可，老行取 NULL → 展示名回落 name）。 */
+const AGENTS_CUSTOM_NAME_COLUMN = "custom_name"
+
 interface SqliteMasterRow {
   readonly sql: string | null
 }
@@ -85,7 +88,7 @@ function migrateApprovals(db: Db): void {
 
 /**
  * `messages.revoked_at` 幂等迁移（撤回功能）：旧库缺列时 `ALTER TABLE ADD COLUMN`（可空，
- * 老行取值 NULL，天然向后兼容）；fresh 库由 schema.sql 直建，短路跳过。
+ * 老行取 NULL，天然向后兼容）；fresh 库由 schema.sql 直建，短路跳过。
  */
 function migrateMessages(db: Db): void {
   const columns = new Set(
@@ -93,6 +96,23 @@ function migrateMessages(db: Db): void {
   )
   if (columns.has(MESSAGES_REVOKED_COLUMN)) return
   db.exec(`ALTER TABLE messages ADD COLUMN ${MESSAGES_REVOKED_COLUMN} INTEGER`)
+}
+
+/**
+ * `agents.custom_name` 幂等迁移（Task 6 改名）：旧库缺列时 `ALTER TABLE ADD COLUMN`（可空，
+ * 老行取 NULL → 展示名回落 `name`，天然向后兼容）；fresh 库表尚不存在 → 短路跳过
+ * （schema.sql 直建含新列表）。
+ *
+ * **必须先于 schema.sql 执行**（偏差见 task-6 报告）：schema.sql 的展示名唯一索引
+ * `COALESCE(custom_name, name)` 引用该列 —— 旧库缺列时先跑 schema 会在建索引处
+ * 报 `no such column`（实测），故调用点在 `db.exec(schema)` 之前而非 migrate* 一组之后。
+ */
+function migrateAgents(db: Db): void {
+  const info = db.pragma("table_info(agents)") as TableInfoRow[]
+  if (info.length === 0) return // fresh 库：表尚不存在，schema.sql 直建（含新列与唯一索引）
+  const columns = new Set(info.map((column) => column.name))
+  if (columns.has(AGENTS_CUSTOM_NAME_COLUMN)) return
+  db.exec(`ALTER TABLE agents ADD COLUMN ${AGENTS_CUSTOM_NAME_COLUMN} TEXT`)
 }
 
 /**
@@ -135,6 +155,7 @@ export function clearAllTables(db: Db): void {
  * - `journal_mode=WAL`：读写并发（spec §14）
  * - `foreign_keys=ON`：八张表的引用完整性逐语句生效
  * - schema.sql 幂等（IF NOT EXISTS）；`approvals` 旧结构再经幂等迁移重建
+ * - `migrateAgents` 先于 schema exec（见其注释：旧库缺列时 schema 的表达式唯一索引会失败）
  */
 export function openDb(dbPath: string): Db {
   mkdirSync(dirname(dbPath), { recursive: true })
@@ -142,6 +163,7 @@ export function openDb(dbPath: string): Db {
   db.pragma("journal_mode = WAL")
   db.pragma("foreign_keys = ON")
   db.pragma("busy_timeout = 5000")
+  migrateAgents(db)
   db.exec(readFileSync(SCHEMA_URL, "utf8"))
   migrateApprovals(db)
   migrateMessages(db)

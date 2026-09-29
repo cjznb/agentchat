@@ -8,6 +8,7 @@
 CREATE TABLE IF NOT EXISTS agents (
   id          TEXT PRIMARY KEY,
   name        TEXT NOT NULL UNIQUE,
+  custom_name TEXT,                                 -- 用户改名（Task 6：展示名 = custom_name ?? name；NULL = 未改）
   kind        TEXT NOT NULL CHECK (kind IN ('runtime', 'logical')),
   task_ref    TEXT UNIQUE,                          -- runtime 子注册幂等键（spec §5.2）
   parent_id   TEXT REFERENCES agents(id),           -- NULL = 根
@@ -26,6 +27,9 @@ CREATE TABLE IF NOT EXISTS agents (
 );
 CREATE INDEX IF NOT EXISTS idx_agents_parent ON agents (parent_id);
 CREATE INDEX IF NOT EXISTS idx_agents_root ON agents (root_id);
+-- 展示名唯一（Task 6）：custom_name 非空按它判重，否则按 name —— 改名与系统名同一命名空间。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_display_name
+  ON agents (COALESCE(custom_name, name));
 
 -- 会话（spec §5.3）：key 唯一，DM = dm:<idA>_<idB>（成员排序），群 = group:<id>。
 CREATE TABLE IF NOT EXISTS conversations (

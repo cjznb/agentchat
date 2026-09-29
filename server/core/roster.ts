@@ -19,6 +19,7 @@ import { type AgentStatus, type RosterNode } from "../../shared/contracts"
 import type { Db } from "../db"
 import {
   AgentNotFoundError,
+  agentDisplayName,
   getAgent,
   listAgents,
   touchAgent,
@@ -71,7 +72,7 @@ function buildRoster(db: Db, now: number, stale: string[] = []): RosterNode[] {
   }
   const build = (agent: Agent): RosterNode => ({
     id: agent.id,
-    name: agent.name,
+    name: agentDisplayName(agent),
     kind: agent.kind,
     parent_id: agent.parentId ?? null,
     vendor: agent.vendor,

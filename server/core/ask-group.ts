@@ -17,7 +17,13 @@
  */
 import { resolveMentions, type MentionTarget } from "../../shared/mentions"
 import type { Db } from "../db"
-import { AgentNotFoundError, getAgent, getAgentByName, listAgents } from "../store/agents"
+import {
+  AgentNotFoundError,
+  agentDisplayName,
+  getAgent,
+  getAgentByName,
+  listAgents,
+} from "../store/agents"
 import { getApproval, type Approval } from "../store/approvals"
 import { isParticipant, type Conversation } from "../store/conversations"
 import { latestInConversation } from "../store/messages"
@@ -75,20 +81,26 @@ export interface GroupAskWaitResult {
   readonly reply: GroupAskReply
 }
 
-/** 群可提及参与者（id+name）：`recipientsOf` 口径 —— 容器恒排除、不含发送者（spec §2）。 */
+/** 群可提及参与者（id+展示名）：`recipientsOf` 口径 —— 容器恒排除、不含发送者（spec §2）。 */
 function mentionableTargets(db: Db, conversation: Conversation, from: string): MentionTarget[] {
   const targets: MentionTarget[] = []
   for (const id of recipientsOf(db, conversation, from)) {
     const agent = getAgent(db, id)
-    if (agent !== undefined) targets.push({ id: agent.id, name: agent.name })
+    if (agent !== undefined) targets.push({ id: agent.id, name: agentDisplayName(agent) })
   }
   return targets
 }
 
-/** 未命中 token 是否对应真实节点（名字精确 / id / id 前 8 位，与 `resolveMentions` 同口径）。 */
+/**
+ * 未命中 token 是否对应真实节点（名字精确 / 展示名 / id / id 前 8 位）。
+ * 展示名匹配（Task 6）：改名后的节点以 `custom_name` 出现在提及里 —— 未命中 token 命中
+ * 其展示名时仍算「真实节点」，归类 `mention_not_participant`（而非 `mention_not_found`）。
+ */
 function isRealAgent(db: Db, token: string): boolean {
   if (getAgentByName(db, token) !== undefined || getAgent(db, token) !== undefined) return true
-  return token.length >= 8 && listAgents(db).some((agent) => agent.id.startsWith(token))
+  return listAgents(db).some(
+    (agent) => agentDisplayName(agent) === token || (token.length >= 8 && agent.id.startsWith(token)),
+  )
 }
 
 /**

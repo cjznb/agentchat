@@ -18,6 +18,7 @@ import { approvalSnapshotSchema } from "../../shared/contracts"
 import type { Db } from "../db"
 import {
   AgentNotFoundError,
+  agentDisplayName,
   getAgent,
   getAgentByName,
   hasAgentKey,
@@ -243,7 +244,7 @@ export function gate<T>(
   postSystem(db, {
     conversationId: channel.id,
     fromAgentId: actorId,
-    body: `🔒 审批请求：${actor.name} 发起「${ACTION_LABEL[action]}」，等待你同意或拒绝。`,
+    body: `🔒 审批请求：${agentDisplayName(actor)} 发起「${ACTION_LABEL[action]}」，等待你同意或拒绝。`,
     meta: { approvalId: approval.id, action, payload },
     idempotencyKey: `approval-card:${approval.id}`,
   })

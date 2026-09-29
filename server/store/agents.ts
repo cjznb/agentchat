@@ -17,6 +17,8 @@ const skillsSchema = z.array(z.string())
 export interface Agent {
   readonly id: string
   readonly name: string
+  /** 用户改名（Task 6）：非空时为展示名，覆盖系统名 `name`；NULL = 未改名。 */
+  readonly customName: string | undefined
   readonly kind: AgentKind
   readonly taskRef: string | undefined
   readonly parentId: string | undefined
@@ -52,6 +54,7 @@ export interface InsertAgentInput {
 interface AgentRow {
   readonly id: string
   readonly name: string
+  readonly custom_name: string | null
   readonly kind: string
   readonly task_ref: string | null
   readonly parent_id: string | null
@@ -99,6 +102,7 @@ function toAgent(row: AgentRow): Agent {
   return {
     id: row.id,
     name: row.name,
+    customName: row.custom_name ?? undefined,
     kind: agentKindSchema.parse(row.kind),
     taskRef: row.task_ref ?? undefined,
     parentId: row.parent_id ?? undefined,
@@ -146,6 +150,7 @@ export function insertAgent(db: Db, input: InsertAgentInput): Agent {
   return {
     id,
     name: params.name,
+    customName: undefined,
     kind: params.kind,
     taskRef: input.taskRef,
     parentId: input.parentId,
@@ -220,6 +225,60 @@ export function updateAgentCard(db: Db, id: string, patch: AgentCardPatch): Agen
       `UPDATE agents SET ${assignments.join(", ")} WHERE id = $id RETURNING *`,
     )
     .get(params)
+  if (row === undefined) throw new AgentNotFoundError(id)
+  return toAgent(row)
+}
+
+// ── Task 6：改名（custom_name）—— 展示名优先级：用户改名 > 系统名 ─────────────
+
+/**
+ * 展示名（Task 6 唯一取名口径）：`custom_name` 有值取之（用户改名），否则回落系统名
+ * `name`（会话标题同步只写 name，永不触碰 custom_name）。所有对外展示取名处一律走本函数。
+ */
+export function agentDisplayName(agent: Pick<Agent, "name" | "customName">): string {
+  return agent.customName ?? agent.name
+}
+
+/** `PATCH /api/agents/:id` 入参：trim 后非空、≤64 字、禁控制字符（\p{Cc}：C0/C1）。 */
+export const agentRenameSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .refine((value) => !/[\p{Cc}]/u.test(value), { message: "control characters are not allowed" }),
+})
+
+/** 改名冲突：目标展示名已被其他节点占用（展示名唯一索引口径）→ 409 `name_taken`。 */
+export class AgentNameTakenError extends Error {
+  readonly code = "name_taken"
+  constructor(readonly displayName: string) {
+    super(`agent display name already taken: ${displayName}`)
+    this.name = "AgentNameTakenError"
+  }
+}
+
+/**
+ * 用户改名（Task 6 `PATCH /api/agents/:id`）：只写 `custom_name`，`name` 与身份/结构字段
+ * 一律不动（`register`/标题同步写 name 的对偶面）。唯一性按展示名口径
+ * （`COALESCE(custom_name, name)` 唯一索引兜底）：撞他人展示名 → `AgentNameTakenError`；
+ * 未知 id → `AgentNotFoundError`；改回自身当前展示名 → 幂等放行。
+ */
+export function renameAgent(db: Db, id: string, displayName: string): Agent {
+  let row: AgentRow | undefined
+  try {
+    row = db
+      .prepare<{ id: string; customName: string }, AgentRow>(
+        "UPDATE agents SET custom_name = $customName WHERE id = $id RETURNING *",
+      )
+      .get({ id, customName: displayName })
+  } catch (error) {
+    // 该 UPDATE 只写 custom_name → 唯一约束冲突只可能来自展示名唯一索引。
+    if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
+      throw new AgentNameTakenError(displayName)
+    }
+    throw error
+  }
   if (row === undefined) throw new AgentNotFoundError(id)
   return toAgent(row)
 }

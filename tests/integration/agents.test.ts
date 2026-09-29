@@ -26,16 +26,68 @@ import {
   rosterTreeSchema,
 } from "../../server/core/agents"
 import { loadConfig } from "../../server/config"
-import { openDb, type Db } from "../../server/db"
+import { clearAllTables, openDb, type Db } from "../../server/db"
 import { createApp } from "../../server/index"
+import { askGroup } from "../../server/core/ask-group"
+import { MentionNotParticipantError } from "../../server/core/ask"
 import { applyAgentState } from "../../server/routes/internal"
-import { AgentNotFoundError, getAgent, touchAgent } from "../../server/store/agents"
-import { createDm } from "../../server/store/conversations"
+import {
+  agentDisplayName,
+  AgentNameTakenError,
+  AgentNotFoundError,
+  getAgent,
+  renameAgent,
+  touchAgent,
+} from "../../server/store/agents"
+import { createDm, createGroup } from "../../server/store/conversations"
 import { send } from "../../server/store/messages"
 import { currentWsSeq, resetWsHub } from "../../server/ws"
 
 let home = ""
 let db: Db
+
+function agentsColumns(database: Db): string[] {
+  return (database.pragma("table_info(agents)") as { name: string }[]).map((c) => c.name)
+}
+
+function displayIndexSql(database: Db): string {
+  const row = database
+    .prepare<[], { sql: string | null }>(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_agents_display_name'",
+    )
+    .get()
+  return row?.sql ?? ""
+}
+
+/** Task 6 前的旧结构：agents 表无 custom_name、无展示名唯一索引。 */
+function seedLegacyAgentsDb(path: string): void {
+  const legacy = new Database(path)
+  legacy.exec(`CREATE TABLE agents (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    kind        TEXT NOT NULL CHECK (kind IN ('runtime', 'logical')),
+    task_ref    TEXT UNIQUE,
+    parent_id   TEXT REFERENCES agents(id),
+    root_id     TEXT NOT NULL REFERENCES agents(id),
+    vendor      TEXT NOT NULL,
+    model       TEXT NOT NULL DEFAULT '—',
+    status      TEXT NOT NULL CHECK (status IN ('online', 'busy', 'offline', 'retired')),
+    purpose     TEXT,
+    skills      TEXT NOT NULL DEFAULT '[]',
+    role_tag    TEXT,
+    remark      TEXT,
+    status_text TEXT,
+    last_seen   INTEGER NOT NULL,
+    retired_at  INTEGER,
+    created_at  INTEGER NOT NULL
+  )`)
+  legacy
+    .prepare(
+      "INSERT INTO agents (id, name, kind, root_id, vendor, status, last_seen, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .run("legacy-agent", "legacy-root", "runtime", "legacy-agent", "opencode", "online", 1000, 1000)
+  legacy.close()
+}
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "agentchat-agents-"))
@@ -598,5 +650,141 @@ describe("GET /api/roster", () => {
     // 未超阈值的根节点不受影响。
     expect(nodes.find((n) => n.id === root.id)?.status).toBe("online")
     expect(getAgent(db, root.id)?.status).toBe("online")
+  })
+})
+
+// ── Task 6：custom_name 迁移 + 展示名优先级（用户改名 > 系统名） ─────────────
+
+describe("custom_name 迁移（migrateAgents 幂等）", () => {
+  it("旧库缺列 → openDb 补列并建展示名唯一索引；旧数据展示名回落 name；重复打开安全", () => {
+    const legacyHome = mkdtempSync(join(tmpdir(), "agentchat-agents-legacy-"))
+    const legacyPath = loadConfig({ AGENTCHAT_HOME: legacyHome }).dbPath
+    try {
+      seedLegacyAgentsDb(legacyPath)
+
+      const migrated = openDb(legacyPath)
+      expect(agentsColumns(migrated)).toContain("custom_name")
+      expect(displayIndexSql(migrated)).toContain("COALESCE(custom_name, name)")
+      const legacy = getAgent(migrated, "legacy-agent")
+      if (legacy === undefined) throw new Error("legacy row lost after migration")
+      expect(legacy.customName).toBeUndefined()
+      expect(agentDisplayName(legacy)).toBe("legacy-root")
+      migrated.close()
+
+      // 幂等：重复 openDb 不报错、不重复加列。
+      const reopened = openDb(legacyPath)
+      expect(agentsColumns(reopened).filter((c) => c === "custom_name")).toHaveLength(1)
+      expect(displayIndexSql(reopened)).toContain("COALESCE(custom_name, name)")
+      reopened.close()
+    } finally {
+      rmSync(legacyHome, { recursive: true, force: true })
+    }
+  })
+
+  it("出厂 schema 路径含新列与展示名唯一索引（clearAllTables 重跑 schema.sql）", () => {
+    expect(agentsColumns(db)).toContain("custom_name")
+    expect(displayIndexSql(db)).toContain("COALESCE(custom_name, name)")
+
+    const victim = registerRoot(db, home, { name: "reset-victim", vendor: "opencode" }).agent
+    renameAgent(db, victim.id, "出厂前改名")
+    clearAllTables(db)
+
+    expect(agentsColumns(db)).toContain("custom_name")
+    expect(displayIndexSql(db)).toContain("COALESCE(custom_name, name)")
+    // 出厂后 custom_name 随表重建清空（与出厂态一致）。
+    const fresh = registerRoot(db, home, { name: "post-reset-root", vendor: "opencode" }).agent
+    expect(fresh.customName).toBeUndefined()
+    expect(agentDisplayName(fresh)).toBe("post-reset-root")
+  })
+})
+
+describe("agentDisplayName 与 renameAgent", () => {
+  it("agentDisplayName = customName ?? name（展示名优先级）", () => {
+    const root = registerRoot(db, home, { name: "display-src", vendor: "opencode" }).agent
+    expect(agentDisplayName(root)).toBe("display-src")
+    const renamed = renameAgent(db, root.id, "用户起的名")
+    expect(agentDisplayName(renamed)).toBe("用户起的名")
+    // 系统名不动（register/标题同步只写 name 的对偶面）。
+    expect(renamed.name).toBe("display-src")
+    expect(getAgent(db, root.id)?.customName).toBe("用户起的名")
+  })
+
+  it("未知 id → AgentNotFoundError；他人展示名（raw 或 custom）冲突 → AgentNameTakenError(code name_taken)；自身幂等改名放行", () => {
+    const a = registerRoot(db, home, { name: "conflict-a", vendor: "opencode" }).agent
+    const b = registerRoot(db, home, { name: "conflict-b", vendor: "opencode" }).agent
+
+    expect(() => renameAgent(db, "no-such-agent", "任意名")).toThrow(AgentNotFoundError)
+    // 冲突目标是他人展示名：b 未改名时展示名 = 裸名。
+    expect(() => renameAgent(db, a.id, "conflict-b")).toThrow(AgentNameTakenError)
+    renameAgent(db, b.id, "b-custom")
+    // 冲突目标是他人 custom_name。
+    expect(() => renameAgent(db, a.id, "b-custom")).toThrow(AgentNameTakenError)
+
+    let caught: unknown
+    try {
+      renameAgent(db, a.id, "b-custom")
+      throw new Error("expected AgentNameTakenError")
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(AgentNameTakenError)
+    if (caught instanceof AgentNameTakenError) expect(caught.code).toBe("name_taken")
+
+    // 自身幂等：改到自身当前展示名（b 已 custom，重复写同值）放行。
+    expect(() => renameAgent(db, b.id, "b-custom")).not.toThrow()
+    expect(getAgent(db, b.id)?.customName).toBe("b-custom")
+  })
+
+  it("优先级：改名后同 task_ref 重注册（新会话标题）→ 展示名仍是用户改的，custom_name 未变", () => {
+    const root = registerRoot(db, home, { name: "prio-root", vendor: "opencode" }).agent
+    const child = registerChild(db, { taskRef: "t6-prio", parentId: root.id, name: "旧会话标题" })
+    renameAgent(db, child.id, "用户改的名")
+
+    const again = registerChild(db, { taskRef: "t6-prio", parentId: root.id, name: "新会话标题" })
+
+    expect(again.id).toBe(child.id)
+    expect(again.name).toBe("新会话标题") // name 随标题漂移（既有语义）
+    expect(again.customName).toBe("用户改的名") // custom_name 未被 register 触碰
+    expect(agentDisplayName(again)).toBe("用户改的名")
+    // 回归点①：roster 取名（buildRoster 单点覆盖 roster 三输出）。
+    const rootNode = rosterTree(db).find((n) => n.id === root.id)
+    expect(rootNode?.children.find((n) => n.id === child.id)?.name).toBe("用户改的名")
+  })
+
+  it("回归④：群 ask 提及集用展示名（mentionableTargets/isRealAgent 切展示名口径）", () => {
+    const root = registerRoot(db, home, { name: "ask-src-root", vendor: "opencode" }).agent
+    const member = registerChild(db, {
+      taskRef: "t6-ask-member",
+      parentId: root.id,
+      name: "ask-member",
+    })
+    const outsider = registerRoot(db, home, { name: "ask-outsider", vendor: "opencode" }).agent
+    renameAgent(db, member.id, "改名后的成员")
+    renameAgent(db, outsider.id, "改名后的群外")
+    const group = createGroup(db, {
+      name: "t6-ask-group",
+      createdBy: root.id,
+      memberIds: [member.id],
+    })
+
+    // 提及集以展示名寻址：改名后的成员可被 @ 中并成为 ask 目标。
+    const asked = askGroup(db, root.id, {
+      to: group.id,
+      question: "选哪个？",
+      options: ["a", "b"],
+      mentions: ["改名后的成员"],
+    })
+    expect(asked.asks).toHaveLength(1)
+    expect(asked.asks[0]?.target).toBe(member.id)
+
+    // isRealAgent 展示名匹配：群外真实节点按展示名提及 → mention_not_participant（而非 not_found）。
+    expect(() =>
+      askGroup(db, root.id, {
+        to: group.id,
+        question: "选哪个？",
+        options: ["a"],
+        mentions: ["改名后的群外"],
+      }),
+    ).toThrow(MentionNotParticipantError)
   })
 })

@@ -15,6 +15,7 @@ import { resolveMentions, type MentionTarget, type MentionsEcho } from "../../sh
 import type { Db } from "../db"
 import {
   AgentNotFoundError,
+  agentDisplayName,
   getAgent,
   listAgents,
   type Agent,
@@ -82,7 +83,7 @@ function joinNotice(db: Db, input: AddParticipantInput): void {
   if (conversation === undefined) return
   const roster = listParticipants(db, conversation.id).flatMap((participant) => {
     const agent = getAgent(db, participant.agentId)
-    return agent === undefined ? [] : [`${agent.name}(${agent.id.slice(0, 8)})`]
+    return agent === undefined ? [] : [`${agentDisplayName(agent)}(${agent.id.slice(0, 8)})`]
   })
   postSystem(db, {
     conversationId: conversation.id,
@@ -303,7 +304,7 @@ function routeWake(
   for (const participant of listParticipants(db, conversation.id)) {
     const agent = getAgent(db, participant.agentId)
     if (agent === undefined || isContainer(agent)) continue
-    targets.push({ id: agent.id, name: agent.name })
+    targets.push({ id: agent.id, name: agentDisplayName(agent) })
   }
   const echo = resolveMentions({ body: input.body, mentions: input.mentions, participants: targets })
   const mentioned = echo.matched.map((target) => target.id)

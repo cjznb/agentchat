@@ -27,10 +27,12 @@ import {
   notificationReadResultSchema,
   rosterTreeSchema,
   sendMessageResultSchema,
+  wsAgentPayloadSchema,
+  wsEventSchema,
   type ChatMessage,
 } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
-import { registerLogical, registerRoot, retire } from "../../server/core/agents"
+import { memberCards, registerLogical, registerRoot, retire } from "../../server/core/agents"
 import {
   ack,
   createGroup,
@@ -43,11 +45,12 @@ import {
 import { ask, respondAsk } from "../../server/core/permissions"
 import { openDb, type Db } from "../../server/db"
 import { createApp } from "../../server/index"
-import { insertAgent } from "../../server/store/agents"
+import { getAgent, insertAgent } from "../../server/store/agents"
 import { getApproval } from "../../server/store/approvals"
 import { getConversation, getConversationByKey, isParticipant, SHOUT_KEY } from "../../server/store/conversations"
 import { getById, history, send } from "../../server/store/messages"
 import { getWakeJob } from "../../server/store/wake"
+import { currentWsSeq, framesSince, resetWsHub } from "../../server/ws"
 
 let home = ""
 let db: Db
@@ -77,6 +80,14 @@ afterEach(() => {
 async function post(path: string, body: unknown): Promise<Response> {
   return app.request(path, {
     method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  })
+}
+
+async function patch(path: string, body: unknown): Promise<Response> {
+  return app.request(path, {
+    method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   })
@@ -459,6 +470,150 @@ describe("POST /api/conversations/:id/read", () => {
     const res = await post("/api/conversations/does-not-exist/read", {})
     expect(res.status).toBe(404)
     expect(errorBodySchema.parse(await res.json()).error).toBe("conversation_not_found")
+  })
+})
+
+// ── Task 6：PATCH /api/agents/:id 改名（展示名优先级 + 409 name_taken + agent 事件广播） ──
+
+describe("PATCH /api/agents/:id（Task 6 改名）", () => {
+  it("200 返回新展示名，custom_name 落库、系统 name 不动，并广播一条既有 agent 事件", async () => {
+    resetWsHub()
+    const before = currentWsSeq()
+
+    const res = await patch(`/api/agents/${rootId}`, { name: "  改名后的根  " })
+
+    expect(res.status).toBe(200)
+    const body = z.object({ ok: z.boolean(), name: z.string() }).parse(await res.json())
+    expect(body).toEqual({ ok: true, name: "改名后的根" }) // trim 生效
+    const stored = getAgent(db, rootId)
+    expect(stored?.customName).toBe("改名后的根")
+    expect(stored?.name).toBe("ui-root") // 系统名不动（register/标题同步只写 name 的对偶面）
+
+    // 广播既有 `agent` 事件（四事件之一，无新增事件类型）。
+    expect(currentWsSeq()).toBe(before + 1)
+    const events = framesSince(before)
+    expect(events).toHaveLength(1)
+    const event = wsEventSchema.parse(events[0])
+    expect(event.type).toBe("agent")
+    const payload = wsAgentPayloadSchema.parse(event.payload)
+    expect(payload.tree.find((node) => node.id === rootId)?.name).toBe("改名后的根")
+  })
+
+  it("400 invalid_body：空串 / 纯空白 / 超 64 字 / 控制字符 / 缺 name / 非 JSON 体", async () => {
+    const badPayloads: readonly unknown[] = [
+      { name: "" },
+      { name: "   " },
+      { name: "x".repeat(65) },
+      { name: "a\u0007b" },
+      { name: "a\nb" },
+      {},
+      { name: 42 },
+    ]
+    for (const payload of badPayloads) {
+      const res = await patch(`/api/agents/${rootId}`, payload)
+      expect(res.status).toBe(400)
+      expect(errorBodySchema.parse(await res.json()).error).toBe("invalid_body")
+    }
+    const raw = await app.request(`/api/agents/${rootId}`, { method: "PATCH", body: "not-json" })
+    expect(raw.status).toBe(400)
+  })
+
+  it("404 agent_not_found：未知 id", async () => {
+    const res = await patch("/api/agents/no-such-agent", { name: "x" })
+    expect(res.status).toBe(404)
+    expect(errorBodySchema.parse(await res.json()).error).toBe("agent_not_found")
+  })
+
+  it("409 name_taken：与他人展示名冲突（裸名与 custom_name 两种口径）", async () => {
+    const other = insertAgent(db, {
+      name: "t6-other",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+    })
+
+    // 冲突目标是他人裸名（custom_name NULL → 展示名 = name）。
+    const rawConflict = await patch(`/api/agents/${rootId}`, { name: "t6-other" })
+    expect(rawConflict.status).toBe(409)
+    expect(errorBodySchema.parse(await rawConflict.json()).error).toBe("name_taken")
+
+    // 冲突目标是他人 custom_name。
+    const renamed = await patch(`/api/agents/${other.id}`, { name: "t6-独占展示名" })
+    expect(renamed.status).toBe(200)
+    const customConflict = await patch(`/api/agents/${rootId}`, { name: "t6-独占展示名" })
+    expect(customConflict.status).toBe(409)
+    expect(errorBodySchema.parse(await customConflict.json()).error).toBe("name_taken")
+  })
+})
+
+// ── Task 6 回归点：roster / 入群通知 / send 提及回显全部切展示名 ──────────────
+
+describe("Task 6 展示名回归（roster / joinNotice / send 回显）", () => {
+  it("回归①：改名后 roster（rosterTree / conversationRoster / member_cards 三输出）用展示名", async () => {
+    const res = await patch(`/api/agents/${rootId}`, { name: "展示名R" })
+    expect(res.status).toBe(200)
+
+    const tree = rosterTreeSchema.parse(await (await app.request("/api/roster")).json())
+    expect(tree.find((node) => node.id === rootId)?.name).toBe("展示名R")
+
+    const created = await post("/api/groups", { name: "t6-display-group", memberIds: [rootId] })
+    const createdJson = groupCreateResultSchema.parse(await created.json())
+    if (!("group" in createdJson)) throw new Error("human group creation must execute immediately")
+
+    const filtered = rosterTreeSchema.parse(
+      await (await app.request(`/api/roster?conversation=${createdJson.group.id}`)).json(),
+    )
+    expect(filtered.find((node) => node.id === rootId)?.name).toBe("展示名R")
+    expect(memberCards(db, createdJson.group.id).find((card) => card.id === rootId)?.name).toBe(
+      "展示名R",
+    )
+  })
+
+  it("回归②：入群通知成员名单用展示名（joinNotice 独立取名点）", async () => {
+    expect((await patch(`/api/agents/${rootId}`, { name: "展示名N" })).status).toBe(200)
+    const created = await post("/api/groups", { name: "t6-notice-display", memberIds: [rootId] })
+    const createdJson = groupCreateResultSchema.parse(await created.json())
+    if (!("group" in createdJson)) throw new Error("human group creation must execute immediately")
+    const newcomer = insertAgent(db, {
+      name: "t6-newcomer-display",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      parentId: rootId,
+    })
+
+    const added = await post(`/api/groups/${createdJson.group.id}/members`, {
+      agentId: newcomer.id,
+    })
+    expect(added.status).toBe(200)
+
+    const notice = history(db, { conversationId: createdJson.group.id }).find(
+      (m) => m.kind === "system" && m.body.startsWith("你被拉入群「t6-notice-display」。成员："),
+    )
+    if (notice === undefined) throw new Error("expected the join system message in the group")
+    expect(notice.body).toContain(`展示名N(${rootId.slice(0, 8)})`)
+    expect(notice.body).not.toContain(`ui-root(${rootId.slice(0, 8)})`)
+  })
+
+  it("回归③：send 提及回显与唤醒集合用展示名（routeWake 取名点）", async () => {
+    expect((await patch(`/api/agents/${rootId}`, { name: "展示名M" })).status).toBe(200)
+    const created = await post("/api/groups", { name: "t6-echo-display", memberIds: [rootId] })
+    const createdJson = groupCreateResultSchema.parse(await created.json())
+    if (!("group" in createdJson)) throw new Error("human group creation must execute immediately")
+
+    const res = await post(`/api/conversations/${createdJson.group.id}/messages`, {
+      body: "@展示名M 跟进",
+      mentions: ["展示名M"],
+    })
+    expect(res.status).toBe(200)
+    const raw: unknown = await res.json()
+    expect(raw).toMatchObject({
+      ok: true,
+      mentions: { matched: [{ id: rootId, name: "展示名M" }], unmatched: [], scope: "explicit" },
+    })
+    const json = sendMessageResultSchema.parse(raw)
+    expect(json.message.meta).toEqual({ mentions: [rootId], mentionScope: "explicit" })
+    expect(getWakeJob(db, json.message.seq, rootId)).toBeDefined()
   })
 })
 

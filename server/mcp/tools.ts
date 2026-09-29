@@ -68,12 +68,24 @@ function registerAgent(
   })
 }
 
+/**
+ * `name_taken` 判定（Task 6）：裸名 `agents.name` UNIQUE 与展示名唯一索引
+ * （`idx_agents_display_name`，COALESCE 口径）冲突都映射该稳定 code ——
+ * 撞名时 SQLite 按先命中的约束报错，两条消息都必须覆盖，否则 adopt 稳定别名重试断裂。
+ */
+function isNameTakenConflict(message: string): boolean {
+  return (
+    message.includes("UNIQUE constraint failed: agents.name") ||
+    message.includes("UNIQUE constraint failed: index 'idx_agents_display_name'")
+  )
+}
+
 function runRegister(ctx: ToolContext, input: McpToolInput<"register">): unknown {
   let registered: { agent: Agent; joinToken?: string }
   try {
     registered = registerAgent(ctx, input, definedCard(input))
   } catch (error) {
-    if (error instanceof Error && error.message.includes("UNIQUE constraint failed: agents.name")) {
+    if (error instanceof Error && isNameTakenConflict(error.message)) {
       // 未提供 name 时 core 走兜底名（几乎不可能冲突）；提示仍给出可审计的入参名。
       throw new McpToolError(
         "name_taken",
