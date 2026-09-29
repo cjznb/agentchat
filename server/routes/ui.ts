@@ -49,7 +49,8 @@ function resolveDb(db: Db | undefined): Db {
 }
 
 const decisionBodySchema = z.object({ decision: z.enum(["approve", "reject"]) })
-const sendBodySchema = z.object({ body: z.string() })
+// body + 结构化提及（spec §3.1；仅群会话参与 T 解析，shout 入口忽略 mentions）。
+const sendBodySchema = z.object({ body: z.string(), mentions: z.array(z.string()).optional() })
 const ensureDmBodySchema = z.object({ to: z.string().min(1) })
 const groupBodySchema = z.object({
   name: z.string().min(1),
@@ -211,7 +212,7 @@ export function uiRoutes(db?: Db): Hono {
         const result = sendMessage(database, {
           from: ensureHuman(database).id,
           to: c.req.param("id"),
-          body: parsed.data.body,
+          ...parsed.data, // { body, mentions? }
         })
         return c.json({ ok: true, ...result })
       } catch (error) {

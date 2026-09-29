@@ -44,6 +44,7 @@ import { insertAgent } from "../../server/store/agents"
 import { getApproval } from "../../server/store/approvals"
 import { getConversation, getConversationByKey, isParticipant, SHOUT_KEY } from "../../server/store/conversations"
 import { getById, history, send } from "../../server/store/messages"
+import { getWakeJob } from "../../server/store/wake"
 
 let home = ""
 let db: Db
@@ -109,6 +110,31 @@ describe("POST /api/conversations/:id/messages", () => {
   it("returns 404 for an unknown conversation and 400 for an invalid body", async () => {
     expect((await post("/api/conversations/does-not-exist/messages", { body: "x" })).status).toBe(404)
     expect((await post(`/api/conversations/${dmId}/messages`, {})).status).toBe(400)
+  })
+
+  // Task 3：human 群发的结构化 mentions 透传（schema → sendMessage → T/回显/meta）。
+  it("passes structured mentions through for a group send (echo + meta + wake target)", async () => {
+    const created = await post("/api/groups", { name: "t3-ui-mentions", memberIds: [rootId] })
+    const createdJson = groupCreateResultSchema.parse(await created.json())
+    if (!("group" in createdJson)) throw new Error("human group creation must execute immediately")
+
+    const res = await post(`/api/conversations/${createdJson.group.id}/messages`, {
+      body: "跟进一下",
+      mentions: ["ui-root"],
+    })
+    expect(res.status).toBe(200)
+    const raw: unknown = await res.json()
+    expect(raw).toMatchObject({
+      ok: true,
+      mentions: {
+        matched: [{ id: rootId, name: "ui-root" }],
+        unmatched: [],
+        scope: "explicit",
+      },
+    })
+    const json = sendMessageResultSchema.parse(raw)
+    expect(json.message.meta).toEqual({ mentions: [rootId], mentionScope: "explicit" })
+    expect(getWakeJob(db, json.message.seq, rootId)).toBeDefined() // 被提及者 = 唤醒目标
   })
 })
 

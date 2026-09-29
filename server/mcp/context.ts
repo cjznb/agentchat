@@ -65,6 +65,8 @@ export function sendView(db: Db, result: SendResultView, readerId: string): Reco
     message: result.message,
     receipts: result.receipts,
     readReceipts: result.receipts.filter((r) => r.stage === "read"),
+    // 提及回声（spec §3.3；仅群会话产出 → DM/喊话出参逐字节不变）。
+    ...(result.mentions === undefined ? {} : { mentions: result.mentions }),
     ...(result.reply === undefined
       ? {}
       : { reply: maskReply(db, result.reply, readerId) }),

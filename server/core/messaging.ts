@@ -11,6 +11,7 @@
  *   （决议 1：执行器以闭包传入，permissions 不反向依赖本层，无循环依赖）
  */
 import type { ReceiptStage } from "../../shared/contracts"
+import { resolveMentions, type MentionTarget, type MentionsEcho } from "../../shared/mentions"
 import type { Db } from "../db"
 import {
   AgentNotFoundError,
@@ -154,8 +155,9 @@ function resolveConversation(db: Db, sender: Agent, to: string): Conversation {
 }
 
 /**
- * 收件方：DM/群 = 其余成员；喊话 = 全部节点（决议 3）**但排除分组容器**
- * （容器不是聊天实体，不应产生回执/唤醒任务）。均不含发送者本人。
+ * 收件方：DM/群 = 其余成员；喊话 = 全部节点（决议 3）。**分组容器恒排除**
+ * （容器不是聊天实体，不应产生回执/唤醒任务 —— M1 喊话既有、Task 3 延伸至群成员）。
+ * 均不含发送者本人。
  */
 export function recipientsOf(db: Db, conversation: Conversation, senderId: string): readonly string[] {
   const ids =
@@ -163,7 +165,13 @@ export function recipientsOf(db: Db, conversation: Conversation, senderId: strin
       ? listAgents(db)
           .filter((agent) => !isContainer(agent))
           .map((agent) => agent.id)
-      : listParticipants(db, conversation.id).map((participant) => participant.agentId)
+      : listParticipants(db, conversation.id)
+          .map((participant) => participant.agentId)
+          .filter((id) => {
+            // 群/DM 成员含分组容器时同样排除（Task 3 延伸 M1）；agent 行缺失 → 非容器。
+            const agent = getAgent(db, id)
+            return agent === undefined || !isContainer(agent)
+          })
   return ids.filter((id) => id !== senderId)
 }
 
@@ -172,6 +180,8 @@ export interface SendMessageInput {
   readonly to: string
   readonly body: string
   readonly idempotencyKey?: string
+  /** 结构化提及（spec §3.1）：名字 / id / id 前 8 位 / `"*"`；仅群会话参与解析。 */
+  readonly mentions?: string[] | undefined
   /** 阻塞等待（spec §6.2）；给出则 `sendMessage` 返回 Promise 并带 `reply`。 */
   readonly wait?: WaitOptions
 }
@@ -185,6 +195,8 @@ export interface Receipt {
 export interface SendMessageResult {
   readonly message: Message
   readonly receipts: readonly Receipt[]
+  /** 提及回声（spec §3.2/§3.3；仅群会话产出 → DM/喊话出参逐字节不变）。 */
+  readonly mentions?: MentionsEcho | undefined
 }
 
 /**
@@ -226,26 +238,84 @@ export function sendMessage(
   ).then((reply) => ({ ...result, reply }))
 }
 
+/** 唤醒路由结果：T（进 `enqueueWakeJobs`）+ 群会话的 `messages.meta` 与提及回声。 */
+interface WakeRoute {
+  readonly wakeIds: readonly string[]
+  readonly meta: Record<string, unknown> | undefined
+  readonly mentions: MentionsEcho | undefined
+}
+
+/**
+ * 唤醒集合 T（spec §2，Task 3）：仅**普通群**（kind=group 且 key≠shout）解析提及并
+ * 落 `messages.meta`；DM/喊话不走此路由（语义逐字节不变，T = 既有收件方）。
+ * 规则：M（=命中 matched）为唤醒集；M 空时人类 → 全体参与者、agent → ∅；
+ * 发送者恒排除；分组容器在参与者映射阶段即排除（不是聊天实体，不可提及/唤醒，M1）。
+ * 解析只经 `resolveMentions`（Task 1 单点）。
+ */
+function routeWake(
+  db: Db,
+  input: {
+    readonly conversation: Conversation
+    readonly sender: Agent
+    readonly body: string
+    readonly mentions: string[] | undefined
+    readonly recipientIds: readonly string[]
+  },
+): WakeRoute {
+  const { conversation, sender } = input
+  if (conversation.kind !== "group" || conversation.key === SHOUT_KEY) {
+    return { wakeIds: input.recipientIds, meta: undefined, mentions: undefined }
+  }
+  const targets: MentionTarget[] = []
+  for (const participant of listParticipants(db, conversation.id)) {
+    const agent = getAgent(db, participant.agentId)
+    if (agent === undefined || isContainer(agent)) continue
+    targets.push({ id: agent.id, name: agent.name })
+  }
+  const echo = resolveMentions({ body: input.body, mentions: input.mentions, participants: targets })
+  const mentioned = echo.matched.map((target) => target.id)
+  const base =
+    mentioned.length > 0
+      ? mentioned
+      : isHuman(sender)
+        ? targets.map((target) => target.id)
+        : []
+  const wakeIds = base.filter((id) => id !== sender.id)
+  return { wakeIds, meta: { mentions: mentioned, mentionScope: echo.scope }, mentions: echo }
+}
+
 /** 同步投递核心（无 `wait` 路径与 `wait` 路径共用）：入库后发布消息事件（决议 5 发布点 1）。 */
 function deliver(db: Db, input: SendMessageInput): SendMessageResult {
   const sender = getAgent(db, input.from)
   if (sender === undefined) throw new AgentNotFoundError(input.from)
   const conversation = resolveConversation(db, sender, input.to)
+  const recipientIds = recipientsOf(db, conversation, input.from)
+  const route = routeWake(db, {
+    conversation,
+    sender,
+    body: input.body,
+    mentions: input.mentions,
+    recipientIds,
+  })
   const message = send(db, {
     conversationId: conversation.id,
     fromAgentId: input.from,
     body: input.body,
+    ...(route.meta === undefined ? {} : { meta: route.meta }),
     ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
   })
   publishMessage(db, conversation.id)
-  const recipientIds = recipientsOf(db, conversation, input.from)
-  // 发送即生成唤醒任务（Task 6；资格见 store/wake.enqueueWakeJobs：runtime+online/busy）。
-  enqueueWakeJobs(db, { messageId: message.seq, recipientIds })
+  // 发送即按 T 生成唤醒任务（Task 3/6；资格见 store/wake.enqueueWakeJobs：runtime+online/busy）。
+  enqueueWakeJobs(db, { messageId: message.seq, recipientIds: route.wakeIds })
   const receipts = recipientIds.map((agentId) => ({
     agentId,
     stage: receiptState(db, message, agentId),
   }))
-  return { message, receipts }
+  return {
+    message,
+    receipts,
+    ...(route.mentions === undefined ? {} : { mentions: route.mentions }),
+  }
 }
 
 /** 喊话结果（带 `wait` 时附等待结果；spec §9 `shout` 工具用）。 */

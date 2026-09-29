@@ -78,6 +78,27 @@ function setWakeJobState(messageSeq: number, agentId: string, state: string): vo
   ).run(messageSeq, agentId, state, Date.now(), Date.now())
 }
 
+/** 该消息的唤醒任务收件人集合（Task 3 唤醒集合 T 断言用）。 */
+function wakeAgentsOf(messageSeq: number): string[] {
+  return db
+    .prepare<[number], { agent_id: string }>(
+      "SELECT agent_id FROM wake_jobs WHERE message_id = ? ORDER BY agent_id",
+    )
+    .all(messageSeq)
+    .map((row) => row.agent_id)
+}
+
+/** Task 3 T 路由夹具：owner（创建者）+ 张三 + 李四，三个 online runtime 成员的群。 */
+function t3Group(prefix: string) {
+  const owner = makeAgent(`${prefix}-owner`)
+  const zhang = makeAgent("张三")
+  const li = makeAgent("李四")
+  const group = approved(
+    createGroup(db, { name: "T3 路由群", createdBy: owner.id, memberIds: [zhang.id, li.id] }),
+  )
+  return { owner, zhang, li, group }
+}
+
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "agentchat-messaging-"))
   db = openDb(loadConfig({ AGENTCHAT_HOME: home }).dbPath)
@@ -265,6 +286,151 @@ describe("分组容器不是聊天实体（M1 服务端守卫）", () => {
     const recipients = result.receipts.map((r) => r.agentId)
     expect(recipients).toContain(peer.id)
     expect(recipients).not.toContain(box.id)
+  })
+})
+
+describe("唤醒集合 T（spec §2，Task 3）", () => {
+  it("agent 发群消息无提及 → 0 条 wake_jobs（回执收件方口径不变 = 其余全员）", () => {
+    const { owner, zhang, li, group } = t3Group("t3-noat")
+
+    const sent = sendMessage(db, { from: owner.id, to: group.id, body: "进度同步" })
+
+    expect(wakeAgentsOf(sent.message.seq)).toEqual([])
+    // 可见性/回执口径不变：回执仍列其余全员（wake 才按 T 过滤）。
+    expect(new Set(sent.receipts.map((r) => r.agentId))).toEqual(new Set([zhang.id, li.id]))
+    expect(sent.receipts.every((r) => r.stage === "queued")).toBe(true)
+  })
+
+  it("@张三 → 仅张三 1 条 wake_job", () => {
+    const { owner, zhang, li, group } = t3Group("t3-at")
+
+    const sent = sendMessage(db, { from: owner.id, to: group.id, body: "@张三 你跟进" })
+
+    expect(wakeAgentsOf(sent.message.seq)).toEqual([zhang.id])
+    // 回执口径不变：仍列其余全员（仅 wake 按 T 过滤）。
+    expect(new Set(sent.receipts.map((r) => r.agentId))).toEqual(new Set([zhang.id, li.id]))
+  })
+
+  it("@所有人 → 除发送者外的全体参与者", () => {
+    const { owner, zhang, li, group } = t3Group("t3-all")
+
+    const sent = sendMessage(db, { from: zhang.id, to: group.id, body: "@所有人 开会" })
+
+    expect(new Set(wakeAgentsOf(sent.message.seq))).toEqual(new Set([owner.id, li.id]))
+  })
+
+  it("人类（isHuman）无提及 → 全体参与者", () => {
+    const { owner, zhang, li, group } = t3Group("t3-human-none")
+    const human = ensureHuman(db)
+
+    const sent = sendMessage(db, { from: human.id, to: group.id, body: "大家下午好" })
+
+    expect(new Set(wakeAgentsOf(sent.message.seq))).toEqual(new Set([owner.id, zhang.id, li.id]))
+  })
+
+  it("人类带提及 → 仅被提及者", () => {
+    const { li, group } = t3Group("t3-human-at")
+    const human = ensureHuman(db)
+
+    const sent = sendMessage(db, { from: human.id, to: group.id, body: "@李四 跟进客户反馈" })
+
+    expect(wakeAgentsOf(sent.message.seq)).toEqual([li.id])
+  })
+
+  it("结构化 mentions（id 前 8 位）与正文取并集并参与 T 计算", () => {
+    const { owner, zhang, li, group } = t3Group("t3-structured")
+
+    const sent = sendMessage(db, {
+      from: owner.id,
+      to: group.id,
+      body: "@张三 看下",
+      mentions: [li.id.slice(0, 8)],
+    })
+
+    expect(new Set(wakeAgentsOf(sent.message.seq))).toEqual(new Set([zhang.id, li.id]))
+    expect(sent.mentions?.matched.map((t) => t.id).sort()).toEqual([zhang.id, li.id].sort())
+  })
+
+  it("容器恒排除在 T 与回执收件方之外（M1 延伸）", () => {
+    const { owner, group } = t3Group("t3-container")
+    const box = insertAgent(db, {
+      name: "t3-container-box",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      roleTag: "container",
+    })
+    addParticipant(db, { conversationId: group.id, agentId: box.id, invitedBy: owner.id })
+
+    const sent = sendMessage(db, { from: owner.id, to: group.id, body: "@所有人 注意" })
+
+    expect(wakeAgentsOf(sent.message.seq)).not.toContain(box.id)
+    expect(sent.receipts.map((r) => r.agentId)).not.toContain(box.id)
+  })
+
+  it('kind:"system" 内部消息豁免：不经提及路由、0 wake_job、全员收件箱可达', () => {
+    const { owner, zhang, li, group } = t3Group("t3-system")
+
+    const message = storeSend(db, {
+      conversationId: group.id,
+      fromAgentId: owner.id,
+      kind: "system",
+      body: "群成员变更：李四 加入了群聊",
+    })
+
+    expect(wakeAgentsOf(message.seq)).toEqual([])
+    expect(message.meta).toBeUndefined() // 直写路径：不解析提及、不落 mentions meta
+    for (const member of [owner, zhang, li]) {
+      expect(inbox(db, member.id).map((m) => m.id)).toContain(message.id)
+    }
+  })
+
+  it("messages.meta.mentions 与 mentionScope 落库可查（经 history）", () => {
+    const { owner, zhang, li, group } = t3Group("t3-meta")
+
+    const explicit = sendMessage(db, { from: owner.id, to: group.id, body: "@李四 看下" }).message
+    const none = sendMessage(db, { from: owner.id, to: group.id, body: "全员周报" }).message
+    const all = sendMessage(db, { from: owner.id, to: group.id, body: "@所有人 集合" }).message
+
+    expect(explicit.meta).toEqual({ mentions: [li.id], mentionScope: "explicit" })
+    expect(none.meta).toEqual({ mentions: [], mentionScope: "none" })
+    expect(all.meta?.["mentionScope"]).toBe("all")
+    expect(all.meta?.["mentions"]).toEqual(expect.arrayContaining([owner.id, zhang.id, li.id]))
+
+    // 落库侧（读回）与发送时对象一致。
+    const stored = history(db, group.id).find((m) => m.id === explicit.id)
+    expect(stored?.meta).toEqual({ mentions: [li.id], mentionScope: "explicit" })
+  })
+
+  it("send 出参回显 mentions：命中回 matched、错字进 unmatched 且不阻断发送", () => {
+    const { owner, zhang, group } = t3Group("t3-echo")
+
+    const hit = sendMessage(db, { from: owner.id, to: group.id, body: "@张三 请过目" })
+    expect(hit.mentions).toEqual({
+      matched: [{ id: zhang.id, name: "张三" }],
+      unmatched: [],
+      scope: "explicit",
+    })
+
+    const typo = sendMessage(db, { from: owner.id, to: group.id, body: "@错字 在吗" })
+    expect(typo.mentions).toEqual({ matched: [], unmatched: ["错字"], scope: "explicit" })
+    expect(typo.message.body).toBe("@错字 在吗") // 宽容回显：未命中不阻断发送（spec §3.2）
+    expect(wakeAgentsOf(typo.message.seq)).toEqual([]) // agent：M 空 → ∅
+  })
+
+  it("DM 与喊话不走提及路由（逐字节不变：无 meta、无回声、T = 既有收件方）", () => {
+    const a = makeAgent("t3-dm-a")
+    const b = makeAgent("t3-dm-b")
+
+    const dm = sendMessage(db, { from: a.id, to: b.id, body: `@${b.name} 在吗` })
+    expect(dm.message.meta).toBeUndefined()
+    expect(dm.mentions).toBeUndefined()
+    expect(wakeAgentsOf(dm.message.seq)).toEqual([b.id])
+
+    const human = ensureHuman(db)
+    const shouted = approved(shout(db, human.id, "@所有人 注意"))
+    expect(shouted.message.meta).toBeUndefined()
+    expect(shouted.mentions).toBeUndefined()
   })
 })
 

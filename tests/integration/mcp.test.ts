@@ -24,7 +24,7 @@ import {
 } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
 import { openDb, type Db } from "../../server/db"
-import { inbox, sendMessage } from "../../server/core/messaging"
+import { createGroup, inbox, sendMessage } from "../../server/core/messaging"
 import { ask, ensureHuman, respondAsk } from "../../server/core/permissions"
 import { start, type RunningServer } from "../../server/index"
 import { applyAgentState, ensureHubToken } from "../../server/routes/internal"
@@ -322,6 +322,45 @@ describe("send{wait} 端到端（DoD ②）", () => {
       expect(parsed.reply?.timedOut).toBe(false)
       expect(parsed.reply?.messages.map((m) => m.body)).toEqual(["pong"])
       expect(parsed.readReceipts).toEqual([])
+    } finally {
+      await client.close()
+    }
+  })
+})
+
+describe("send mentions 回显（Task 3，spec §3.2 宽容回显）", () => {
+  it("group send echoes matched/unmatched/scope; an unmatched @错字 does not block the send", async () => {
+    const human = ensureHuman(db)
+    const actor = makeAgent("mcp-mentions-actor")
+    const peer = makeAgent("mcp-mentions-peer")
+    const group = createGroup(db, {
+      name: "mcp-mentions-group",
+      createdBy: human.id,
+      memberIds: [actor.id, peer.id],
+    })
+    if (!("approved" in group)) throw new Error("human group creation must execute immediately")
+    const client = await connect(actor.id)
+    try {
+      const hit = await callTool(client, "send", {
+        to: group.approved.id,
+        body: `@${peer.name} 请评估`,
+      })
+      expect(toolFailed(hit)).toBe(false)
+      expect(MCP_TOOL_OUTPUTS.send.parse(JSON.parse(textOf(hit))).mentions).toEqual({
+        matched: [{ id: peer.id, name: peer.name }],
+        unmatched: [],
+        scope: "explicit",
+      })
+
+      const typo = await callTool(client, "send", {
+        to: group.approved.id,
+        body: "@拼错的名字 在吗",
+      })
+      expect(toolFailed(typo)).toBe(false) // 宽容：未命中不阻断发送（spec §3.2）
+      const echo = MCP_TOOL_OUTPUTS.send.parse(JSON.parse(textOf(typo))).mentions
+      expect(echo?.matched).toEqual([])
+      expect(echo?.unmatched).toEqual(["拼错的名字"])
+      expect(echo?.scope).toBe("explicit")
     } finally {
       await client.close()
     }

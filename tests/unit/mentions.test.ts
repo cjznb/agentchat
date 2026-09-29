@@ -148,3 +148,32 @@ describe("resolveMentions — 结构化与正文并集", () => {
     expect(echo.matched.map((t) => t.name).sort()).toEqual(["李四", "标题 · abcd"].sort())
   })
 })
+
+// 评审裁决锁定用例（Task 1+2 遗留 Important：两裁决语义消费前必须锁）。
+describe("resolveMentions — 评审裁决锁定（Task 3 消费前置）", () => {
+  it("@ 左邻为中日韩字（李@张三）仍视为提及 → 命中张三（裁决：仅屏蔽 ASCII 词字符）", () => {
+    const echo = resolve("李@张三 在吗")
+    expect(echo.matched.map((t) => t.name)).toEqual(["张三"])
+    expect(echo.unmatched).toEqual([])
+    expect(echo.scope).toBe("explicit")
+  })
+
+  it("名字后紧跟正文（@张三你好）→ 命中张三（裁决：不加后边界，召回优先）", () => {
+    const echo = resolve("@张三你好")
+    expect(echo.matched.map((t) => t.name)).toEqual(["张三"])
+    expect(echo.unmatched).toEqual([])
+    expect(echo.scope).toBe("explicit")
+  })
+
+  it("@* → scope all 且 matched = 全体参与者", () => {
+    const echo = resolve("@* 快看")
+    expect(echo.scope).toBe("all")
+    expect(echo.matched.map((t) => t.name)).toEqual(allNames)
+  })
+
+  it("@ALL（大小写变体）→ scope all", () => {
+    const echo = resolve("@ALL 大家好")
+    expect(echo.scope).toBe("all")
+    expect(echo.matched.map((t) => t.name)).toEqual(allNames)
+  })
+})

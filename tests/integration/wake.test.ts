@@ -29,7 +29,7 @@ import { loadConfig } from "../../server/config"
 import { openDb, type Db } from "../../server/db"
 import { OFFLINE_AFTER_MS, registerRoot, retire, rosterTree } from "../../server/core/agents"
 import { DISPATCHER_INTERVAL_MS, Dispatcher } from "../../server/core/dispatcher"
-import { ensureHuman, inbox, receiptState, sendMessage, shout } from "../../server/core/messaging"
+import { createGroup, ensureHuman, inbox, receiptState, sendMessage, shout } from "../../server/core/messaging"
 import type { Gated } from "../../server/core/permissions"
 import { createApp } from "../../server/index"
 import { applyAgentState, ensureHubToken } from "../../server/routes/internal"
@@ -671,5 +671,62 @@ describe("review fixes: round error isolation and terminal guard", () => {
     // 全字段逐一相等 = 未发生任何 UPDATE（终态未被复活为 pending）
     expect(expectJob(cancelled.seq, node.id)).toEqual(beforeCancelled)
     expect(expectJob(expired.seq, node.id)).toEqual(beforeExpired)
+  })
+})
+
+// ── Task 3：群消息唤醒路由（spec §2 目标 T） ─────────────────────────
+describe("group mention wake routing (Task 3, spec §2)", () => {
+  /** owner（创建者）+ 张三 + 李四，三个 online runtime 成员的群。 */
+  function groupOf(prefix: string) {
+    const owner = makeAgent(`${prefix}-owner`)
+    const zhang = makeAgent("张三")
+    const li = makeAgent("李四")
+    const group = approved(
+      createGroup(db, { name: `${prefix} 群`, createdBy: owner.id, memberIds: [zhang.id, li.id] }),
+    )
+    return { owner, zhang, li, group }
+  }
+
+  it("wakes only the mentioned member (@张三): one job, one injection", async () => {
+    const { owner, zhang, li, group } = groupOf("w-t3-at")
+
+    const { message } = sendMessage(db, { from: owner.id, to: group.id, body: "@张三 处理故障" })
+
+    expect(getWakeJob(db, message.seq, zhang.id)).toBeDefined()
+    expect(getWakeJob(db, message.seq, li.id)).toBeUndefined()
+
+    await dispatcher.tick(Date.now() + 1000)
+    expect(fake.injections).toHaveLength(1)
+    expect(fake.injections[0]?.nodeId).toBe(zhang.id)
+    expect(fake.injections[0]?.msgs.map((m) => m.body)).toEqual(["@张三 处理故障"])
+  })
+
+  it("creates zero jobs and injects nothing for an agent group message without mentions", async () => {
+    const { owner, group } = groupOf("w-t3-none")
+
+    const { message } = sendMessage(db, { from: owner.id, to: group.id, body: "周报汇总" })
+
+    const total = db
+      .prepare<[number], { n: number }>("SELECT COUNT(*) AS n FROM wake_jobs WHERE message_id = ?")
+      .get(message.seq)?.n
+    expect(total).toBe(0)
+
+    await dispatcher.tick(Date.now() + 1000)
+    expect(fake.injections).toHaveLength(0)
+  })
+
+  it("wakes every member when the human sends without mentions (spec §2)", async () => {
+    const { owner, zhang, li, group } = groupOf("w-t3-human")
+    const human = ensureHuman(db)
+
+    const { message } = sendMessage(db, { from: human.id, to: group.id, body: "全体集合" })
+
+    for (const id of [owner.id, zhang.id, li.id]) {
+      expect(getWakeJob(db, message.seq, id)).toBeDefined()
+    }
+    await dispatcher.tick(Date.now() + 1000)
+    expect(new Set(fake.injections.map((entry) => entry.nodeId))).toEqual(
+      new Set([owner.id, zhang.id, li.id]),
+    )
   })
 })

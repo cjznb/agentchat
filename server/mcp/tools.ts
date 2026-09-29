@@ -100,6 +100,7 @@ function runSend(ctx: ToolContext, input: McpToolInput<"send">): unknown {
     to: input.to,
     body: input.body,
     ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
+    ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
   }
   if (input.wait === undefined) return sendView(ctx.db, sendMessage(ctx.db, base), from)
   return sendMessage(ctx.db, {
