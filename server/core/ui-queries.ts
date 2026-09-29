@@ -28,6 +28,7 @@ import { listNotifications, type NotificationScope } from "../store/notification
 import { rosterTree, type RosterNode } from "./agents"
 import { ensureHuman, recipientsOf, unreadFor } from "./messaging"
 import { batchReceiptStates, type ReceiptStageMap } from "./publish"
+import { maskRevokedForReader } from "./revoke"
 
 /** 会话最后一条消息预览（随 `GET /api/conversations` 返回）。 */
 export interface ConversationPreview {
@@ -266,11 +267,12 @@ export function conversationMessages(
   before?: number,
   limit?: number,
 ): readonly ChatMessage[] {
+  // 撤回消息对**未投递读者**（如 human 作为收件方、无 job）遮蔽正文，保留 `revoked_at`。
   const messages = history(db, {
     conversationId,
     ...(before === undefined ? {} : { before }),
     ...(limit === undefined ? {} : { limit }),
-  })
+  }).map((message) => maskRevokedForReader(db, message, humanId))
   const conversation = getConversation(db, conversationId)
   if (conversation === undefined) return messages.map(bareMessage)
   const recipients = recipientsOf(db, conversation, humanId)

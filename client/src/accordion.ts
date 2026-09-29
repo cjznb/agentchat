@@ -2,7 +2,7 @@
  * 手风琴展开态纯原语（Plan 3 T4/T6 共用）——会话列表与组织树折叠共用同一模式：
  * 默认收起、单开（手风琴）、`localStorage` 持久化、坏 JSON 容错。
  *
- * 存储键由调用方注入（列表 `agentchat:expandedRoots` / 组织树 `agentchat:expandedTree`），
+ * 存储键由调用方注入（列表 `agentchat:expandedRoots` / 组织树 `agentchat:expandedTree:v2`），
  * 故两处折叠态互不串扰；原语本身与业务无关，只做「id 集合」的读写与切换。
  */
 

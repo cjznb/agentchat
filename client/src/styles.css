@@ -137,7 +137,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .context-list header p, .view-header p { margin: 0 0 var(--space-2); color: var(--color-muted); font: 600 var(--text-label)/1.4 var(--font-utility); }
 .context-list header p { letter-spacing: 0.08em; }
 .context-list h1, .view-header h1 { margin: 0; font-size: var(--text-title); line-height: 1.25; }
-.list-empty { display: grid; justify-items: start; gap: var(--space-2); margin: var(--space-6); padding: var(--space-6); border: var(--line-thin) dashed var(--color-hairline); border-radius: var(--radius-medium); }
+.list-empty { display: grid; align-self: start; justify-items: start; gap: var(--space-2); margin: var(--space-6); padding: var(--space-6); border: var(--line-thin) dashed var(--color-hairline); border-radius: var(--radius-medium); }
 .list-empty span { color: var(--color-jade); font-family: var(--font-utility); }
 .list-empty p, .list-empty small { margin: 0; }
 .list-empty p { font-size: var(--text-body); font-weight: 600; }

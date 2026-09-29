@@ -5,6 +5,8 @@
  * **保留原文**，但追加一条 `kind='system'` 提醒（让已收到的 agent 不要据此行动）。
  *
  * - 仅**发送方**可撤；消息不存在或不属于该会话 → `MessageNotFoundError`（404）
+ * - 仅 `text` 可撤；`kind='system'` 提醒 → `NotRevocableError`（422，堵死通知自增链）
+ * - 读路径经 `maskRevokedForReader` 对**未投递读者**遮蔽原文（发送者/已投递者不受影响）
  * - **幂等**：`revoked_at` 条件写一次落定，二次撤回直接返回旧时间戳、不落第二条提醒
  * - 只取消该消息 `pending`/`sending` 的 job；`accepted`/`refused`/`expired` 不动
  * - 撤回是**独立标记**（`messages.revoked_at`），**不新增第五级回执阶段**（四级回执不变）
@@ -12,8 +14,8 @@
  */
 import type { Db } from "../db"
 import { getConversation } from "../store/conversations"
-import { getById, markRevoked, send } from "../store/messages"
-import { cancelJobsForMessage, enqueueWakeJobs } from "../store/wake"
+import { getById, markRevoked, send, type Message } from "../store/messages"
+import { cancelJobsForMessage, enqueueWakeJobs, getWakeJob } from "../store/wake"
 import { recipientsOf } from "./messaging"
 import { publishMessage, publishReceipt } from "./publish"
 
@@ -36,6 +38,36 @@ export class NotSenderError extends Error {
     super(`agent ${actorId} is not the sender of message ${messageId}`)
     this.name = "NotSenderError"
   }
+}
+
+/**
+ * 非文本消息不可撤回（422 `not_revocable`）。
+ * 提醒（`kind='system'`）的作者就是发起撤回的人，若允许撤回会在自己刚生成的提醒上再生成一条，
+ * 形成通知自增链——故服务端**拒绝**一切非 `text` 消息。
+ */
+export class NotRevocableError extends Error {
+  readonly code = "not_revocable"
+  constructor(readonly messageId: string) {
+    super(`message is not revocable (kind !== text): ${messageId}`)
+    this.name = "NotRevocableError"
+  }
+}
+
+/** 未投递副本读到撤回消息时的正文占位（原文不泄露；`revoked_at` 仍随出参供前端渲染「已撤回」）。 */
+export const REVOKED_BODY_PLACEHOLDER = "（此消息已被发送方撤回）"
+
+/**
+ * 读路径正文遮蔽（MCP `inbox`/`conversation` 与 UI 会话消息接口共用）：
+ * 对**未投递读者**隐藏撤回消息原文，保留 `revoked_at`。未投递 = 该读者 `wake_jobs` 为
+ * `cancelled` 且 `detail='Revoked'`，**或**该消息已撤回且该读者**无 job**（发送时 offline / logical）。
+ * **发送者**与**已投递者**（job `accepted` → delivered）/已读者原样返回，不受影响。
+ */
+export function maskRevokedForReader(db: Db, message: Message, readerId: string): Message {
+  if (message.revokedAt === undefined || message.fromAgentId === readerId) return message
+  const job = getWakeJob(db, message.seq, readerId)
+  const undelivered =
+    job === undefined ? true : job.state === "cancelled" && job.detail === "Revoked"
+  return undelivered ? { ...message, body: REVOKED_BODY_PLACEHOLDER } : message
 }
 
 export interface RevokeInput {
@@ -65,6 +97,10 @@ export function revokeMessage(db: Db, input: RevokeInput): number {
   }
   if (message.fromAgentId !== input.actorId) {
     throw new NotSenderError(input.messageId, input.actorId)
+  }
+  // 仅文本可撤回：提醒（system）作者即撤回者，撤回它会在自身之上再生成一条（通知自增链）。
+  if (message.kind !== "text") {
+    throw new NotRevocableError(input.messageId)
   }
   const conversation = getConversation(db, message.conversationId)
   const recipientIds =

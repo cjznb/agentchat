@@ -23,11 +23,24 @@ import { loadConfig } from "../../server/config"
 import { registerRoot } from "../../server/core/agents"
 import { ensureHuman, sendMessage } from "../../server/core/messaging"
 import { receiptState } from "../../server/core/publish"
-import { MessageNotFoundError, NotSenderError, revokeMessage } from "../../server/core/revoke"
+import {
+  maskRevokedForReader,
+  MessageNotFoundError,
+  NotRevocableError,
+  NotSenderError,
+  REVOKED_BODY_PLACEHOLDER,
+  revokeMessage,
+} from "../../server/core/revoke"
+import { conversationMessages } from "../../server/core/ui-queries"
 import { openDb, type Db } from "../../server/db"
 import { createApp } from "../../server/index"
+import { runConversation } from "../../server/mcp/read-tools"
+import { runInbox } from "../../server/mcp/tools"
+import { claimWakeBacklog } from "../../server/routes/internal"
+import { insertAgent } from "../../server/store/agents"
 import { getById, history } from "../../server/store/messages"
 import { applyDeliveryResult, getWakeJob } from "../../server/store/wake"
+import { requeueExpiredClaims } from "../../server/store/wake-claims"
 import { currentWsSeq, framesSince, resetWsHub } from "../../server/ws"
 
 const errorBodySchema = z.object({ ok: z.boolean(), error: z.string() })
@@ -182,6 +195,142 @@ describe("POST /api/conversations/:id/messages/:messageId/revoke", () => {
     expect(page.messages.find((message) => message.id === sentId)?.revoked_at).toEqual(
       expect.any(Number),
     )
+  })
+})
+
+describe("Critical: 撤回封死未投递收件方的投递路径", () => {
+  it("offline recipient (no job at send): revoke then wake never delivers the original nor rebuilds a deliverable job", () => {
+    const offline = insertAgent(db, {
+      name: "revoke-offline",
+      kind: "runtime",
+      status: "offline",
+      vendor: "opencode",
+    })
+    const sent = sendMessage(db, { from: humanId, to: offline.id, body: "不应送达的原文" })
+    // 发送时 offline → 无 job（这正是原缺陷的入口）。
+    expect(getWakeJob(db, sent.message.seq, offline.id)).toBeUndefined()
+    expect(receiptState(db, getById(db, sent.message.id) ?? throwMissing(), offline.id)).toBe("queued")
+
+    revokeMessage(db, {
+      conversationId: sent.message.conversationId,
+      messageId: sent.message.id,
+      actorId: humanId,
+      now: 100,
+    })
+
+    const backlog = claimWakeBacklog(db, { agentId: offline.id, now: 200 })
+    expect(backlog.messages.some((m) => m.id === sent.message.id)).toBe(false)
+    expect(backlog.messages.map((m) => m.body)).not.toContain("不应送达的原文")
+    // job 不得被补建为可投递态（应为无 / cancelled）。
+    const job = getWakeJob(db, sent.message.seq, offline.id)
+    expect(job === undefined || job.state === "cancelled").toBe(true)
+  })
+
+  it("revoked sending lease is never requeued as deliverable", () => {
+    claimWakeBacklog(db, { agentId: rootId, now: 10 }) // pending → sending
+    revokeMessage(db, { conversationId: dmId, messageId: sentId, actorId: humanId, now: 20 })
+    expect(getWakeJob(db, sentSeq, rootId)?.state).toBe("cancelled")
+
+    expect(requeueExpiredClaims(db, 20 + 10 ** 9)).not.toContain(sentSeq)
+    const again = claimWakeBacklog(db, { agentId: rootId, now: 20 + 10 ** 9 })
+    expect(again.messages.some((m) => m.id === sentId)).toBe(false)
+    expect(again.receipts.every((receipt) => receipt.messageId !== sentId)).toBe(true)
+  })
+})
+
+describe("Important: kind 守卫（仅 text 可撤回，堵死通知自增链）", () => {
+  it("rejects revoking the system reminder it just created", () => {
+    revokeMessage(db, { conversationId: dmId, messageId: sentId, actorId: humanId, now: 1_000 })
+    const notice = revokeNotices()[0]
+    if (notice === undefined) throw new Error("notice missing")
+    expect(() =>
+      revokeMessage(db, { conversationId: dmId, messageId: notice.id, actorId: humanId, now: 2_000 }),
+    ).toThrow(NotRevocableError)
+    expect(revokeNotices()).toHaveLength(1)
+  })
+
+  it("route returns 422 not_revocable for a system message", async () => {
+    revokeMessage(db, { conversationId: dmId, messageId: sentId, actorId: humanId, now: 1_000 })
+    const notice = revokeNotices()[0]
+    if (notice === undefined) throw new Error("notice missing")
+    const res = await post(`/api/conversations/${dmId}/messages/${notice.id}/revoke`, {})
+    expect(res.status).toBe(422)
+    expect(errorBodySchema.parse(await res.json()).error).toBe("not_revocable")
+  })
+})
+
+describe("Important: 未投递读者正文遮蔽（读路径单点）", () => {
+  it("undelivered reader reads the placeholder while the sender reads the original", () => {
+    const offline = insertAgent(db, {
+      name: "mask-offline",
+      kind: "runtime",
+      status: "offline",
+      vendor: "opencode",
+    })
+    const sent = sendMessage(db, { from: humanId, to: offline.id, body: "遮蔽原文" })
+    revokeMessage(db, {
+      conversationId: sent.message.conversationId,
+      messageId: sent.message.id,
+      actorId: humanId,
+      now: 100,
+    })
+    const stored = getById(db, sent.message.id) ?? throwMissing()
+    const masked = maskRevokedForReader(db, stored, offline.id)
+    expect(masked.body).toBe(REVOKED_BODY_PLACEHOLDER)
+    expect(masked.revokedAt).toBe(100)
+    expect(maskRevokedForReader(db, stored, humanId).body).toBe("遮蔽原文")
+  })
+
+  it("delivered reader reads the original body", () => {
+    applyDeliveryResult(db, { agentId: rootId, messageSeq: sentSeq, result: "delivered", now: 5 })
+    revokeMessage(db, { conversationId: dmId, messageId: sentId, actorId: humanId, now: 20 })
+    const stored = getById(db, sentId) ?? throwMissing()
+    expect(maskRevokedForReader(db, stored, rootId).body).toBe("撤回我这条：原始正文")
+  })
+
+  it("MCP inbox + conversation mask for an undelivered reader", () => {
+    const offline = insertAgent(db, {
+      name: "mask-mcp",
+      kind: "runtime",
+      status: "offline",
+      vendor: "opencode",
+    })
+    const sent = sendMessage(db, { from: humanId, to: offline.id, body: "MCP 原文" })
+    revokeMessage(db, {
+      conversationId: sent.message.conversationId,
+      messageId: sent.message.id,
+      actorId: humanId,
+      now: 100,
+    })
+    const ctx = { db, home, agentId: offline.id }
+    const inboxOut = runInbox(ctx, {}) as { messages: { id: string; body: string }[] }
+    expect(inboxOut.messages.find((m) => m.id === sent.message.id)?.body).toBe(
+      REVOKED_BODY_PLACEHOLDER,
+    )
+    const convOut = runConversation(ctx, { id: sent.message.conversationId }) as {
+      messages: { id: string; body: string }[]
+    }
+    expect(convOut.messages.find((m) => m.id === sent.message.id)?.body).toBe(
+      REVOKED_BODY_PLACEHOLDER,
+    )
+  })
+
+  it("UI conversation read masks for an undelivered (human) reader", () => {
+    const fromRoot = sendMessage(db, { from: rootId, to: humanId, body: "root 原文" })
+    revokeMessage(db, {
+      conversationId: dmId,
+      messageId: fromRoot.message.id,
+      actorId: rootId,
+      now: 100,
+    })
+    const masked = conversationMessages(db, dmId, humanId).find(
+      (m) => m.id === fromRoot.message.id,
+    )
+    expect(masked?.body).toBe(REVOKED_BODY_PLACEHOLDER)
+    expect(masked?.revoked_at).toBe(100)
+    // 发送者不受影响（读路径对发送者原样）。
+    const stored = getById(db, fromRoot.message.id) ?? throwMissing()
+    expect(maskRevokedForReader(db, stored, rootId).body).toBe("root 原文")
   })
 })
 

@@ -17,7 +17,12 @@ import { loadExpanded, saveExpanded, toggleExpanded, type StorageLike } from "./
 
 export type { StorageLike }
 
-export const EXPANDED_TREE_KEY = "agentchat:expandedTree"
+/**
+ * 组织树展开态存储键（**版本化**）：扁平化之前的旧键 `agentchat:expandedTree` 存的是裸节点
+ * id，语义不同；沿用会让升级用户首个加载被「预展开」，违反默认折叠。故升为 `:v2`——
+ * 旧键值被忽略 → 默认折叠（评审 Important #1）。
+ */
+export const EXPANDED_TREE_KEY = "agentchat:expandedTree:v2"
 
 /** human 节点判定（`vendor === "human"`；与 `fold.ts`/`chat.ts` 同规则）。 */
 export function isHuman(node: RosterNode): boolean {

@@ -274,11 +274,18 @@ describe("组织树展开态（手风琴 + localStorage）", () => {
     expect(toggleTreeRow(["root1"], "root1")).toEqual([])
   })
 
-  it("写入后读回一致（键 agentchat:expandedTree）", () => {
+  it("写入后读回一致（键已版本化为 agentchat:expandedTree:v2）", () => {
     const storage = new FakeStorage()
     saveExpandedTree(storage, ["root1"])
     expect(storage.getItem(EXPANDED_TREE_KEY)).toBe('["root1"]')
     expect(loadExpandedTree(storage)).toEqual(["root1"])
+  })
+
+  it("旧键（扁平化前 agentchat:expandedTree）存在时仍默认折叠（评审 Important #1）", () => {
+    const storage = new FakeStorage()
+    storage.seed("agentchat:expandedTree", '["root1"]')
+    // 版本化后旧键值被忽略 → 默认折叠（不沿用裸节点 id 的旧语义）。
+    expect(loadExpandedTree(storage)).toEqual([])
   })
 
   it("坏 JSON / 非字符串数组 / 空存储 / null → 空数组（容错）", () => {

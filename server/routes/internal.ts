@@ -123,6 +123,7 @@ export interface WakeBacklogResult {
  * 只由 `/internal/result {delivered}` 派生）；job 缺失时补建为 `sending`，崩溃未回执
  * 则租约过期后下一次 wake 重投。已终态或在途租约仍有效的 `sending` 不重复认领。
  * logical（含 human）只取件不建 job。回执 stage 因此为 `sending`。
+ * **已撤回消息一律跳过**（`revoked_at != null`）：不进 `messages`、不补建 job，从投递入口封死原文。
  */
 export function claimWakeBacklog(
   db: Db,
@@ -143,6 +144,9 @@ export function claimWakeBacklog(
   const conversations = new Set<string>()
   for (const message of page) {
     if (message.fromAgentId === input.agentId) continue // T4 交接：过滤自发消息（from != target）
+    // 已撤回：**绝不投递、绝不补建 job**——覆盖发送时 offline（无 job）与 logical 两条路径。
+    // 撤回已取消既有 job；无 job 的收件方若在此补建会把原文重新注入，正是必须封死的洞。
+    if (message.revokedAt !== undefined) continue
     const stage = receiptState(db, message, input.agentId)
     if (stage === "delivered" || stage === "read") continue
     if (agent.kind === "runtime") {

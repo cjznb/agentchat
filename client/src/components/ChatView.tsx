@@ -82,6 +82,7 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
     nearBottomRef.current = true
     handledFocusRef.current = null
     focusPagesRef.current = 0
+    setRevokingId(null) // 切会话清撤回中态（评审 Minor #4）：避免旧会话的「撤回中…」残留
     setRevokeError(null)
     setHighlightId(null)
     setFocusMiss(null)

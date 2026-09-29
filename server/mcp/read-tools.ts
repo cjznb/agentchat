@@ -12,6 +12,7 @@ import {
   type ShoutApprovalWaitResult,
 } from "../core/messaging"
 import type { ApprovalRequested } from "../core/permissions"
+import { maskRevokedForReader } from "../core/revoke"
 import { listConversations, listParticipants, SHOUT_KEY } from "../store/conversations"
 import {
   requireIdentity,
@@ -39,8 +40,13 @@ export function runRoster(ctx: ToolContext, input: McpToolInput<"roster">): unkn
 }
 
 export function runConversation(ctx: ToolContext, input: McpToolInput<"conversation">): unknown {
-  requireIdentity(ctx)
-  return { messages: history(ctx.db, input.id, input.before, input.limit) }
+  const reader = requireIdentity(ctx)
+  // 撤回消息对未投递读者遮蔽正文（与 MCP inbox / UI 会话消息接口同一单点）。
+  return {
+    messages: history(ctx.db, input.id, input.before, input.limit).map((message) =>
+      maskRevokedForReader(ctx.db, message, reader),
+    ),
+  }
 }
 
 export function runGroup(ctx: ToolContext, input: McpToolInput<"group">): unknown {

@@ -292,15 +292,19 @@ export class Dispatcher {
       // 进程外 pull：dispatcher 无推送通道，job 保持 pending 待 `/internal/wake` 认领，
       // 绝不注入、绝不因“无推送通道”转 refused。
       if (adapter.mode === "pull") continue
+      const message = getBySeq(this.db, job.messageId)
+      if (message === undefined) continue // FK 保证不可达；防呆留空
+      if (message.revokedAt !== undefined) continue // 已撤回：绝不认领/注入（撤回已取消其 job）
       const claimed = claimWakeJob(this.db, { id: job.id, now })
       if (claimed === undefined) continue
-      const message = getBySeq(this.db, claimed.messageId)
-      if (message === undefined) continue // FK 保证不可达；防呆留空
       publishReceipt(this.db, message.conversationId) // 认领 → `sending`（唤醒中）即刻可见
       injections.push({ claimed, message, adapter })
     }
     // 阶段二：按 id 升序逐条注入（顺序与旧版一致）。
     for (const { claimed, message, adapter } of injections) {
+      // 认领与注入之间被撤回：以 `revoked_at` 为准直接跳过（撤回已取消该 job）。
+      const fresh = getBySeq(this.db, message.seq)
+      if (fresh === undefined || fresh.revokedAt !== undefined) continue
       // 注入（适配器抛错按拒收计，计入连续拒收；失败不打断本轮其余 job）。
       let result: DeliveryResult
       try {

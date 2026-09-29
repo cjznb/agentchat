@@ -28,7 +28,7 @@ import {
   shoutPayloadSchema,
   type DecidedApproval,
 } from "../core/permissions"
-import { MessageNotFoundError, NotSenderError, revokeMessage } from "../core/revoke"
+import { MessageNotFoundError, NotRevocableError, NotSenderError, revokeMessage } from "../core/revoke"
 import { agentCard, conversationList, conversationMessages, groupList } from "../core/ui-queries"
 import { config } from "../config"
 import { openDb, type Db } from "../db"
@@ -233,6 +233,8 @@ export function uiRoutes(db?: Db): Hono {
           return c.json({ ok: false, error: error.code }, 404)
         }
         if (error instanceof NotSenderError) return c.json({ ok: false, error: error.code }, 403)
+        // 仅 text 可撤回（system 提醒作者即撤回者，撤回会再生成一条 → 422 no-op）。
+        if (error instanceof NotRevocableError) return c.json({ ok: false, error: error.code }, 422)
         throw error
       }
     })

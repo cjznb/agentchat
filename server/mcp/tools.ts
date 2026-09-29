@@ -13,6 +13,7 @@ import {
 } from "../../shared/contracts"
 import { registerChild, registerLogical, registerRoot, RegistrationError } from "../core/agents"
 import { ack, inbox, recipientsOf, receiptState, sendMessage, unreadFor } from "../core/messaging"
+import { maskRevokedForReader } from "../core/revoke"
 import { getAgent, getAgentByName, setStatusText, type Agent } from "../store/agents"
 import { getConversation } from "../store/conversations"
 import { getById, type Message } from "../store/messages"
@@ -111,7 +112,12 @@ function filterConversation(messages: readonly Message[], id: string | undefined
   return id === undefined ? [...messages] : messages.filter((m) => m.conversationId === id)
 }
 
-function runInbox(ctx: ToolContext, input: McpToolInput<"inbox">): Promise<unknown> | unknown {
+/** 读序列化单点（评审 I3）：撤回消息对未投递读者遮蔽正文，发送者/已投递者原样。 */
+function maskMessages(ctx: ToolContext, readerId: string, messages: readonly Message[]): Message[] {
+  return messages.map((message) => maskRevokedForReader(ctx.db, message, readerId))
+}
+
+export function runInbox(ctx: ToolContext, input: McpToolInput<"inbox">): Promise<unknown> | unknown {
   const id = requireIdentity(ctx)
   const paging = {
     ...(input.after === undefined ? {} : { after: input.after }),
@@ -119,13 +125,21 @@ function runInbox(ctx: ToolContext, input: McpToolInput<"inbox">): Promise<unkno
   if (input.timeout !== undefined) {
     return inbox(ctx.db, id, { ...paging, wait: { until: "either", timeoutMs: input.timeout } }).then(
       (result) => {
-        const messages = filterConversation(result.messages, input.conversation)
+        const messages = maskMessages(
+          ctx,
+          id,
+          filterConversation(result.messages, input.conversation),
+        )
         if (input.ack === true) ack(ctx.db, id, messages.map((m) => m.id))
         return { messages, unread: unreadFor(ctx.db, id), timedOut: result.timedOut }
       },
     )
   }
-  const messages = filterConversation(inbox(ctx.db, id, paging), input.conversation)
+  const messages = maskMessages(
+    ctx,
+    id,
+    filterConversation(inbox(ctx.db, id, paging), input.conversation),
+  )
   if (input.ack === true) ack(ctx.db, id, messages.map((m) => m.id))
   return { messages, unread: unreadFor(ctx.db, id) }
 }
