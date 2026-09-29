@@ -68,7 +68,7 @@ agentchat     # 按需构建前端 → 拉起 Hub → 交互式终端自动打�
   复制为 `<home>.bak-<时间戳>`（失败即中止、保留原状），**再**清空 `agentchat.db(+wal/shm)`、`tokens/`、
   `agents/`、`logs/`、`backups/`（`--keep-backups` 时保留）、`config.json`、`hub_token` 等；出厂态不含
   `config.json`（由安装器/首次运行再生成）。检测到 Hub 正在运行会**拒绝**（`--force` 才继续，有风险）；
-  非交互环境必须显式 `--yes`。退出码：`0` 成功、`1` 运行错误、`2` 参数错误、`3` Hub 运行中、`4` 缺少 `--yes`。
+  非交互环境必须显式 `--yes`。退出码：`0` 成功、`1` 运行错误、`2` 参数错误、`3` Hub 运行中、`4` 缺少 `--yes`、`5` 交互确认中放弃（未做任何改动）。
 - **Web UI**：rail 第 5 个 tab「设置」→「恢复出厂设置」需**手工逐字输入 `RESET`** 才可提交；成功后清
   `localStorage` 的 `agentchat:` 键并提示**重启 Hub**。「设置」面板同时展示数据/日志位置并可「清除本地状态」。
 - **端点**：`POST /api/admin/reset`（body `{confirm:"RESET"}`，可选 `{keepBackups:true}`）——**仅回环**来源可调用；

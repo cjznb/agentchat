@@ -835,7 +835,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   .app-shell { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr) auto; height: 100dvh; min-height: 0; }
   .mode-rail { grid-row: 3; flex-direction: row; justify-content: center; padding: var(--space-2); }
   .brand-mark, .hub-status { display: none; }
-  .rail-actions { grid-template-columns: repeat(4, 1fr); max-width: calc(var(--space-12) * 7); margin: 0; }
+  .rail-actions { grid-template-columns: repeat(5, 1fr); max-width: calc(var(--space-12) * 7); margin: 0; }
   .rail-button::after { inset: auto var(--space-3) calc(var(--space-2) * -1); width: auto; height: var(--line-signal); border-radius: var(--radius-small) var(--radius-small) 0 0; }
   .context-list { grid-row: 1; border-right: 0; border-bottom: var(--line-thin) solid var(--color-hairline); }
   .context-list header, .view-header { min-height: auto; padding: var(--space-4); }

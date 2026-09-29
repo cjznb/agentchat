@@ -106,7 +106,13 @@ export function adminRoutes(db?: Db, options?: AdminRoutesOptions): Hono {
       const parsed = resetBodySchema.safeParse(await c.req.json().catch(() => undefined))
       if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
 
-      const database = resolveDb(db)
+      let database: Db
+      try {
+        database = resolveDb(db)
+      } catch (error) {
+        // 无 app.onError：打开库失败也必须自转 JSON，不能落成非 JSON 500
+        return c.json({ ok: false, error: "db_open_failed", detail: errorText(error) }, 500)
+      }
       const backupDir = `${home}.bak-${new Date(now()).toISOString().replace(/[:.]/g, "-")}`
       const snapshotPath = join(backupDir, "agentchat.db")
       try {

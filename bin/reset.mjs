@@ -68,6 +68,7 @@ export async function runReset(parsed, deps = {}) {
     }
   }
 
+  log(`[agentchat] 数据目录：${home}`) // 先打印解析出的 home：避免误对默认 home 执行销毁
   let snapshotPath
   try {
     snapshotPath = (deps.snapshot ?? snapshotHome)(home, deps.now ?? Date.now())
