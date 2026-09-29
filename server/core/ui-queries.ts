@@ -221,6 +221,7 @@ function bareMessage(message: Message): ChatMessage {
     kind: message.kind,
     createdAt: message.createdAt,
     ...(message.meta === undefined ? {} : { meta: message.meta }),
+    ...(message.revokedAt === undefined ? {} : { revoked_at: message.revokedAt }),
   }
 }
 

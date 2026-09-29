@@ -21,6 +21,7 @@ import {
   notificationReadResultSchema,
   respondAskInputSchema,
   respondAskResultSchema,
+  revokeMessageResultSchema,
   rosterTreeSchema,
   sendMessageResultSchema,
   shoutResultSchema,
@@ -40,6 +41,7 @@ import {
   type NotificationReadResult,
   type RespondAskInput,
   type RespondAskResult,
+  type RevokeMessageResult,
   type RosterNode,
   type SendMessageResult,
   type ShoutResult,
@@ -106,6 +108,18 @@ export function sendMessage(conversationId: string, body: string): Promise<SendM
     `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
     sendMessageResultSchema,
     postInit({ body }),
+  )
+}
+
+/** 撤回排队中消息（仅发送方；尽力撤回）。 */
+export function revokeMessage(
+  conversationId: string,
+  messageId: string,
+): Promise<RevokeMessageResult> {
+  return request(
+    `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/revoke`,
+    revokeMessageResultSchema,
+    postInit({}),
   )
 }
 

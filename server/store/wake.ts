@@ -237,6 +237,19 @@ export function claimWakeJob(
   return row === undefined ? undefined : toWakeJob(row)
 }
 
+/**
+ * 撤回：取消**某条消息**未投递的 job（`pending`/`sending` → `cancelled`），
+ * 已 `accepted`/`refused`/`expired` 终态不动（尽力撤回语义）。
+ * 返回受影响行数；`detail` 由调用方给出（如 `'Revoked'`）。
+ */
+export function cancelJobsForMessage(db: Db, messageSeq: number, detail: string): number {
+  return db
+    .prepare<[string, number], void>(
+      "UPDATE wake_jobs SET state = 'cancelled', detail = ? WHERE message_id = ? AND state IN ('pending','sending')",
+    )
+    .run(detail, messageSeq).changes
+}
+
 /** 使该收件方全部 `pending` job 立即到期（上报 idle、根重连补投）。 */
 export function makeJobsDue(db: Db, input: { readonly agentId: string; readonly now: number }): number {
   return db

@@ -1,18 +1,20 @@
 /**
  * 聊天视图（spec §11.4/§11.5；Plan 3 T5）——消息流 + 滚顶上翻分页 + 深链定位 + 发送。
- * 派生逻辑在 `chat.ts` / `receipts.ts` / `deeplink.ts` 纯函数；本组件只管交互与滚动。
+ * 派生逻辑在 `chat.ts` / `receipts.ts` / `deeplink.ts` / `revoke.ts` 纯函数；本组件只管交互与滚动。
  *
  * 终审修复：
  * - F2 深链：未命中时**有界向前分页**（复用 `loadOlder`，上限 `MAX_FOCUS_PAGES` 页）；
  *   历史耗尽仍未命中 → 显式「消息不可定位」（不静默）；DOM 定位按 `dataset.messageId` 集合
  *   比较（不再把 `msg` 拼进 `querySelector`，含引号不抛 `DOMException`）。
- * - F4 输入：`isComposing` 期间忽略 Enter（CJK 选词不误发）；同步 ref 锁防同帧双击重复提交。
+ * - F4 输入：输入框与发送逻辑抽至 `Composer`（本文件 ≤250 纯行；同帧双击锁 / CJK 安全回车不变）。
+ * - feat/revoke-queued：己方气泡撤回入口 + 行内错误；派生在 `revoke.ts`，编排在 store 动作。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { ChatMessage } from "../../../shared/contracts"
 import { readCardMessage } from "../cards"
 import { buildRosterView, conversationTitle } from "../chat"
 import { useStore } from "../store"
+import { Composer } from "./Composer"
 import { GroupInfo } from "./GroupInfo"
 import { MessageBubble } from "./MessageBubble"
 
@@ -45,7 +47,7 @@ function findMessageNode(container: HTMLElement | null, messageId: string): HTML
 }
 
 export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
-  const { state, loadOlder, sendMessage } = useStore()
+  const { state, loadOlder, revokeMessage } = useStore()
   const rosterView = useMemo(() => buildRosterView(state.roster), [state.roster])
   const messages = state.messages.get(conversationId) ?? EMPTY_MESSAGES
   const messagesLoaded = state.messages.has(conversationId)
@@ -61,10 +63,8 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
   const handledFocusRef = useRef<string | null>(null)
   const focusPagesRef = useRef(0)
   const highlightTimerRef = useRef<number | undefined>(undefined)
-  const sendingRef = useRef(false)
-  const [draft, setDraft] = useState("")
-  const [sending, setSending] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [revokingId, setRevokingId] = useState<string | null>(null)
+  const [revokeError, setRevokeError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [highlightId, setHighlightId] = useState<string | null>(null)
   const [focusMiss, setFocusMiss] = useState<string | null>(null)
@@ -75,15 +75,14 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
     if (node !== null) node.scrollTop = node.scrollHeight
   }, [])
 
-  // 切换会话：重置分页游标 / 草稿 / 高亮 / 深链进度，并滚到底部；
-  // 卸载/切会话时清掉高亮计时器（复审 I1）。
+  // 切换会话：重置分页游标 / 高亮 / 深链进度 / 撤回错误，并滚到底部；
+  // 卸载/切会话时清掉高亮计时器（复审 I1）。草稿由 `Composer key` 重挂载自复位。
   useEffect(() => {
     hasMoreRef.current = true
     nearBottomRef.current = true
     handledFocusRef.current = null
     focusPagesRef.current = 0
-    setDraft("")
-    setError(null)
+    setRevokeError(null)
     setHighlightId(null)
     setFocusMiss(null)
     setShowGroupInfo(false)
@@ -173,40 +172,22 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
       })
   }, [focusMessageId, messages, messagesLoaded, conversationId, loadOlder])
 
-  const canSend = draft.trim().length > 0 && !sending
+  // 发送成功：贴底跟随（Composer 持有草稿/发送态，本层只管滚动）。
+  const onSent = useCallback((): void => {
+    nearBottomRef.current = true
+    requestAnimationFrame(scrollToBottom)
+  }, [scrollToBottom])
 
-  const submit = useCallback((): void => {
-    // 同步 ref 锁（F4②）：异步 state 更新前的同帧双击不得重复提交。
-    if (draft.trim().length === 0 || sendingRef.current) return
-    sendingRef.current = true
-    setSending(true)
-    setError(null)
-    void sendMessage(conversationId, draft)
-      .then(() => {
-        setDraft("")
-        nearBottomRef.current = true
-        requestAnimationFrame(scrollToBottom)
-      })
-      .catch(() => {
-        // 失败：乐观气泡已回滚，草稿保留供重试。
-        setError("发送失败，请重试。")
-      })
-      .finally(() => {
-        sendingRef.current = false
-        setSending(false)
-      })
-  }, [conversationId, draft, scrollToBottom, sendMessage])
-
-  const onKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>): void => {
-      // CJK 输入法选词回车不发送（F4①）。
-      if (event.nativeEvent.isComposing) return
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault()
-        submit()
-      }
+  // 撤回：成功经 store 动作重拉该会话消息（带出 revoked_at / 系统提醒），失败行内提示。
+  const onRevoke = useCallback(
+    (messageId: string): void => {
+      setRevokingId(messageId)
+      setRevokeError(null)
+      void revokeMessage(conversationId, messageId)
+        .catch(() => setRevokeError("撤回失败，请重试。"))
+        .finally(() => setRevokingId(null))
     },
-    [submit],
+    [conversationId, revokeMessage],
   )
 
   return (
@@ -257,38 +238,19 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
                 showSender={isGroup}
                 highlighted={highlightId === message.id}
                 card={readCardMessage(message)}
+                revoking={revokingId === message.id}
+                onRevoke={() => onRevoke(message.id)}
               />
             ))}
           </ul>
         )}
       </div>
-      <form
-        className="composer"
-        data-testid="composer"
-        onSubmit={(event) => {
-          event.preventDefault()
-          submit()
-        }}
-      >
-        <textarea
-          className="composer-input"
-          data-testid="composer-input"
-          aria-label="消息输入框"
-          placeholder="输入消息，回车发送，Shift+回车换行"
-          value={draft}
-          rows={1}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={onKeyDown}
-        />
-        <button className="composer-send" data-testid="composer-send" type="submit" disabled={!canSend}>
-          发送
-        </button>
-        {error !== null ? (
-          <p className="composer-error" role="alert" data-testid="composer-error">
-            {error}
-          </p>
-        ) : null}
-      </form>
+      {revokeError !== null ? (
+        <p className="chat-revoke-error" role="alert" data-testid="revoke-error">
+          {revokeError}
+        </p>
+      ) : null}
+      <Composer key={conversationId} conversationId={conversationId} onSent={onSent} />
       {isGroupChat && showGroupInfo ? (
         <GroupInfo conversationId={conversationId} onClose={() => setShowGroupInfo(false)} />
       ) : null}

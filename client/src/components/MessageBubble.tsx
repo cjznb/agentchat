@@ -6,6 +6,7 @@ import type { ChatMessage } from "../../../shared/contracts"
 import type { CardData } from "../cards"
 import { formatClock, initialOf, vendorBadge, type SenderView } from "../chat"
 import { receiptGlyph } from "../receipts"
+import { canRevoke, revokeView } from "../revoke"
 import { ChatCard } from "./Cards"
 
 /** MessageBubble 入参。 */
@@ -18,6 +19,10 @@ export interface MessageBubbleProps {
   readonly highlighted: boolean
   /** 审批/批示卡（`meta` 识别）；非卡系统消息 → null。 */
   readonly card: CardData | null
+  /** 撤回回调（仅己方且有未送达副本时展示按钮）；缺省 = 不展示入口。 */
+  readonly onRevoke?: () => void
+  /** 撤回请求进行中（按钮禁用）。 */
+  readonly revoking?: boolean
 }
 
 function rowClass(highlighted: boolean, extra?: string): string {
@@ -26,7 +31,16 @@ function rowClass(highlighted: boolean, extra?: string): string {
     .join(" ")
 }
 
-export function MessageBubble({ message, own, sender, showSender, highlighted, card }: MessageBubbleProps) {
+export function MessageBubble({
+  message,
+  own,
+  sender,
+  showSender,
+  highlighted,
+  card,
+  onRevoke,
+  revoking = false,
+}: MessageBubbleProps) {
   const highlightAttr = highlighted ? "true" : undefined
 
   if (message.kind === "system") {
@@ -61,6 +75,8 @@ export function MessageBubble({ message, own, sender, showSender, highlighted, c
   const showIdentity = showSender && !own && sender !== undefined
   // spec §11.4：子消息带 `[子·根名]` 徽标（不限群聊）；私聊亦显示，仅身份行（头像/名字/厂商）随 showSender。
   const childBadge = !own && sender !== undefined && sender.rootName !== null ? sender.rootName : null
+  const revoked = revokeView(message, own)
+  const showRevoke = canRevoke(message, own) && onRevoke !== undefined
 
   return (
     <li
@@ -93,9 +109,20 @@ export function MessageBubble({ message, own, sender, showSender, highlighted, c
             ) : null}
           </header>
         ) : null}
-        <p className="bubble-body">{message.body}</p>
+        {revoked === "placeholder" ? (
+          <p className="bubble-body is-revoked" data-testid="revoke-placeholder">
+            此消息已撤回
+          </p>
+        ) : (
+          <p className="bubble-body">{message.body}</p>
+        )}
         <footer className="bubble-foot">
           <time className="bubble-time">{formatClock(message.createdAt)}</time>
+          {revoked === "marked" ? (
+            <span className="revoke-mark" data-testid="revoke-mark">
+              已撤回
+            </span>
+          ) : null}
           {receipt !== null ? (
             <span
               className="receipt"
@@ -109,6 +136,17 @@ export function MessageBubble({ message, own, sender, showSender, highlighted, c
               </i>
               <span className="receipt-label">{receipt.label}</span>
             </span>
+          ) : null}
+          {showRevoke ? (
+            <button
+              className="bubble-revoke"
+              data-testid="revoke-button"
+              type="button"
+              disabled={revoking}
+              onClick={onRevoke}
+            >
+              {revoking ? "撤回中…" : "撤回"}
+            </button>
           ) : null}
         </footer>
       </div>

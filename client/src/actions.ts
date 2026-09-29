@@ -14,6 +14,7 @@ import {
   markNotificationRead as postNotificationRead,
   respondAsk as postRespondAsk,
   decideApproval as postDecision,
+  revokeMessage as postRevoke,
   sendMessage as postMessage,
   shout as postShout,
   type ReloadPlan,
@@ -36,6 +37,8 @@ export interface StoreActions {
   /** 资料卡「发消息」：确保 human↔节点 DM（取或建，幂等）后打开；失败 reject（不切空视图）。 */
   openDm(nodeId: string): Promise<void>
   sendMessage(conversationId: string, body: string): Promise<void>
+  /** 撤回排队中消息（仅发送方；尽力撤回）：成功后重拉该会话消息以带出撤回标记。 */
+  revokeMessage(conversationId: string, messageId: string): Promise<void>
   /** 喊话频道发送（`POST /api/shout`，human 即时执行）；成功后消息入桶并重拉会话/回执。 */
   shoutBroadcast(body: string): Promise<ShoutResult>
   /** 上翻分页：拉取 `beforeSeq` 之前一页并入会话；返回本页条数（< 页大小 = 无更多）。 */
@@ -118,6 +121,17 @@ export function createActions({ dispatch, reload, stateRef }: ActionDeps): Store
     }
   }
 
+  const revokeMessage = async (conversationId: string, messageId: string): Promise<void> => {
+    await postRevoke(conversationId, messageId)
+    reload({
+      roster: false,
+      conversations: false,
+      notifications: false,
+      approvals: false,
+      messages: [conversationId],
+    })
+  }
+
   const shoutBroadcast = async (body: string): Promise<ShoutResult> => {
     const result = await postShout(body)
     if ("message" in result) {
@@ -172,6 +186,7 @@ export function createActions({ dispatch, reload, stateRef }: ActionDeps): Store
     openAndRead,
     openDm,
     sendMessage,
+    revokeMessage,
     shoutBroadcast,
     loadOlder,
     markConversationRead,

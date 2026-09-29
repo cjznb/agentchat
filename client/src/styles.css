@@ -304,6 +304,8 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   white-space: pre-wrap;
 }
 .message-row[data-own="true"] .bubble-body { color: var(--color-raised); background: var(--color-jade); border-color: var(--color-jade); }
+.bubble-body.is-revoked { color: var(--color-muted); background: color-mix(in srgb, var(--color-muted) 10%, transparent); border-style: dashed; font-style: italic; }
+.message-row[data-own="true"] .bubble-body.is-revoked { color: var(--color-muted); background: color-mix(in srgb, var(--color-muted) 10%, transparent); border-color: var(--color-hairline); }
 .is-system .system-text { padding: var(--space-1) var(--space-3); border-radius: var(--radius-large); color: var(--color-muted); background: color-mix(in srgb, var(--color-muted) 10%, transparent); font-size: var(--text-label); }
 
 .bubble-foot { display: flex; align-items: center; gap: var(--space-2); color: var(--color-muted); font: 500 var(--text-label)/1 var(--font-utility); }
@@ -311,6 +313,10 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .receipt { display: inline-flex; align-items: center; gap: var(--space-1); }
 .receipt[data-tone="read"] { color: var(--color-jade); font-weight: 700; }
 .receipt-glyph { font-style: normal; }
+.revoke-mark { padding: 0 var(--space-1); border-radius: var(--radius-small); color: var(--color-error); background: color-mix(in srgb, var(--color-error) 12%, transparent); font-weight: 600; }
+.bubble-revoke { padding: 0 var(--space-2); border: var(--line-thin) solid var(--color-hairline); border-radius: var(--radius-small); color: var(--color-muted); background: transparent; font: inherit; cursor: pointer; transition: color var(--duration-micro) var(--ease-standard); }
+.bubble-revoke:hover { color: var(--color-error); border-color: var(--color-error); }
+.bubble-revoke:disabled { cursor: default; opacity: 0.5; }
 
 .message-row.is-highlighted .bubble-body,
 .message-row.is-highlighted .system-text {
@@ -326,6 +332,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .composer-send:disabled { cursor: default; opacity: 0.45; }
 .composer-send:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: var(--space-1); }
 .composer-error { grid-column: 1 / -1; margin: 0; color: var(--color-error); font-size: var(--text-label); }
+.chat-revoke-error { margin: 0; padding: var(--space-2) var(--space-6); color: var(--color-error); font-size: var(--text-label); }
 
 /* ── 通讯录 · 组织树 + 节点资料卡（spec §11.2；Plan 3 T6） ─────────── */
 

@@ -23,6 +23,8 @@ export interface Message {
   readonly meta: Record<string, unknown> | undefined
   readonly idempotencyKey: string | undefined
   readonly createdAt: number
+  /** 发送方撤回时间（epoch ms）；`undefined` = 未撤回。 */
+  readonly revokedAt: number | undefined
 }
 
 export interface SendInput {
@@ -51,6 +53,7 @@ interface MessageRow {
   readonly meta: string | null
   readonly idempotency_key: string | null
   readonly created_at: number
+  readonly revoked_at: number | null
 }
 
 function toMessage(row: MessageRow): Message {
@@ -64,6 +67,7 @@ function toMessage(row: MessageRow): Message {
     meta: row.meta === null ? undefined : metaSchema.parse(JSON.parse(row.meta)),
     idempotencyKey: row.idempotency_key ?? undefined,
     createdAt: row.created_at,
+    revokedAt: row.revoked_at ?? undefined,
   }
 }
 
@@ -109,7 +113,20 @@ export function send(db: Db, input: SendInput): Message {
     meta: input.meta,
     idempotencyKey: key,
     createdAt: now,
+    revokedAt: undefined,
   }
+}
+
+/**
+ * 置撤回位点（条件更新：仅未撤回时写入，返回受影响行数作为幂等闸）。
+ * `revoked_at` 一次落定后不再改写（二次调用 changes=0）。
+ */
+export function markRevoked(db: Db, input: { readonly id: string; readonly now: number }): number {
+  return db
+    .prepare<[number, string], void>(
+      "UPDATE messages SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+    )
+    .run(input.now, input.id).changes
 }
 
 export function getBySeq(db: Db, seq: number): Message | undefined {

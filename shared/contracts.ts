@@ -521,6 +521,8 @@ export const chatMessageSchema = z.object({
   kind: messageKindSchema,
   meta: z.record(z.string(), z.unknown()).optional(),
   createdAt: z.number().int().nonnegative(),
+  /** 发送方撤回时间（epoch ms）；缺省 = 未撤回（向后兼容旧负载）。 */
+  revoked_at: z.number().int().nonnegative().nullable().optional(),
   /**
    * 己方文本消息的各收件方四级回执（Plan 3 T5 决议 1：仅 human 消息；
    * 非己方 / 系统消息 / 无收件方 → 字段缺省）。派生自既有 `receiptState`。
@@ -583,6 +585,13 @@ export const conversationReadResultSchema = z.object({
   lastReadSeq: z.number().int().nonnegative(),
 })
 export type ConversationReadResult = z.infer<typeof conversationReadResultSchema>
+
+/** 撤回消息结果（`POST /api/conversations/:id/messages/:messageId/revoke`）。 */
+export const revokeMessageResultSchema = z.object({
+  ok: z.literal(true),
+  revokedAt: z.number().int().nonnegative(),
+})
+export type RevokeMessageResult = z.infer<typeof revokeMessageResultSchema>
 
 /** 会话核心资料（建群出参 `group` 字段）。 */
 export const conversationSchema = z.object({

@@ -14,6 +14,9 @@ const SCHEMA_URL = new URL("./schema.sql", import.meta.url)
 /** `approvals` 扩展列（spec §17.2；任一缺失即触发重建）。 */
 const APPROVALS_NEW_COLUMNS = ["kind", "target", "result", "read_at"] as const
 
+/** `messages` 新增可空列（撤回；旧库 ADD COLUMN 即可，无需重建 —— 列可空且无 CHECK）。 */
+const MESSAGES_REVOKED_COLUMN = "revoked_at"
+
 interface SqliteMasterRow {
   readonly sql: string | null
 }
@@ -81,6 +84,18 @@ function migrateApprovals(db: Db): void {
 }
 
 /**
+ * `messages.revoked_at` 幂等迁移（撤回功能）：旧库缺列时 `ALTER TABLE ADD COLUMN`（可空，
+ * 老行取值 NULL，天然向后兼容）；fresh 库由 schema.sql 直建，短路跳过。
+ */
+function migrateMessages(db: Db): void {
+  const columns = new Set(
+    (db.pragma("table_info(messages)") as TableInfoRow[]).map((column) => column.name),
+  )
+  if (columns.has(MESSAGES_REVOKED_COLUMN)) return
+  db.exec(`ALTER TABLE messages ADD COLUMN ${MESSAGES_REVOKED_COLUMN} INTEGER`)
+}
+
+/**
  * 打开（必要时创建）`dbPath` 指向的数据库并建表。
  * - `journal_mode=WAL`：读写并发（spec §14）
  * - `foreign_keys=ON`：八张表的引用完整性逐语句生效
@@ -94,5 +109,6 @@ export function openDb(dbPath: string): Db {
   db.pragma("busy_timeout = 5000")
   db.exec(readFileSync(SCHEMA_URL, "utf8"))
   migrateApprovals(db)
+  migrateMessages(db)
   return db
 }

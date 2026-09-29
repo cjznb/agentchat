@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS messages (
   kind            TEXT NOT NULL CHECK (kind IN ('text', 'system')),
   meta            TEXT,                             -- JSON 或 NULL
   idempotency_key TEXT,
-  created_at      INTEGER NOT NULL
+  created_at      INTEGER NOT NULL,
+  revoked_at      INTEGER                           -- 发送方撤回时间（epoch ms）；NULL = 未撤回
 );
 -- 幂等唯一索引（spec §12 重复投递；NULL 不参与冲突，未带 key 的消息不受限）。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_idempotency

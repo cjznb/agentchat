@@ -28,6 +28,7 @@ import {
   shoutPayloadSchema,
   type DecidedApproval,
 } from "../core/permissions"
+import { MessageNotFoundError, NotSenderError, revokeMessage } from "../core/revoke"
 import { agentCard, conversationList, conversationMessages, groupList } from "../core/ui-queries"
 import { config } from "../config"
 import { openDb, type Db } from "../db"
@@ -213,6 +214,25 @@ export function uiRoutes(db?: Db): Hono {
       } catch (error) {
         if (error instanceof RecipientNotFound) return c.json({ ok: false, error: error.code }, 404)
         if (error instanceof NotParticipantError) return c.json({ ok: false, error: error.code }, 403)
+        throw error
+      }
+    })
+    // feat/revoke-queued：撤回排队中消息（仅发送方；尽力撤回，不新增 MCP 工具）。
+    .post("/api/conversations/:id/messages/:messageId/revoke", (c) => {
+      const database = resolveDb(db)
+      try {
+        const revokedAt = revokeMessage(database, {
+          conversationId: c.req.param("id"),
+          messageId: c.req.param("messageId"),
+          actorId: ensureHuman(database).id,
+          now: Date.now(),
+        })
+        return c.json({ ok: true, revokedAt })
+      } catch (error) {
+        if (error instanceof MessageNotFoundError) {
+          return c.json({ ok: false, error: error.code }, 404)
+        }
+        if (error instanceof NotSenderError) return c.json({ ok: false, error: error.code }, 403)
         throw error
       }
     })
