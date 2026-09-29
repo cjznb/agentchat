@@ -21,6 +21,20 @@ export function isResetConfirmed(input: string): boolean {
   return input === RESET_CONFIRM_WORD
 }
 
+/** `POST /api/admin/reset` 的请求体。 */
+export interface ResetRequest {
+  readonly confirm: string
+  readonly keepBackups?: boolean
+}
+
+/**
+ * 构造恢复出厂设置的请求体：**仅在勾选**「保留 backups/」时才显式带 `keepBackups: true`；
+ * 不勾 → **省略该键**（与端点 schema 的可选语义一致，缺省即清 `backups/`）。
+ */
+export function resetRequestPayload(confirm: string, keepBackups: boolean): ResetRequest {
+  return keepBackups ? { confirm, keepBackups: true } : { confirm }
+}
+
 /** 列出属于本应用的 storage 键（前缀 `agentchat:`，保持遍历顺序）。 */
 export function agentchatStorageKeys(storage: LocalStorageLike): string[] {
   const keys: string[] = []

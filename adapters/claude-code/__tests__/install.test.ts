@@ -535,3 +535,42 @@ describe("Hub config.json 登记", () => {
     expect(existsSync(`${cfg}.bak`)).toBe(false)
   })
 })
+
+// ── 备份提示只在确实写了 .bak 时出现（缺陷：无条件打印「（备份：…）」）────
+
+describe("Hub 适配器备份提示（仅在实际写备份时）", () => {
+  function warmInstall(): { cfg: string; mcpFile: string; home: string } {
+    const dir = tempDir()
+    const cfg = join(dir, "settings.json")
+    const mcpFile = join(dir, "claude.json")
+    const home = join(tempDir(), "home")
+    seedSettings(cfg)
+    seedMcp(mcpFile)
+    // 热装一次令 hooks/MCP 两文件达到最新态（其自身备份提示不再出现）。
+    expect(run(["--config", cfg, "--mcp-config", mcpFile], { AGENTCHAT_HOME: home }).status).toBe(0)
+    return { cfg, mcpFile, home }
+  }
+
+  it("目标 config.json 不存在 → 建文件、不提示备份、不产生 .bak", () => {
+    const { cfg, mcpFile, home } = warmInstall()
+    rmSync(join(home, "config.json"), { force: true })
+
+    const result = run(["--config", cfg, "--mcp-config", mcpFile], { AGENTCHAT_HOME: home })
+    expect(result.status).toBe(0)
+    expect(result.stdout ?? "").toContain("Hub 适配器登记")
+    expect(result.stdout ?? "").not.toContain("（备份：")
+    expect(existsSync(join(home, "config.json"))).toBe(true)
+    expect(existsSync(`${join(home, "config.json")}.bak`)).toBe(false)
+  })
+
+  it("目标 config.json 已存在 → 写 .bak 并提示备份", () => {
+    const { cfg, mcpFile, home } = warmInstall()
+    // 重置为「存在但未登记本厂商」→ 下次安装会改动并先备份。
+    writeFileSync(join(home, "config.json"), `${JSON.stringify({ adapters: ["opencode"] }, null, 2)}\n`)
+
+    const result = run(["--config", cfg, "--mcp-config", mcpFile], { AGENTCHAT_HOME: home })
+    expect(result.status).toBe(0)
+    expect(result.stdout ?? "").toContain(`（备份：${join(home, "config.json")}.bak）`)
+    expect(existsSync(`${join(home, "config.json")}.bak`)).toBe(true)
+  })
+})

@@ -82,8 +82,8 @@ describe("Settings 恢复出厂设置", () => {
     const calls: string[] = []
     const container = await renderPanel(
       fakeApi({
-        reset: async (confirm) => {
-          calls.push(confirm)
+        reset: async (request) => {
+          calls.push(request.confirm)
           return { ok: true, restartRequired: true, snapshotPath: "/tmp/home.bak" }
         },
       }),
@@ -119,5 +119,38 @@ describe("Settings 恢复出厂设置", () => {
 
     expect(find(container, "settings-reset-error")?.textContent).toContain("RESET")
     expect(find(container, "settings-reset-notice")).toBeNull()
+  })
+})
+
+describe("Settings 保留 backups/ 开关", () => {
+  it("默认不勾 → payload 无 keepBackups；勾选 → keepBackups: true", async () => {
+    const payloads: Array<{ confirm: string; keepBackups?: boolean }> = []
+    const container = await renderPanel(
+      fakeApi({
+        reset: async (request) => {
+          payloads.push(request)
+          return { ok: true, restartRequired: true, snapshotPath: "/tmp/home.bak" }
+        },
+      }),
+    )
+    const checkbox = find(container, "settings-keep-backups") as HTMLInputElement
+    const input = find(container, "settings-reset-input") as Element
+    const button = find(container, "settings-reset-button") as HTMLElement
+
+    expect(checkbox.checked).toBe(false)
+    await act(async () => void typeInto(input, "RESET"))
+    await act(async () => void button.click())
+
+    expect(payloads).toHaveLength(1)
+    expect(payloads[0]).toEqual({ confirm: "RESET" })
+    expect(payloads[0]).not.toHaveProperty("keepBackups")
+
+    await act(async () => void checkbox.click())
+    expect(checkbox.checked).toBe(true)
+    await act(async () => void typeInto(input, "RESET"))
+    await act(async () => void button.click())
+
+    expect(payloads).toHaveLength(2)
+    expect(payloads[1]).toEqual({ confirm: "RESET", keepBackups: true })
   })
 })

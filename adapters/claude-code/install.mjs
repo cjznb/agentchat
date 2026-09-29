@@ -287,12 +287,15 @@ function main() {
     }
     if (hooksChanged) commit(settingsPath, serialize(settings))
     if (mcpChanged) commit(mcpPath, serialize(mcp))
-    if (adaptersChanged) writeAgentchatConfig(agentchatPath, agentchatConfig)
+    let agentchatBackedUp = false
+    if (adaptersChanged) agentchatBackedUp = writeAgentchatConfig(agentchatPath, agentchatConfig).backedUp
     console.log(`[agentchat] ${action}完成`)
     console.log(`[agentchat] hooks → ${settingsPath}${hooksChanged ? `（备份：${settingsPath}.bak）` : "（无改动）"}`)
     console.log(`[agentchat] MCP   → ${mcpPath}${mcpChanged ? `（备份：${mcpPath}.bak）` : "（无改动）"}`)
     if (adaptersChanged) {
-      console.log(`[agentchat] Hub 适配器登记（${VENDOR_ID}）→ ${agentchatPath}（备份：${agentchatPath}.bak）`)
+      // 「（备份：…）」仅在本安装器**确实写了** `.bak`（原 config.json 已存在）时才提示。
+      const hint = agentchatBackedUp ? `（备份：${agentchatPath}.bak）` : ""
+      console.log(`[agentchat] Hub 适配器登记（${VENDOR_ID}）→ ${agentchatPath}${hint}`)
     }
     return 0
   } catch (error) {

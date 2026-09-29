@@ -9,6 +9,7 @@ import {
   LOCAL_STORAGE_PREFIX,
   RESET_CONFIRM_WORD,
   resetErrorMessage,
+  resetRequestPayload,
   type LocalStorageLike,
 } from "../settings"
 
@@ -55,6 +56,24 @@ describe("localStorage 清理", () => {
     const storage = fakeStorage({ other: "keep" })
     expect(clearAgentchatLocalStorage(storage)).toBe(0)
     expect(storage.dump()).toEqual({ other: "keep" })
+  })
+})
+
+describe("恢复出厂请求体（keepBackups）", () => {
+  it("不勾选 → 省略 keepBackups 键（与端点可选语义一致 = 清 backups/）", () => {
+    const payload = resetRequestPayload("RESET", false)
+    expect(payload).toEqual({ confirm: "RESET" })
+    expect(payload).not.toHaveProperty("keepBackups")
+  })
+
+  it("勾选 → 显式 keepBackups: true", () => {
+    expect(resetRequestPayload("RESET", true)).toEqual({ confirm: "RESET", keepBackups: true })
+  })
+
+  it("确认词门槛不受影响（仍要求精确 RESET）", () => {
+    expect(isResetConfirmed("RESET")).toBe(true)
+    expect(isResetConfirmed("reset")).toBe(false)
+    expect(resetRequestPayload("RESET", true).confirm).toBe(RESET_CONFIRM_WORD)
   })
 })
 

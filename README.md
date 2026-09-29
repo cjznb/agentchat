@@ -71,8 +71,10 @@ agentchat     # 按需构建前端 → 拉起 Hub → 交互式终端自动打�
   `agents/`、`logs/`、`backups/`（`--keep-backups` 时保留）、`config.json`、`hub_token` 等；出厂态不含
   `config.json`（由安装器/首次运行再生成）。检测到 Hub 正在运行会**拒绝**（`--force` 才继续，有风险）；
   非交互环境必须显式 `--yes`。退出码：`0` 成功、`1` 运行错误、`2` 参数错误、`3` Hub 运行中、`4` 缺少 `--yes`、`5` 交互确认中放弃（未做任何改动）。
+  **`agentchat reset` 不支持 `--home`**（`--home` 是上面 `agentchat` 启动命令的参数）：其数据目录**只认** `AGENTCHAT_HOME`（未设则默认 `~/.agentchat`）。
 - **Web UI**：rail 第 5 个 tab「设置」→「恢复出厂设置」需**手工逐字输入 `RESET`** 才可提交；成功后清
-  `localStorage` 的 `agentchat:` 键并提示**重启 Hub**。「设置」面板同时展示数据/日志位置并可「清除本地状态」。
+  `localStorage` 的 `agentchat:` 键并提示**重启 Hub**。「设置」面板同时展示数据/日志位置、可「清除本地状态」，
+  并提供「保留 backups/ 目录」复选框（**默认不勾** → 请求体省略 `keepBackups`，即连同 `backups/` 一并清除）。
 - **端点**：`POST /api/admin/reset`（body `{confirm:"RESET"}`，可选 `{keepBackups:true}`）——**仅回环**来源可调用；
   Hub 运行中不能删 DB 文件（Windows 锁），故先 `VACUUM INTO` 一致性快照、再**就地清空并重建**全部表，
   返回 `{ok:true, restartRequired:true, snapshotPath}`。`GET /api/admin/info` 返回数据目录与日志目录。

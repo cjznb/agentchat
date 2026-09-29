@@ -79,12 +79,18 @@ export function serializeAgentchatConfig(config) {
   return `${JSON.stringify(config, null, 2)}\n`
 }
 
-/** 备份 `<path>.bak`（若存在）+ 临时文件 + rename 原子替换；父目录缺失则创建。 */
+/**
+ * 备份 `<path>.bak`（**仅当原文件存在**）+ 临时文件 + rename 原子替换；父目录缺失则创建。
+ * 返回 `{ backedUp }`：`true` 表示本次确实写了 `<path>.bak`（原文件已存在）——调用方据此决定
+ * 是否打印「（备份：…）」提示，避免文件本不存在时给出与实际不符的提示。
+ */
 export function writeAgentchatConfig(path, config) {
   mkdirSync(dirname(path), { recursive: true })
   const text = serializeAgentchatConfig(config)
-  if (existsSync(path)) copyFileSync(path, `${path}.bak`)
+  const backedUp = existsSync(path)
+  if (backedUp) copyFileSync(path, `${path}.bak`)
   const tmp = `${path}.tmp-${process.pid}`
   writeFileSync(tmp, text)
   renameSync(tmp, path)
+  return { backedUp }
 }

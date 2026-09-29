@@ -14,17 +14,19 @@ import {
   clearAgentchatLocalStorage,
   isResetConfirmed,
   resetErrorMessage,
+  resetRequestPayload,
   RESET_CONFIRM_WORD,
+  type ResetRequest,
 } from "../settings"
 
 export interface SettingsApi {
   readonly loadInfo: () => Promise<AdminInfo>
-  readonly reset: (confirm: string) => Promise<ResetResult>
+  readonly reset: (request: ResetRequest) => Promise<ResetResult>
 }
 
 const defaultApi: SettingsApi = {
   loadInfo: () => loadAdminInfo(),
-  reset: (confirm) => resetHub(confirm),
+  reset: (request) => resetHub(request.confirm, request.keepBackups),
 }
 
 function clearBrowserLocalState(): number {
@@ -34,6 +36,7 @@ function clearBrowserLocalState(): number {
 export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
   const [info, setInfo] = useState<AdminInfo | null>(null)
   const [confirmWord, setConfirmWord] = useState("")
+  const [keepBackups, setKeepBackups] = useState(false)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [localNotice, setLocalNotice] = useState<string | null>(null)
@@ -66,7 +69,7 @@ export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
     setError(null)
     setNotice(null)
     void api
-      .reset(confirmWord)
+      .reset(resetRequestPayload(confirmWord, keepBackups))
       .then(() => {
         clearBrowserLocalState()
         setNotice("已重置，请重启 Hub。")
@@ -76,7 +79,7 @@ export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
         setError(resetErrorMessage(reason instanceof ApiError ? reason.code : undefined))
       })
       .finally(() => setBusy(false))
-  }, [api, busy, confirmWord])
+  }, [api, busy, confirmWord, keepBackups])
 
   const home = info?.home ?? "（未能读取，默认 ~/.agentchat）"
   const logs = info?.logsDir ?? "（未能读取，默认 ~/.agentchat/logs）"
@@ -122,6 +125,15 @@ export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
           <p className="settings-hint">
             清除全部会话、节点与令牌，恢复为空库（Hub 会先做一致性快照）。请先备份，重置后**必须重启 Hub**。
           </p>
+          <label className="settings-check">
+            <input
+              type="checkbox"
+              data-testid="settings-keep-backups"
+              checked={keepBackups}
+              onChange={(event) => setKeepBackups(event.target.checked)}
+            />
+            <span>保留 backups/ 目录（不勾则一并清除）</span>
+          </label>
           <label className="settings-confirm">
             <span>
               输入 <code>{RESET_CONFIRM_WORD}</code> 以确认

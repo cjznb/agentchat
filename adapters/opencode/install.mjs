@@ -282,7 +282,8 @@ function main() {
       writeFileSync(tmp, text)
       renameSync(tmp, configPath)
     }
-    if (adaptersChanged) writeAgentchatConfig(agentchatPath, agentchatConfig)
+    let agentchatBackedUp = false
+    if (adaptersChanged) agentchatBackedUp = writeAgentchatConfig(agentchatPath, agentchatConfig).backedUp
     if (outcome.migrated) {
       console.log(
         "[agentchat] 已从会砖的旧结构（remote + {file:…opencode.id} 身份头）迁移为本地 stdio 桥",
@@ -297,7 +298,9 @@ function main() {
       console.log(`[agentchat] OpenCode 配置已是最新：${configPath}`)
     }
     if (adaptersChanged) {
-      console.log(`[agentchat] Hub 适配器登记（${VENDOR_ID}）→ ${agentchatPath}（备份：${agentchatPath}.bak）`)
+      // 「（备份：…）」仅在本安装器**确实写了** `.bak`（原 config.json 已存在）时才提示。
+      const hint = agentchatBackedUp ? `（备份：${agentchatPath}.bak）` : ""
+      console.log(`[agentchat] Hub 适配器登记（${VENDOR_ID}）→ ${agentchatPath}${hint}`)
     }
     return 0
   } catch (error) {
