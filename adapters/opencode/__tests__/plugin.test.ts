@@ -628,10 +628,13 @@ describe("状态上报", () => {
     const home = tempHome()
     const harness = setup({ home })
     await emit(harness, rootCreated(), sessionStatus("root-sess", "busy"), sessionStatus("root-sess", "idle"))
-    // 状态按**会话节点 id**（实例 agent-1 的根会话节点 = agent-2）。
+    // 状态按**会话节点 id**（实例 agent-1 的根会话节点 = agent-2）；每次会话上报同时对
+    // 实例节点（根容器 agent-1）做同态上报（状态一致性修复：实例从不心跳会被判 offline）。
     expect(stateCalls(harness.kit)).toEqual([
       { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-1", state: "busy" },
       { agentId: "agent-2", state: "idle" },
+      { agentId: "agent-1", state: "idle" },
     ])
   })
 
@@ -644,7 +647,11 @@ describe("状态上报", () => {
       sessionStatus("root-sess", "busy"),
       sessionStatus("root-sess", "busy"),
     )
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
+    // 会话与实例各自同态去重：第二次 busy 双双不再发（实例首次 busy 仍需 touch 一次）。
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-1", state: "busy" },
+    ])
   })
 
   it("retires every session node on deletion and never reports offline", async () => {
@@ -740,7 +747,11 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
     expect(harness.kit.toolCalls[2]).toEqual(
       sessionArgs({ id: "child-x", parentID: "root-sess", title: "子会话X" }, "agent-2"),
     )
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-3", state: "busy" }])
+    // 子会话（agent-3）上报 + 实例（agent-1）同态 touch；父会话（agent-2）不被打扰。
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-3", state: "busy" },
+      { agentId: "agent-1", state: "busy" },
+    ])
   })
 
   it("A/子（父未映射）：skips with warn and never falls back to the root", async () => {
@@ -779,10 +790,14 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
     expect(harness.client.getCalls).toEqual(["old-root"])
     // 实例 + 会话各一次注册；后续同态事件不再重注册。
     expect(harness.kit.toolCalls).toHaveLength(2)
+    // 每次会话状态上报都带一条实例同态 touch（会话与实例各自去重 busy↔idle 切换）。
     expect(stateCalls(harness.kit)).toEqual([
       { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-1", state: "busy" },
       { agentId: "agent-2", state: "idle" },
+      { agentId: "agent-1", state: "idle" },
       { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-1", state: "busy" },
     ])
   })
 
@@ -853,7 +868,10 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
     harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(harness, sessionStatus("old-root", "busy"))
     expect(harness.logs.some((line) => line.includes("startup adoption list failed"))).toBe(true)
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-1", state: "busy" }, // 实例（根容器）同态 touch
+    ])
   })
 
   it("B/关闭：does not call session.list when AGENTCHAT_ADOPT=0 (A still effective)", async () => {
@@ -873,7 +891,10 @@ describe("会话收养（A 懒收养 / B 启动枚举）", () => {
     expect(harness.client.listCalls).toHaveLength(0)
     harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(harness, sessionStatus("old-root", "busy"))
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-1", state: "busy" }, // 实例（根容器）同态 touch
+    ])
   })
 })
 
@@ -960,7 +981,10 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
     expect(harness.kit.toolCalls[2]).toEqual(
       sessionArgs({ id: "child-x", parentID: "root-sess", title: "子会话X" }, "agent-2"),
     )
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-3", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-3", state: "busy" },
+      { agentId: "agent-1", state: "busy" }, // 实例（根容器）同态 touch
+    ])
   })
 
   it("fields/get + data（子，父未映射）：跳过 + warn，不回落根", async () => {
@@ -982,7 +1006,10 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
     await emit(harness, sessionStatus("old-root", "busy"))
     expect(harness.client.getCalls).toEqual(["old-root"])
     expect(harness.kit.toolCalls).toHaveLength(2)
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-1", state: "busy" }, // 实例（根容器）同态 touch
+    ])
   })
 
   it("fields/list + data（数组）：过滤归档、限流、逐个根收养", async () => {
@@ -1017,9 +1044,12 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
       sessionStatus("r3", "busy"),
     )
     // 实例=agent-1；r1=agent-2、r2=agent-3、r4=agent-4（按注册序）。
+    // 每次会话状态上报同时带实例（agent-1）同态 touch；r5/r3 未收养 → 不产生任何上报。
     expect(stateCalls(harness.kit)).toEqual([
       { agentId: "agent-3", state: "busy" },
+      { agentId: "agent-1", state: "busy" },
       { agentId: "agent-4", state: "idle" },
+      { agentId: "agent-1", state: "idle" },
     ])
     // r5（超 limit）+ r3（归档）未收养 → 各自 warn
     expect(harness.logs.filter((line) => line.includes("unmapped session"))).toHaveLength(2)
@@ -1033,7 +1063,10 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
     harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(harness, sessionStatus("old-root", "busy"))
     expect(harness.logs.some((line) => line.includes("startup adoption list unavailable"))).toBe(true)
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-1", state: "busy" }, // 实例（根容器）同态 touch
+    ])
   })
 
   it("bare/list 非数组：静默降级、不抛错，懒收养（A）仍生效", async () => {
@@ -1043,7 +1076,10 @@ describe("SDK 返回形状容错（fields 包装 / bare 裸值）", () => {
     harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(harness, sessionStatus("old-root", "busy"))
     expect(harness.logs.some((line) => line.includes("startup adoption list unavailable"))).toBe(true)
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-1", state: "busy" }, // 实例（根容器）同态 touch
+    ])
   })
 
   it("fields/promptAsync + error：refused（不写 seen、不报 delivered），重投再注入", async () => {
@@ -1121,7 +1157,11 @@ describe("session.idle 唤醒闭环", () => {
     expect(harness.kit.internalCalls.find((call) => call.path === "/internal/wake")?.body).toEqual({
       agentId: "agent-2",
     })
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-2", state: "idle" }])
+    // 会话节点 idle 心跳 + 实例节点（根容器）同态心跳（防根容器超阈值被判 offline）。
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-2", state: "idle" },
+      { agentId: "agent-1", state: "idle" },
+    ])
     expect(resultItems(harness.kit)).toEqual([
       { messageId: "m1", result: "delivered" },
       { messageId: "m2", result: "delivered" },
@@ -1167,7 +1207,8 @@ describe("网络健壮性", () => {
       },
     })
     await emit(harness, rootCreated(), sessionStatus("root-sess", "busy"))
-    expect(attempts).toBe(3)
+    // 3 次 = 会话 busy 上报（2 次 5xx 重试 + 成功）；+1 = 实例同态上报（首次即成功）。
+    expect(attempts).toBe(4)
     expect(delays).toEqual([250, 500])
   })
 
@@ -1185,7 +1226,8 @@ describe("网络健壮性", () => {
       },
     })
     await emit(harness, rootCreated(), sessionStatus("root-sess", "busy"))
-    expect(attempts).toBe(1)
+    // 1 次 = 会话 busy（401 不重试）；+1 = 实例同态上报（同样 401 降级）。
+    expect(attempts).toBe(2)
     expect(harness.logs.some((line) => line.includes("state busy failed"))).toBe(true)
   })
 
@@ -1413,11 +1455,13 @@ describe("同名标题冲突（name_taken → 稳定别名重试）", () => {
     expect(harness.kit.toolCalls[3]).toEqual(sessionNode("bbbb-sess", "同名标题 · bbbb"))
     expect(harness.logs.some((line) => line.includes('registered as "同名标题 · bbbb"'))).toBe(true)
 
-    // 两个都成为联系人：各自状态上报到各自节点。
+    // 两个都成为联系人：各自状态上报到各自节点；每次会话上报带实例同态 touch。
     await emit(harness, sessionStatus("aaaa-sess", "busy"), sessionStatus("bbbb-sess", "idle"))
     expect(stateCalls(harness.kit)).toEqual([
       { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-1", state: "busy" },
       { agentId: "agent-4", state: "idle" },
+      { agentId: "agent-1", state: "idle" },
     ])
   })
 
@@ -1435,7 +1479,10 @@ describe("同名标题冲突（name_taken → 稳定别名重试）", () => {
     )
     // 标题台账记的是**派生名** → 同标题重注册恒 no-op；同态状态去重。
     expect(harness.kit.toolCalls).toHaveLength(after)
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-4", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-4", state: "busy" },
+      { agentId: "agent-1", state: "busy" }, // 实例（根容器）同态 touch
+    ])
   })
 
   it("标题变化的重注册同样在 name_taken 时带稳定别名重试", async () => {
@@ -1468,7 +1515,10 @@ describe("同名标题冲突（name_taken → 稳定别名重试）", () => {
     expect(harness.kit.toolCalls[2]).toEqual(sessionNode("same-sess", `${title} · same`))
 
     await emit(harness, sessionStatus("same-sess", "busy"))
-    expect(stateCalls(harness.kit)).toEqual([{ agentId: "agent-3", state: "busy" }])
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-3", state: "busy" },
+      { agentId: "agent-1", state: "busy" }, // 实例（根容器）同态 touch
+    ])
   })
 
   it("别名仍冲突（极小概率）→ 保持既有 skip+warn，不落映射、不崩", async () => {
@@ -1679,11 +1729,84 @@ describe("归档会话（A 与 B 口径一致）", () => {
     await emit(harness, sessionStatus("root-sess", "busy"))
     harness.client.sessions.set("old-root", { id: "old-root", title: "旧根会话" })
     await emit(harness, sessionStatus("old-root", "busy"))
+    // 第二次 busy 仅会话节点（agent-3）上报：实例同态（busy）已被既有去重吸收。
     expect(stateCalls(harness.kit)).toEqual([
       { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-1", state: "busy" },
       { agentId: "agent-3", state: "busy" },
     ])
     expect(retires(harness.kit)).toEqual([])
   })
 })
 
+
+// ── 实例节点心跳（容器/实例从不心跳 → 展示 offline 的适配器侧修复）────────
+
+describe("实例节点心跳（会话上报/空闲轮询顺带触碰根容器）", () => {
+  afterEach(() => vi.useRealTimers())
+
+  function instanceIdles(kit: FetchKit): unknown[] {
+    return stateCalls(kit).filter(
+      (body) => isRecord(body) && body["agentId"] === "agent-1" && body["state"] === "idle",
+    )
+  }
+
+  it("reports the instance node with the same state on every session status report", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(
+      harness,
+      rootCreated(),
+      sessionStatus("root-sess", "busy"),
+      sessionStatus("root-sess", "idle"),
+    )
+    // 会话节点（agent-2）与实例节点（agent-1）成对上报：实例即根容器的同态 touch。
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-2", state: "busy" },
+      { agentId: "agent-1", state: "busy" },
+      { agentId: "agent-2", state: "idle" },
+      { agentId: "agent-1", state: "idle" },
+    ])
+  })
+
+  it("heartbeats the instance node on every idle-poll tick (same-state report = touch)", async () => {
+    vi.useFakeTimers()
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(harness, rootCreated(), sessionIdle("root-sess"))
+    const afterEvent = instanceIdles(harness.kit).length
+    expect(afterEvent).toBeGreaterThanOrEqual(1)
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(instanceIdles(harness.kit).length).toBeGreaterThan(afterEvent) // 每轮轮询都触碰实例
+    await (await harness.hooks).dispose?.()
+  })
+
+  it("dispose still reports only the instance node offline (sessions are never reported offline)", async () => {
+    vi.useFakeTimers()
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(harness, rootCreated(), sessionIdle("root-sess"))
+    await (await harness.hooks).dispose?.()
+    const offline = stateCalls(harness.kit).filter(
+      (body) => isRecord(body) && body["state"] === "offline",
+    )
+    expect(offline).toEqual([{ agentId: "agent-1", state: "offline" }])
+  })
+
+  it("never heartbeats a subagent session's parent session node (no amplification)", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    await emit(
+      harness,
+      rootCreated(),
+      childCreated("child-1", "root-sess"),
+      sessionStatus("child-1", "busy"),
+    )
+    // 子代理会话（agent-3）上报 + 实例（agent-1）同态 touch；父会话节点（agent-2）绝不多打一次。
+    expect(stateCalls(harness.kit)).toEqual([
+      { agentId: "agent-3", state: "busy" },
+      { agentId: "agent-1", state: "busy" },
+    ])
+  })
+})

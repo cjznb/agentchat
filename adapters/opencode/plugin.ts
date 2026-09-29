@@ -8,11 +8,13 @@
  *   供本地 MCP 桥作**出站身份**（OpenCode 一进程只暴露一个 MCP server）。
  * - `session.created` / `session.updated`（根或子）→ MCP `register{parent_ref, task_ref, name}`
  *   收/改会话节点（根父=实例节点，子代理父=其所属会话节点）；标题变化才重注册（`adopt.ts`）。
- * - `session.status`（回合始/末）→ `POST /internal/state {busy|idle}`（**按会话节点 id**）
+ * - `session.status`（回合始/末）→ `POST /internal/state {busy|idle}`（**按会话节点 id**；
+ *   同时对**实例节点**做一次同态上报 —— 实例是根容器，靠搭车 touch 刷新 `last_seen`）
  * - `session.idle` → `POST /internal/wake` → 经 `client.session.promptAsync` 逐条注入
  *   → `POST /internal/result {items:[{messageId, result:"delivered"|"refused"}]}`（**按会话节点 id**）
  * - idle 期间**周期轮询**（默认 10s，`AGENTCHAT_POLL_MS` 覆盖）：消息在「已经 idle 之后」
- *   到达时无事件可依，靠轮询补拉；走与 `session.idle` **同一**路径，`messageId` 有界去重防重复注入；
+ *   到达时无事件可依，靠轮询补拉；走与 `session.idle` **同一**路径（每轮同时对实例节点
+ *   同态心跳，防根容器从不心跳被判 offline），`messageId` 有界去重防重复注入；
  *   转 busy 即停、`dispose` 清理（见 `poll.ts`）。
  * - `session.deleted` → `POST /internal/retire`（**按会话节点 id 退役，绝不报 offline**）
  * - `dispose` → `POST /internal/state {offline}`（**实例节点**是根，报 offline 合规）
@@ -117,6 +119,8 @@ function createRuntime(
   /**
    * idle 心跳：**每次**都上报（同态上报在 Hub 侧即 `touchAgent`），刷新 `last_seen`，
    * 修复「长时间空闲被判 offline」；与 `reportState` 的同态去重刻意不同（心跳需要周期性发出）。
+   * 同时对**实例节点（根容器）**做一次同态心跳：实例自身从不上报状态、只在 register 时
+   * touch 一次，不搭车心跳就会超阈值被 roster 判 offline（子节点还活着的「假离线」根因）。
    */
   const heartbeatIdle = async (agentId: string): Promise<void> => {
     try {
@@ -124,6 +128,25 @@ function createRuntime(
       state.lastState.set(agentId, "idle")
     } catch (error) {
       log(`idle heartbeat failed: ${describe(error)}`)
+    }
+    await reportInstance("idle", true)
+  }
+
+  /**
+   * 实例节点（根容器）同态上报：会话状态上报与空闲轮询心跳时顺带触碰一次，
+   * id 复用 `state.instanceAgentId`（**绝不**上报父节点，避免子代理会话放大调用量）。
+   * - 状态上报路径走去重（同态即心跳，重复信号无需再发 —— `同态去重已有`）；
+   * - `always`（空闲轮询心跳）不走去重：心跳必须周期性发出才能刷新 `last_seen`。
+   */
+  const reportInstance = async (next: AdapterState, always = false): Promise<void> => {
+    const instanceId = state.instanceAgentId
+    if (instanceId === undefined) return
+    if (!always && state.lastState.get(instanceId) === next) return
+    try {
+      await hub.reportState(instanceId, next)
+      state.lastState.set(instanceId, next)
+    } catch (error) {
+      log(`instance state ${next} failed: ${describe(error)}`)
     }
   }
 
@@ -254,6 +277,7 @@ function createRuntime(
     }
     const next = status === "idle" ? "idle" : "busy"
     await reportState(agentId, next)
+    await reportInstance(next) // 每次会话状态上报同时对实例节点做同态上报（实例是根，touch 即心跳）
     if (next === "idle") ensurePolling(sessionID, agentId)
     else stopPolling(sessionID)
   }
