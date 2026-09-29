@@ -146,6 +146,63 @@ async function probeSession(sessionId: string): Promise<number> {
   return response.status
 }
 
+/** 裸 initialize 请求体（供**逐请求改头**的时序用例）。 */
+function initializeMessage(): Record<string, unknown> {
+  return {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "raw-timing", version: "0" },
+    },
+  }
+}
+
+/**
+ * 裸 HTTP 往返（**可逐请求改头**）：SDK 客户端的 `requestInit.headers` 对同一连接的所有请求固定，
+ * 无法复刻真实桥「initialize 不带会话头、随后的 tools/call 才带」的时序，故此处直接发原始请求。
+ */
+async function rawPost(
+  body: unknown,
+  headers: Record<string, string>,
+): Promise<{ readonly status: number; readonly sessionId: string | null; readonly text: string }> {
+  const response = await fetch(`${running.url}/mcp`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      ...headers,
+    },
+    body: JSON.stringify(body),
+  })
+  return { status: response.status, sessionId: response.headers.get("mcp-session-id"), text: await response.text() }
+}
+
+/** 从裸 MCP 响应体（JSON 或 SSE）取 JSON-RPC `result`（取最后一个含 `result` 的帧）。 */
+function rawResult(text: string): unknown {
+  const trimmed = text.trim()
+  const frames = trimmed.includes("data:")
+    ? trimmed
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+    : [trimmed]
+  for (const frame of frames.reverse()) {
+    if (frame === "") continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(frame)
+    } catch {
+      continue
+    }
+    if (typeof parsed === "object" && parsed !== null && "result" in parsed) return parsed.result
+  }
+  throw new Error(`no JSON-RPC result in response: ${trimmed.slice(0, 200)}`)
+}
+
 /** 取工具结果的文本内容（`unknown` 入参 + 运行时收窄，避开 SDK 结果类型并集）。 */
 function textOf(result: unknown): string {
   if (typeof result !== "object" || result === null || !("content" in result)) {
@@ -608,6 +665,51 @@ describe("出站身份按会话归属（M2：x-agentchat-session）", () => {
     })
     await response.text()
     expect(response.status).toBe(400)
+  })
+
+  /**
+   * **真实桥时序**（评审 Important #2）：桥的 `ensureSession` 的 `initialize` **从不带**会话头，
+   * 会话头只在随后的 `tools/call` 上（插件注入 → 桥剥离入参后转请求头）。故只有 `routes/mcp.ts`
+   * 的**逐请求重解析**分支（`session.ctx.agentId`，`:131` 附近）能让 M2 生效 —— 删掉该分支，
+   * 身份会停留在 initialize 时的容器、本用例即失败。
+   */
+  it("re-resolves identity on a later tools/call session header (real bridge timing; fails without per-request re-resolution)", async () => {
+    const { box, session } = containerWithSession()
+    const peer = makeAgent("m2-timing-peer")
+
+    // ① initialize **不带**会话头 → 身份 = `x-agent-id`（容器）。真实桥的 ensureSession 即如此。
+    const init = await rawPost(initializeMessage(), { "x-agent-id": box.id })
+    expect(init.status).toBe(200)
+    if (init.sessionId === null) throw new Error("initialize returned no mcp-session-id")
+    const base = { "mcp-session-id": init.sessionId, "x-agent-id": box.id }
+    await rawPost({ jsonrpc: "2.0", method: "notifications/initialized" }, base)
+
+    // 固化敏感点：此刻身份是**容器、不是会话节点**（`status` 工具回带自身 id）。
+    const before = await rawPost(
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "status", arguments: { text: "init" } } },
+      base,
+    )
+    const beforeStatus = MCP_TOOL_OUTPUTS.status.parse(JSON.parse(textOf(rawResult(before.text))))
+    expect(beforeStatus.id).toBe(box.id)
+    expect(beforeStatus.id).not.toBe(session.id)
+
+    // ② 同一 mcp-session-id 随后发 tools/call **带**会话头（复刻桥剥离入参后转的请求头）。
+    const call = await rawPost(
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "send", arguments: { to: peer.id, body: "hi" } },
+      },
+      { ...base, "x-agentchat-session": session.taskRef ?? "" },
+    )
+    expect(call.status).toBe(200)
+    const result = rawResult(call.text)
+    expect(toolFailed(result)).toBe(false)
+    // ③ 发送方 = **会话节点**（不是容器）：删掉逐请求重解析分支即回落容器身份而失败。
+    const parsed = MCP_TOOL_OUTPUTS.send.parse(JSON.parse(textOf(result)))
+    expect(parsed.message.fromAgentId).toBe(session.id)
+    expect(parsed.message.fromAgentId).not.toBe(box.id)
   })
 })
 
