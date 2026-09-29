@@ -7,6 +7,7 @@ import { ConversationList } from "./components/ConversationList"
 import { GroupCreate } from "./components/Groups"
 import { NotificationAside, NotificationsView } from "./components/Notifications"
 import { OrgTree } from "./components/OrgTree"
+import { Settings } from "./components/Settings"
 import { ShoutView } from "./components/Shout"
 import { parseDeepLink } from "./deeplink"
 import { useStore } from "./store"
@@ -18,6 +19,7 @@ const modes = [
   { id: "contacts", label: "通讯录", glyph: "联", title: "Agent 树", hint: "点选节点查看资料卡与参与会话。" },
   { id: "notifications", label: "通知", glyph: "铃", title: "通知中心", hint: "审批与批示集中在这里。" },
   { id: "shout", label: "喊话", glyph: "播", title: "全员喊话", hint: "面向全部 Agent 发布一条消息。" },
+  { id: "settings", label: "设置", glyph: "设", title: "设置", hint: "查看数据位置，或清除本地状态、恢复出厂设置。" },
 ] as const
 
 type ModeId = (typeof modes)[number]["id"]
@@ -28,6 +30,7 @@ const listCopy = {
   contacts: { title: "Agent 层级", detail: "等待 Agent 加入" },
   notifications: { title: "通知中心", detail: "没有需要处理的单据" },
   shout: { title: "广播记录", detail: "还没有喊话" },
+  settings: { title: "设置", detail: "数据位置与恢复出厂设置" },
 } as const satisfies Record<ModeId, { readonly title: string; readonly detail: string }>
 
 const connectionLabel = {
@@ -221,6 +224,8 @@ export function App() {
           <NotificationsView onJump={handleJump} />
         ) : activeMode === "shout" ? (
           <ShoutView conversationId={shoutConversationId} />
+        ) : activeMode === "settings" ? (
+          <Settings />
         ) : activeMode === "chat" && composeGroup ? (
           <GroupCreate onCancel={() => setComposeGroup(false)} onCreated={handleGroupCreated} />
         ) : activeMode === "chat" && openId !== null ? (

@@ -13,10 +13,12 @@ import { Server as HttpServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
+import type { Context } from "hono"
 import { Hono } from "hono"
 import { registerConfiguredAdapters } from "./adapters/types"
 import { config } from "./config"
 import type { Db } from "./db"
+import { adminRoutes } from "./routes/admin"
 import { internalRoutes, type InternalRoutesOptions } from "./routes/internal"
 import { mcpRoutes } from "./routes/mcp"
 import { notificationRoutes } from "./routes/notifications"
@@ -30,6 +32,10 @@ export interface AppOptions extends InternalRoutesOptions {
   readonly distDir?: string
   /** 已配置厂商（缺省 `config.adapters`）；启动时注册 pull 占位适配器。 */
   readonly adapters?: readonly string[]
+  /** 管理端点回环判定（缺省读 socket；测试注入）。 */
+  readonly isLoopback?: (c: Context) => boolean
+  /** 管理端点时钟（缺省 `Date.now`；测试固定快照目录名）。 */
+  readonly adminNow?: () => number
 }
 
 export function createApp(db?: Db, options?: AppOptions): Hono {
@@ -44,6 +50,14 @@ export function createApp(db?: Db, options?: AppOptions): Hono {
   app.route("/", notificationRoutes(db))
   app.route("/", internalRoutes(db, options))
   app.route("/", mcpRoutes(db, options))
+  app.route(
+    "/",
+    adminRoutes(db, {
+      ...(options?.home === undefined ? {} : { home: options.home }),
+      ...(options?.adminNow === undefined ? {} : { now: options.adminNow }),
+      ...(options?.isLoopback === undefined ? {} : { isLoopback: options.isLoopback }),
+    }),
+  )
   app.notFound((c) => {
     const protectedPath = ["/api", "/mcp", "/internal"].some((prefix) => c.req.path.startsWith(prefix))
     if (protectedPath || c.req.path.startsWith("/assets/")) return c.text("Not Found", 404)

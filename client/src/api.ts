@@ -50,11 +50,12 @@ import {
 /** 通知范围（通知页两 tab）。 */
 export type NotificationScope = "actionable" | "all"
 
-/** 非 2xx 出参：携带路径与状态码，供调用方记录/告警。 */
+/** 非 2xx 出参：携带路径与状态码（可选服务端错误码），供调用方记录/告警。 */
 export class ApiError extends Error {
   constructor(
     readonly path: string,
     readonly status: number,
+    readonly code?: string,
   ) {
     super(`request failed: ${status} ${path}`)
     this.name = "ApiError"

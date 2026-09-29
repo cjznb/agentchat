@@ -32,6 +32,7 @@ export const HELP_TEXT = `agentchat —— 一行命令启动 AgentChat Hub
 
 用法:
   agentchat [选项] [-- <透传给 Hub 入口的参数>]
+  agentchat reset [选项]    清除全部本地数据、恢复出厂设置（见 agentchat reset --help）
 
 选项:
   --port <n>      监听端口（等价 env AGENTCHAT_PORT，优先于 config.json）

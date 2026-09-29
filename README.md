@@ -62,6 +62,23 @@ agentchat     # 按需构建前端 → 拉起 Hub → 交互式终端自动打�
 
 `npm start` 与 `npm run build` **保持不变**。
 
+### 恢复出厂设置（清除全部数据）
+
+- **CLI**：`agentchat reset [--yes] [--keep-backups] [--uninstall-adapters] [--force]`。默认**先**把整个数据目录
+  复制为 `<home>.bak-<时间戳>`（失败即中止、保留原状），**再**清空 `agentchat.db(+wal/shm)`、`tokens/`、
+  `agents/`、`logs/`、`backups/`（`--keep-backups` 时保留）、`config.json`、`hub_token` 等；出厂态不含
+  `config.json`（由安装器/首次运行再生成）。检测到 Hub 正在运行会**拒绝**（`--force` 才继续，有风险）；
+  非交互环境必须显式 `--yes`。退出码：`0` 成功、`1` 运行错误、`2` 参数错误、`3` Hub 运行中、`4` 缺少 `--yes`。
+- **Web UI**：rail 第 5 个 tab「设置」→「恢复出厂设置」需**手工逐字输入 `RESET`** 才可提交；成功后清
+  `localStorage` 的 `agentchat:` 键并提示**重启 Hub**。「设置」面板同时展示数据/日志位置并可「清除本地状态」。
+- **端点**：`POST /api/admin/reset`（body `{confirm:"RESET"}`，可选 `{keepBackups:true}`）——**仅回环**来源可调用；
+  Hub 运行中不能删 DB 文件（Windows 锁），故先 `VACUUM INTO` 一致性快照、再**就地清空并重建**全部表，
+  返回 `{ok:true, restartRequired:true, snapshotPath}`。`GET /api/admin/info` 返回数据目录与日志目录。
+
+> **残余风险（务必知悉）**：回环上任何本地进程都能调用该端点（与既有「本机单用户信任模型」一致，
+> 不构成对本地恶意进程的防护）；且删除 `hub_token` 后**运行中的 Hub 仍持内存里的旧 token**，
+> 窗口期内旧 token 依然可用——必须**重启 Hub** 才彻底生效。
+
 **自动打开浏览器**：仅当**交互式终端**（`stdout.isTTY`）且**未被显式关闭**时才开；
 CI / 管道 / 脚本一律不开。`--no-open` 与 `AGENTCHAT_NO_OPEN` 是同一开关的两条路径
 （CLI 的 `--no-open` 即设置 `AGENTCHAT_NO_OPEN`），显式关闭优先于 `AGENTCHAT_OPEN`

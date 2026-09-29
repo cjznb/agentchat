@@ -61,6 +61,16 @@ function startHub(parsed) {
 }
 
 function main() {
+  if (process.argv[2] === "reset") {
+    void import("./reset.mjs")
+      .then(({ runResetCommand }) => runResetCommand(process.argv.slice(3)))
+      .then((code) => process.exit(code))
+      .catch((error) => {
+        console.error(`[agentchat] reset 失败：${error instanceof Error ? error.message : String(error)}`)
+        process.exit(1)
+      })
+    return
+  }
   const parsed = parseArgs(process.argv.slice(2))
   if (parsed.errors.length > 0) {
     for (const message of parsed.errors) console.error(`[agentchat] ${message}`)

@@ -96,6 +96,41 @@ function migrateMessages(db: Db): void {
 }
 
 /**
+ * 出厂态表集合（schema.sql 八张表）。恢复出厂设置时逐表 DROP 再重跑 schema.sql，
+ * 等价于「空但可用」的出厂库——不能删 `agentchat.db` 文件本身（Hub 运行中 Windows 会锁）。
+ */
+const RESET_TABLES = [
+  "wake_jobs",
+  "agent_keys",
+  "read_states",
+  "messages",
+  "participants",
+  "conversations",
+  "approvals",
+  "agents",
+] as const
+
+/**
+ * 就地清空全部业务表并重建（恢复出厂设置；Hub 运行中亦可用）。
+ * `PRAGMA foreign_keys` 在事务中是 no-op，故开关在 `BEGIN` 之外；DDL 事务化，
+ * 任一失败即 ROLLBACK（不留半清状态）。
+ */
+export function clearAllTables(db: Db): void {
+  db.pragma("foreign_keys = OFF")
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    for (const table of RESET_TABLES) db.exec(`DROP TABLE IF EXISTS ${table}`)
+    db.exec(readFileSync(SCHEMA_URL, "utf8"))
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  } finally {
+    db.pragma("foreign_keys = ON")
+  }
+}
+
+/**
  * 打开（必要时创建）`dbPath` 指向的数据库并建表。
  * - `journal_mode=WAL`：读写并发（spec §14）
  * - `foreign_keys=ON`：八张表的引用完整性逐语句生效

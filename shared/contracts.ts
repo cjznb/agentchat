@@ -711,3 +711,21 @@ export const approvalDecisionResultSchema = z.object({
   approval: approvalEntrySchema,
 })
 export type ApprovalDecisionResult = z.infer<typeof approvalDecisionResultSchema>
+
+// ── 管理端点（恢复出厂设置；本机回环单用户模型） ─────────────────────────
+
+/** `GET /api/admin/info`：数据目录与日志目录（供「设置」面板展示）。 */
+export const adminInfoSchema = z.object({
+  home: z.string(),
+  logsDir: z.string(),
+})
+export type AdminInfo = z.infer<typeof adminInfoSchema>
+
+/** `POST /api/admin/reset` 成功结果（`restartRequired` 恒 true：须重启 Hub 才彻底生效）。 */
+export const resetResultSchema = z.object({
+  ok: z.literal(true),
+  restartRequired: z.literal(true),
+  snapshotPath: z.string(),
+  failed: z.array(z.string()).optional(),
+})
+export type ResetResult = z.infer<typeof resetResultSchema>
