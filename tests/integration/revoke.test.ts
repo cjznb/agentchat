@@ -21,7 +21,7 @@ import {
 } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
 import { registerRoot } from "../../server/core/agents"
-import { ensureHuman, sendMessage } from "../../server/core/messaging"
+import { ack, ensureHuman, sendMessage } from "../../server/core/messaging"
 import { receiptState } from "../../server/core/publish"
 import {
   maskRevokedForReader,
@@ -34,13 +34,14 @@ import {
 import { conversationMessages } from "../../server/core/ui-queries"
 import { openDb, type Db } from "../../server/db"
 import { createApp } from "../../server/index"
+import { sendView } from "../../server/mcp/context"
 import { runConversation } from "../../server/mcp/read-tools"
 import { runInbox } from "../../server/mcp/tools"
 import { claimWakeBacklog } from "../../server/routes/internal"
 import { insertAgent } from "../../server/store/agents"
 import { getById, history } from "../../server/store/messages"
 import { applyDeliveryResult, getWakeJob } from "../../server/store/wake"
-import { requeueExpiredClaims } from "../../server/store/wake-claims"
+import { claimWakeBacklogJob, requeueExpiredClaims } from "../../server/store/wake-claims"
 import { currentWsSeq, framesSince, resetWsHub } from "../../server/ws"
 
 const errorBodySchema = z.object({ ok: z.boolean(), error: z.string() })
@@ -331,6 +332,147 @@ describe("Important: 未投递读者正文遮蔽（读路径单点）", () => {
     // 发送者不受影响（读路径对发送者原样）。
     const stored = getById(db, fromRoot.message.id) ?? throwMissing()
     expect(maskRevokedForReader(db, stored, rootId).body).toBe("root 原文")
+  })
+})
+
+describe("修复 A: MCP send/shout 的 wait 回复未遮蔽（reader = 调用方）", () => {
+  it("undelivered waiter reads the placeholder in reply.messages (revoke cancelled its job)", async () => {
+    const bot = insertAgent(db, {
+      name: "wait-bot-undelivered",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+    })
+    const pending = sendMessage(db, {
+      from: rootId,
+      to: bot.id,
+      body: "等待回信",
+      wait: { until: "message", timeoutMs: 5_000 },
+    })
+    const incoming = sendMessage(db, { from: bot.id, to: rootId, body: "会被撤回的回复" })
+    revokeMessage(db, {
+      conversationId: incoming.message.conversationId,
+      messageId: incoming.message.id,
+      actorId: bot.id,
+      now: 500,
+    })
+
+    const view = sendView(db, await pending, rootId)
+    const reply = view["reply"] as { messages: readonly { id: string; body: string }[] }
+    expect(reply.messages.find((m) => m.id === incoming.message.id)?.body).toBe(
+      REVOKED_BODY_PLACEHOLDER,
+    )
+  })
+
+  it("delivered waiter reads the original body in reply.messages", async () => {
+    const bot = insertAgent(db, {
+      name: "wait-bot-delivered",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+    })
+    const pending = sendMessage(db, {
+      from: rootId,
+      to: bot.id,
+      body: "等待已投递",
+      wait: { until: "message", timeoutMs: 5_000 },
+    })
+    const incoming = sendMessage(db, { from: bot.id, to: rootId, body: "已投递的回复" })
+    applyDeliveryResult(db, {
+      agentId: rootId,
+      messageSeq: incoming.message.seq,
+      result: "delivered",
+      now: 5,
+    })
+    revokeMessage(db, {
+      conversationId: incoming.message.conversationId,
+      messageId: incoming.message.id,
+      actorId: bot.id,
+      now: 500,
+    })
+
+    const view = sendView(db, await pending, rootId)
+    const reply = view["reply"] as { messages: readonly { id: string; body: string }[] }
+    expect(reply.messages.find((m) => m.id === incoming.message.id)?.body).toBe("已投递的回复")
+  })
+
+  it("the revoked message author reads the original through sendView (sender exemption)", () => {
+    const bot = insertAgent(db, {
+      name: "wait-bot-author",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+    })
+    const sent = sendMessage(db, { from: bot.id, to: rootId, body: "作者原文" })
+    revokeMessage(db, {
+      conversationId: sent.message.conversationId,
+      messageId: sent.message.id,
+      actorId: bot.id,
+      now: 7,
+    })
+    const stored = getById(db, sent.message.id) ?? throwMissing()
+    const view = sendView(
+      db,
+      { message: stored, receipts: [], reply: { timedOut: false, messages: [stored], receipts: [] } },
+      bot.id,
+    )
+    const reply = view["reply"] as { messages: readonly { body: string }[] }
+    expect(reply.messages[0]?.body).toBe("作者原文")
+  })
+})
+
+describe("修复 B: 遮蔽口径收紧（仅已投递/已读保留原文）", () => {
+  it("expired recipient (busy 24h, never delivered) is masked", () => {
+    db.prepare<[number, string], void>(
+      "UPDATE wake_jobs SET state = 'expired', pending_reason = NULL WHERE message_id = ? AND agent_id = ?",
+    ).run(sentSeq, rootId)
+    revokeMessage(db, { conversationId: dmId, messageId: sentId, actorId: humanId, now: 100 })
+    const stored = getById(db, sentId) ?? throwMissing()
+    expect(maskRevokedForReader(db, stored, rootId).body).toBe(REVOKED_BODY_PLACEHOLDER)
+  })
+
+  it("refused recipient (never delivered) is masked", () => {
+    applyDeliveryResult(db, { agentId: rootId, messageSeq: sentSeq, result: "refused", now: 1 })
+    applyDeliveryResult(db, { agentId: rootId, messageSeq: sentSeq, result: "refused", now: 2 })
+    expect(getWakeJob(db, sentSeq, rootId)?.state).toBe("refused")
+    revokeMessage(db, { conversationId: dmId, messageId: sentId, actorId: humanId, now: 100 })
+    const stored = getById(db, sentId) ?? throwMissing()
+    expect(maskRevokedForReader(db, stored, rootId).body).toBe(REVOKED_BODY_PLACEHOLDER)
+  })
+
+  it("an already-acked reader keeps the original even though the job was cancelled", () => {
+    ack(db, rootId, [sentId])
+    revokeMessage(db, { conversationId: dmId, messageId: sentId, actorId: humanId, now: 100 })
+    expect(getWakeJob(db, sentSeq, rootId)?.state).toBe("cancelled")
+    const stored = getById(db, sentId) ?? throwMissing()
+    expect(maskRevokedForReader(db, stored, rootId).body).toBe("撤回我这条：原始正文")
+  })
+})
+
+describe("修复 C: claimWakeBacklogJob 自身撤回守卫（纵深防御）", () => {
+  it("refuses to rebuild a wake job for a revoked message", () => {
+    const offline = insertAgent(db, {
+      name: "defense-offline",
+      kind: "runtime",
+      status: "offline",
+      vendor: "opencode",
+    })
+    const sent = sendMessage(db, { from: humanId, to: offline.id, body: "纵深防御原文" })
+    revokeMessage(db, {
+      conversationId: sent.message.conversationId,
+      messageId: sent.message.id,
+      actorId: humanId,
+      now: 100,
+    })
+    expect(getWakeJob(db, sent.message.seq, offline.id)).toBeUndefined()
+
+    const claimed = claimWakeBacklogJob(db, {
+      messageSeq: sent.message.seq,
+      agentId: offline.id,
+      now: 200,
+    })
+    expect(claimed).toBeUndefined()
+    expect(getWakeJob(db, sent.message.seq, offline.id)).toBeUndefined()
   })
 })
 

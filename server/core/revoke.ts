@@ -15,6 +15,7 @@
 import type { Db } from "../db"
 import { getConversation } from "../store/conversations"
 import { getById, markRevoked, send, type Message } from "../store/messages"
+import { getReadState } from "../store/read_states"
 import { cancelJobsForMessage, enqueueWakeJobs, getWakeJob } from "../store/wake"
 import { recipientsOf } from "./messaging"
 import { publishMessage, publishReceipt } from "./publish"
@@ -57,17 +58,27 @@ export class NotRevocableError extends Error {
 export const REVOKED_BODY_PLACEHOLDER = "（此消息已被发送方撤回）"
 
 /**
- * 读路径正文遮蔽（MCP `inbox`/`conversation` 与 UI 会话消息接口共用）：
- * 对**未投递读者**隐藏撤回消息原文，保留 `revoked_at`。未投递 = 该读者 `wake_jobs` 为
- * `cancelled` 且 `detail='Revoked'`，**或**该消息已撤回且该读者**无 job**（发送时 offline / logical）。
- * **发送者**与**已投递者**（job `accepted` → delivered）/已读者原样返回，不受影响。
+ * 读路径正文遮蔽（MCP `inbox`/`conversation`/`send·shout` 的 `wait` 回复与 UI 会话消息接口共用）：
+ * 对**未投递读者**隐藏撤回消息原文，保留 `revoked_at`（供前端渲染「已撤回」）。
+ *
+ * 判定为「已投递 / 已读」= job `accepted`（**仅** `/internal/result delivered` 派生的成功终态）
+ * **或** `read_states` 已覆盖该消息（读者已 ack）→ 原文保留。
+ * 其余（无 job / `pending` / `sending` / `cancelled` / `expired` / `refused`）一律视为未投递 → 遮蔽：
+ * 从未成功投递过的终态（`expired` 忙碌 24h、`refused` 连续拒收）与在途态一视同仁。
+ * **发送者**（`from_agent_id === readerId`）恒原样返回。
  */
 export function maskRevokedForReader(db: Db, message: Message, readerId: string): Message {
   if (message.revokedAt === undefined || message.fromAgentId === readerId) return message
-  const job = getWakeJob(db, message.seq, readerId)
-  const undelivered =
-    job === undefined ? true : job.state === "cancelled" && job.detail === "Revoked"
-  return undelivered ? { ...message, body: REVOKED_BODY_PLACEHOLDER } : message
+  return deliveredOrRead(db, message, readerId)
+    ? message
+    : { ...message, body: REVOKED_BODY_PLACEHOLDER }
+}
+
+/** 已投递（job `accepted`）或已读（`read_states.last_read_seq >= seq`）——单一判定点。 */
+function deliveredOrRead(db: Db, message: Message, readerId: string): boolean {
+  if (getWakeJob(db, message.seq, readerId)?.state === "accepted") return true
+  const read = getReadState(db, message.conversationId, readerId)
+  return read !== undefined && read.lastReadSeq >= message.seq
 }
 
 export interface RevokeInput {

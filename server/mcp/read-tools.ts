@@ -87,14 +87,16 @@ export function runGroup(ctx: ToolContext, input: McpToolInput<"group">): unknow
  * （可带 `timedOut` 表示闸后等待超时）。
  */
 function renderShout(
+  ctx: ToolContext,
+  readerId: string,
   resolved:
     | SendResultView
     | { readonly approved: SendResultView }
     | ApprovalRequested
     | ShoutApprovalWaitResult,
 ): Record<string, unknown> {
-  if ("approved" in resolved) return sendView(resolved.approved)
-  if ("message" in resolved) return sendView(resolved)
+  if ("approved" in resolved) return sendView(ctx.db, resolved.approved, readerId)
+  if ("message" in resolved) return sendView(ctx.db, resolved, readerId)
   return "timedOut" in resolved
     ? { approval: resolved.approval, timedOut: true }
     : { approval: resolved.approval }
@@ -106,5 +108,7 @@ export function runShout(ctx: ToolContext, input: McpToolInput<"shout">): Promis
     input.wait === undefined
       ? shout(ctx.db, from, input.body)
       : shout(ctx.db, from, input.body, { until: input.wait.until, timeoutMs: input.wait.timeoutMs })
-  return result instanceof Promise ? result.then(renderShout) : renderShout(result)
+  return result instanceof Promise
+    ? result.then((resolved) => renderShout(ctx, from, resolved))
+    : renderShout(ctx, from, result)
 }

@@ -101,11 +101,11 @@ function runSend(ctx: ToolContext, input: McpToolInput<"send">): unknown {
     body: input.body,
     ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
   }
-  if (input.wait === undefined) return sendView(sendMessage(ctx.db, base))
+  if (input.wait === undefined) return sendView(ctx.db, sendMessage(ctx.db, base), from)
   return sendMessage(ctx.db, {
     ...base,
     wait: { until: input.wait.until, timeoutMs: input.wait.timeoutMs },
-  }).then(sendView)
+  }).then((result) => sendView(ctx.db, result, from))
 }
 
 function filterConversation(messages: readonly Message[], id: string | undefined): Message[] {

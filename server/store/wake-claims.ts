@@ -8,6 +8,7 @@
  * 的过期重认领分支自愈重投，杜绝「未投递却谎报 delivered」。
  */
 import type { Db } from "../db"
+import { getBySeq } from "./messages"
 import { CLAIM_TIMEOUT_MS, claimWakeJob, getWakeJob, type WakeJob } from "./wake"
 
 /**
@@ -15,11 +16,16 @@ import { CLAIM_TIMEOUT_MS, claimWakeJob, getWakeJob, type WakeJob } from "./wake
  * `sending` 且租约已过期（`retry_at <= now`）。返回认领后的 job，或 `undefined`
  * （已 `accepted`/`refused`/`expired`/`cancelled`，或在途租约仍有效 → 不重复投递）。
  * job 缺失时补建为 `sending`（在途，非 `accepted`）；`pending` 走原子条件认领。
+ *
+ * **纵深防御**：本函数**自身**拒绝撤回消息（`revoked_at != null` / 消息不存在）——不补建、不认领。
+ * 上游 `routes/internal.ts` 已按 `revokedAt` 跳过；此处独立守卫，防未来新增调用点绕过。
  */
 export function claimWakeBacklogJob(
   db: Db,
   input: { readonly messageSeq: number; readonly agentId: string; readonly now: number },
 ): WakeJob | undefined {
+  const message = getBySeq(db, input.messageSeq)
+  if (message === undefined || message.revokedAt !== undefined) return undefined
   const existing = getWakeJob(db, input.messageSeq, input.agentId)
   if (existing === undefined) {
     db.prepare<[number, string, number, number], void>(

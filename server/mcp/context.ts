@@ -3,7 +3,9 @@
  * `read-tools.ts`（读/策略工具）共享的类型、错误契约与 `send` 结果序列化。
  */
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
-import type { SendMessageResult } from "../core/messaging"
+import type { Receipt, SendMessageResult } from "../core/messaging"
+import { maskRevokedForReader } from "../core/revoke"
+import type { WaitResult } from "../core/wait"
 import type { Db } from "../db"
 
 /** MCP 会话上下文：共享库句柄 + join_token 落盘目录 + 可选已识别身份（`x-agent-id`，register 起可写）。 */
@@ -50,14 +52,26 @@ export function requireIdentity(ctx: ToolContext): string {
 
 /** `send`/`shout` 结果视图（`reply` 仅在带 `wait` 时出现）。 */
 export interface SendResultView extends SendMessageResult {
-  readonly reply?: { readonly timedOut: boolean }
+  readonly reply?: WaitResult<Receipt>
 }
 
-export function sendView(result: SendResultView): Record<string, unknown> {
+/**
+ * `send`/`shout` 结果序列化（唯一出参渲染点）。
+ * `reply.messages` 逐条过 `maskRevokedForReader`（reader = 调用方），堵死「未投递等待者
+ * 经 wait 回复读到撤回原文」的泄漏路径——与 `inbox`/`conversation` 共用同一决策点。
+ */
+export function sendView(db: Db, result: SendResultView, readerId: string): Record<string, unknown> {
   return {
     message: result.message,
     receipts: result.receipts,
     readReceipts: result.receipts.filter((r) => r.stage === "read"),
-    ...(result.reply === undefined ? {} : { reply: result.reply }),
+    ...(result.reply === undefined
+      ? {}
+      : { reply: maskReply(db, result.reply, readerId) }),
   }
+}
+
+/** `wait` 回复消息按读者遮蔽（撤回原文对未投递读者隐藏）。 */
+function maskReply(db: Db, reply: WaitResult<Receipt>, readerId: string): WaitResult<Receipt> {
+  return { ...reply, messages: reply.messages.map((m) => maskRevokedForReader(db, m, readerId)) }
 }
