@@ -23,6 +23,7 @@
 | `AGENTCHAT_PORT` | 否 | `4646` | 仅用于推导默认 `AGENTCHAT_URL` |
 | `AGENTCHAT_MCP_TIMEOUT_MS` | 否 | `30000` | MCP 桥单次上游请求超时（钳制到 `[100, 600000]`，非法值回落默认） |
 | `AGENTCHAT_POLL_MS` | 否 | `10000` | **插件**空闲轮询间隔（1s–1h 钳制，非法值回落 10s）；见 `adapters/opencode/README.md` |
+| `AGENTCHAT_LOG` | 否 | （落文件） | 诊断日志去向：缺省写 `<AGENTCHAT_HOME>/logs/opencode-adapter.log`；设为 `console` 时改打 stderr（**调试回退**，默认关闭） |
 | `AGENTCHAT_ADAPTERS` | **建议设** | — | **Hub 侧**环境变量（非插件环境变量）：登记 `opencode` 为 pull 厂商。启动 Hub 时设 `opencode`；未设见下方说明 |
 
 **token 解析顺序（插件与 MCP 桥一致）**：`env.HUB_TOKEN`（非空优先）→ `<AGENTCHAT_HOME>/hub_token`（trim）
@@ -232,6 +233,22 @@ export default { id: "agentchat", server: AgentChatPlugin }
    （契约 `shared/contracts.ts` / spec §6.3；`read` 仅在收件方显式 `ack` 后触发，失败态
    `refused`/`expired`/`cancelled` 回落 `queued`；用 `message_status` 工具或 Web UI 气泡下的回执查看）。
 
+## 日志（适配器不向宿主终端输出）
+
+插件与 MCP 桥的诊断/错误日志一律落 **`<AGENTCHAT_HOME>/logs/opencode-adapter.log`**（两者共用同一文件，
+行格式 `<ISO 时间> [plugin|bridge] <消息>`），**不写宿主的 stderr**——OpenCode 及其它终端界面软件的
+stderr 即其界面终端，适配器保持其干净。查看：
+
+```bash
+tail -f ~/.agentchat/logs/opencode-adapter.log                   # macOS / Linux
+Get-Content -Wait "$HOME\.agentchat\logs\opencode-adapter.log"  # PowerShell（AGENTCHAT_HOME 未设时即 ~\.agentchat）
+```
+
+- **轮转**：单文件 > 1 MiB 时在下一次写入前整体改名 `opencode-adapter.log.1`（覆盖旧 `.1`，只保留一份）。
+- **调试回退**（默认关闭）：`AGENTCHAT_LOG=console` 使插件与桥的诊断改打 stderr（现场排障用）。
+- 日志失败一律**静默**（绝不影响宿主）；日志行**绝不含** `hub_token` / `join_token` 的值。
+- 两个安装器（`install.mjs`）在终端的输出属正常：它们是**用户主动执行**的 CLI。
+
 ## 排障表
 
 | 症状 | 可能原因 | 处理 |
@@ -243,12 +260,12 @@ export default { id: "agentchat", server: AgentChatPlugin }
 | MCP `400 agent_not_found` | `agents/opencode.id` 陈旧或尚未注册 | 删除 `agents/opencode.id`，让插件重新注册写入；桥逐请求读盘，无需重启 |
 | MCP 会话 `session_not_found` | 30min TTL 淘汰 / Hub 重启清空会话表 | **桥会自动重新 initialize 并重试一次**；一般无需人工干预 |
 | MCP 命令找不到 / 启动失败 | 换过 node 或升级后旧 `command[0]` 失效 | **重跑安装器**刷新 node 绝对路径 |
-| 插件未注册 / 节点不在 `GET /api/roster` | 插件未加载 / 导出形态不符 / token 未解析到 | 确认 `plugin` 含本目录且默认导出 `{id,server}`；确认 `AGENTCHAT_HOME` 与 Hub 一致（插件自动读 `<home>/hub_token`，也可用 `HUB_TOKEN` 覆盖）；查 OpenCode 日志中 `[agentchat-opencode]` 前缀行 |
-| 消息一直「排队中」（agent 已 idle 很久） | 旧版只在 idle **事件**拉取：消息在「已经 idle 之后」到达时无触发者；或 Hub 未登记该厂商（无 job） | 本版已修：idle 期间**周期轮询**补拉（`AGENTCHAT_POLL_MS`，默认 10s）；并建议 Hub 启动时 `AGENTCHAT_ADAPTERS=opencode`。核对插件日志中 `[agentchat-opencode]` 的 `wake failed`/`idle heartbeat failed` |
+| 插件未注册 / 节点不在 `GET /api/roster` | 插件未加载 / 导出形态不符 / token 未解析到 | 确认 `plugin` 含本目录且默认导出 `{id,server}`；确认 `AGENTCHAT_HOME` 与 Hub 一致（插件自动读 `<home>/hub_token`，也可用 `HUB_TOKEN` 覆盖）；查日志文件 `<AGENTCHAT_HOME>/logs/opencode-adapter.log`（`[plugin]` 行；适配器不向宿主终端输出，可 `AGENTCHAT_LOG=console` 临时回退） |
+| 消息一直「排队中」（agent 已 idle 很久） | 旧版只在 idle **事件**拉取：消息在「已经 idle 之后」到达时无触发者；或 Hub 未登记该厂商（无 job） | 本版已修：idle 期间**周期轮询**补拉（`AGENTCHAT_POLL_MS`，默认 10s）；并建议 Hub 启动时 `AGENTCHAT_ADAPTERS=opencode`。核对 `<AGENTCHAT_HOME>/logs/opencode-adapter.log` 中 `[plugin]` 的 `wake failed`/`idle heartbeat failed` |
 | 空闲未被唤醒（idle 未触发） | 宿主未发 `session.idle`/`session.status`（版本差异） | 核对 `@opencode-ai/plugin` 版本（实测 1.18.32）；`session.idle` 是主要触发，`session.status` 仅补 busy 起点；即便两者都缺，空闲轮询仍会补拉 |
 | 回信似乎「开了新回合」 | 注入走 `client.session.promptAsync`，会开启新回合（符合「唤醒即续跑」语义） | 预期行为：busy 期间到达的消息会在**下一次 idle** 才被认领注入 |
 | 会话节点在 roster 中长期残留 | 退役依赖宿主发 `session.deleted` 事件 | 会话删除时插件调 `/internal/retire`（幂等；`404` 视为已退役）；**会话被归档**（`time.archived`）时插件同样退役该节点并停其轮询；若宿主版本两者都不发则节点留待下一次清理（已知限制，见 `adapters/opencode/README.md` 健壮性） |
-| 同标题的两个会话只出现一个 | `agents.name` 全局 UNIQUE，第二个注册撞 `name_taken` | 插件已带**稳定别名** `<标题> · <sessionid 前 4 位>` 自动重试一次（幂等），两个会话都会成为联系人；日志可见 `name taken; registered as …` |
+| 同标题的两个会话只出现一个 | `agents.name` 全局 UNIQUE，第二个注册撞 `name_taken` | 插件已带**稳定别名** `<标题> · <sessionid 前 4 位>` 自动重试一次（幂等），两个会话都会成为联系人；日志文件可见 `name taken; registered as …` |
 | 发给实例节点 `opencode@<host>` 的消息一直排队 | 实例节点是**分组容器**，`/internal/wake` 只按会话节点 id 发起 → 它不会被拉取 | 预期行为：把消息发给**会话节点**（聊天端点）；历史实例 DM 只是归档留痕。UI 屏蔽容器节点 DM 由 controller 实现 |
 
 ## 约束

@@ -12,12 +12,12 @@
  * 桥的 `AGENTCHAT_URL`/`AGENTCHAT_HOME` 一律显式注入，且剔除环境中的同类变量，避免污染真机。
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { MCP_TOOLS } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
 import { openDb, type Db } from "../../server/db"
@@ -66,6 +66,8 @@ class StdioBridge {
   private readonly pending = new Map<string, Pending>()
   private nextId = 1
   readonly notifications: BridgeMessage[] = []
+  /** stdout 收到的**原始行**：用于断言「stdout 全程只写 JSON-RPC 帧」。 */
+  readonly rawLines: string[] = []
   stderr = ""
 
   constructor(env: Record<string, string>) {
@@ -111,13 +113,21 @@ class StdioBridge {
     this.child.stdin.write(`${JSON.stringify(message)}\n`)
   }
 
+  /** 写一行**原始** stdin（不经 JSON 序列化；用于触发桥的诊断路径）。 */
+  writeRaw(line: string): void {
+    this.child.stdin.write(line)
+  }
+
   private onData(chunk: string): void {
     this.buffer += chunk
     let index = this.buffer.indexOf("\n")
     while (index >= 0) {
       const line = this.buffer.slice(0, index).trim()
       this.buffer = this.buffer.slice(index + 1)
-      if (line !== "") this.dispatch(line)
+      if (line !== "") {
+        this.rawLines.push(line)
+        this.dispatch(line)
+      }
       index = this.buffer.indexOf("\n")
     }
   }
@@ -179,6 +189,19 @@ function errorMessage(message: BridgeMessage): string {
     throw new Error(`expected JSON-RPC error, got ${JSON.stringify(message)}`)
   }
   return message.error["message"]
+}
+
+/** stdout 逐行必须是可解析的 JSON-RPC 2.0 帧（任何诊断文字泄漏到 stdout 都在此暴露）。 */
+function expectJsonRpcOnly(client: StdioBridge): void {
+  for (const line of client.rawLines) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      throw new Error(`stdout leaked a non-JSON-RPC line: ${line}`)
+    }
+    expect(isRecord(parsed) && parsed["jsonrpc"] === "2.0").toBe(true)
+  }
 }
 
 // ── 真 Hub 脚手架 ───────────────────────────────────────────────────
@@ -325,6 +348,9 @@ describe("桥 ↔ 真 Hub 往返", () => {
     if (!isRecord(parsed) || !isRecord(parsed["agent"]) || typeof parsed["agent"]["id"] !== "string") {
       throw new Error("register did not return an agent id")
     }
+    // 诊断不进宿主终端：往返全程 stderr 为空、stdout 只有 JSON-RPC 帧。
+    expect(client.stderr).toBe("")
+    expectJsonRpcOnly(client)
   })
 })
 
@@ -493,5 +519,45 @@ describe("失败路径可诊断且不使宿主启动失败", () => {
     const init = await client.request("initialize", initializeParams())
     expect(errorMessage(init)).toContain("无法连接")
     expect(client.alive).toBe(true)
+  })
+})
+
+// ── 诊断只进日志文件：stdout 恒为 JSON-RPC、stderr 恒为空 ────────────
+
+describe("桥诊断日志落文件", () => {
+  it("routes diagnostics to <home>/logs/opencode-adapter.log and keeps stdout JSON-RPC-only with empty stderr", async () => {
+    const client = bridge()
+    const init = await client.request("initialize", initializeParams())
+    expect(init.error).toBeUndefined()
+
+    // 触发一条诊断（旧实现会把这行打进宿主 stderr / OpenCode 终端）。
+    client.writeRaw("{not json\n")
+
+    const logFile = join(home, "logs", "opencode-adapter.log")
+    await vi.waitFor(
+      () => {
+        expect(readFileSync(logFile, "utf8")).toContain("忽略非法 JSON")
+      },
+      { timeout: 5000 },
+    )
+
+    expect(readFileSync(logFile, "utf8")).toMatch(/^\d{4}-\d{2}-\d{2}T\S+ \[bridge\] /m)
+    expect(client.stderr).toBe("")
+    expectJsonRpcOnly(client)
+    expect(client.alive).toBe(true)
+  })
+
+  it("keeps writing diagnostics to stderr when AGENTCHAT_LOG=console (debug fallback)", async () => {
+    const client = bridge({ AGENTCHAT_LOG: "console" })
+    client.writeRaw("{not json\n")
+
+    await vi.waitFor(
+      () => {
+        expect(client.stderr).toContain("忽略非法 JSON")
+      },
+      { timeout: 5000 },
+    )
+    expect(existsSync(join(home, "logs", "opencode-adapter.log"))).toBe(false)
+    expectJsonRpcOnly(client)
   })
 })

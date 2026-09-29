@@ -18,6 +18,7 @@
 | `AGENTCHAT_POLL_MS` | 否 | **插件**空闲轮询间隔，默认 `10000`（钳制到 `[1000, 3600000]`，非法值回落默认） |
 | `AGENTCHAT_ADOPT` | 否 | `0` 关闭**启动枚举收养**（B）；缺省开启。**懒收养（A）不受影响** |
 | `AGENTCHAT_ADOPT_LIMIT` | 否 | 启动枚举收养的根会话上限，默认 `5`（钳制到 `[1, 50]`，非法值回落默认） |
+| `AGENTCHAT_LOG` | 否 | 诊断日志缺省写 `<AGENTCHAT_HOME>/logs/opencode-adapter.log`（**不写宿主终端**）；设 `console` 改打 stderr（调试回退，默认关闭） |
 
 ## 事件映射（实测 `@opencode-ai/plugin@1.18.32`）
 
@@ -129,6 +130,11 @@ OpenCode **不会**为已存在/被恢复的会话补发 `session.created`，而
 - **实例节点不参与投递**：`/internal/wake` 只按**会话节点 id** 发起（`resolve(sessionID)` 唯一来源），
   故**发给实例节点的消息无人拉取**——它是分组容器而非聊天端点；会话节点才是聊天端点，历史实例 DM 归档于该节点。
 - Windows 上 `chmod 0600` 调用成功但权限位可能不生效（与 Hub 侧 token 同策略）。
+- **诊断日志落文件（不污染宿主终端）**：插件与 MCP 桥的诊断写 `<AGENTCHAT_HOME>/logs/opencode-adapter.log`
+  （共用同一文件，`[plugin]`/`[bridge]` 行；**> 1 MiB 轮转到 `.1`**，只保留一份）——OpenCode 及其它终端
+  界面软件的 stderr 即其界面终端，适配器**不向宿主输出**（`AGENTCHAT_LOG=console` 可临时回退）。
+  查看：`tail -f ~/.agentchat/logs/opencode-adapter.log` / `Get-Content -Wait <path>`。
+  日志失败一律静默（绝不影响宿主），日志行绝不含 `hub_token`/`join_token` 的值；安装器 CLI 的终端输出属正常。
 
 ## 安装
 
@@ -167,5 +173,7 @@ OpenCode **不会**为已存在/被恢复的会话补发 `session.created`，而
 | `transport.ts` | 传输层：HTTP POST、3s 超时、指数退避重试、`HubError` |
 | `mcp.ts` | MCP `register` 握手与 SSE/工具结果解析、`HubToolError` |
 | `token.ts` | `join_token` 与节点 agent id 文件读写/清除（0600 尽力而为） |
+| `log.ts` | 插件文件日志 `createFileLog`：落盘格式 / 1 MiB 轮转 / 失败静默 / `AGENTCHAT_LOG` 回退 |
+| `file-log.mjs` | 上者的纯 `.mjs` 同构实现（`mcp-bridge.mjs` 不能 import TS，桥用此副本） |
 | `types.ts` | OpenCode 插件 API 最小本地类型声明（实测 1.18.32） |
 | `util.ts` | 类型守卫 + 串行任务队列 |

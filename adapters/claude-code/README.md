@@ -117,11 +117,14 @@ Claude Code 官方文档的 Common input fields 说明：子代理内触发的 h
 | `claude-code.stop.json` | 根会话链内 block 计数 `{sessionId, count, at}`（`stop_hook_active` 标记同链；链边界重置） |
 | `claude-code.substop.json` | 子代理链内 block 计数 `{sessionId: "sub:<agent_id>", count, at}`（SubagentStop 专用，与根计数互不覆盖） |
 | `claude-code.seen.json` | 已注入 messageId 去重集合 `{ids:[…], at}`（有界，租约重投不重复注入） |
-| `logs/claude-code-adapter.log` | 追加式带时间戳日志 |
+| `logs/claude-code-adapter.log` | 追加式带时间戳日志（**> 1 MiB 轮转到 `.1`**，只保留一份）；`tail -f <path>` / `Get-Content -Wait <path>` 查看 |
 
 ## 健壮性
 
 - 每次 HTTP 调用 3s 超时；网络错误/超时/服务不可达一律捕获、写日志、**退出码恒 0**——绝不阻塞或非零退出影响宿主。
+- **诊断日志落文件（不污染宿主终端）**：全部诊断写 `<AGENTCHAT_HOME>/logs/claude-code-adapter.log`
+  （ISO 前缀，> 1 MiB 轮转到 `.1` 只保留一份），**不向宿主终端输出**；日志失败一律静默、日志行绝不含 token 值。
+  安装器（`install.mjs`）在终端的输出属正常——它是**用户主动执行**的 CLI。
 - 无 `HUB_TOKEN`、Hub 不可达、载荷为空/非法 JSON 时静默继续。
 - 陈旧 `join_token`（Hub DB 重置/切换）→ `invalid_join_token`：清空本地 token 后按「无 token 首次注册」
   重新注册为根并写回新 token（此路径不产生重复根）。

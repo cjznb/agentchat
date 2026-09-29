@@ -6,7 +6,7 @@
  * `ensureHubToken`、opencode 适配器同策略）。所有读写失败都不抛错——hook 不得因
  * 本地文件问题阻塞宿主。
  */
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -88,11 +88,23 @@ export function removeFile(path) {
   }
 }
 
-/** 追加一行带时间戳日志；日志本身失败也不抛错（不得影响宿主）。 */
+/** 日志轮转阈值：1 MiB（与 OpenCode 适配器侧对齐）。 */
+const LOG_ROTATE_BYTES = 1024 * 1024
+
+/**
+ * 追加一行带时间戳日志；日志本身失败也不抛错（不得影响宿主）。
+ * 写入前日志已 > 1 MiB → 整体改名 `<log>.1`（覆盖旧 `.1`，只保留一份），主文件从新行重新开始。
+ */
 export function appendLog(home, message) {
   try {
     const path = adapterPaths(home).log
     mkdirSync(dirname(path), { recursive: true })
+    try {
+      const stat = statSync(path, { throwIfNoEntry: false })
+      if (stat !== undefined && stat.size > LOG_ROTATE_BYTES) renameSync(path, `${path}.1`)
+    } catch {
+      // 轮转失败（文件被占用等）不阻断本次追加
+    }
     appendFileSync(path, `${new Date().toISOString()} ${message}\n`)
   } catch {
     // 忽略：日志失败不得影响宿主

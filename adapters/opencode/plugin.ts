@@ -30,6 +30,7 @@ import {
   type RegisterArgs,
   type RegisterResult,
 } from "./hub"
+import { createFileLog } from "./log"
 import { IdlePoller, parsePollMs } from "./poll"
 import { agentIdPath, clearToken, readToken, resolveHome, tokenPath, writeToken } from "./token"
 import type { Hooks, OpencodeEvent, Plugin, PluginInput } from "./types"
@@ -57,7 +58,8 @@ export interface PluginHandle {
  */
 export function createPluginHandle(deps: PluginDeps): PluginHandle {
   const queue = createTaskQueue()
-  const log = deps.log ?? ((message: string) => console.error(`[agentchat-opencode] ${message}`))
+  // 默认诊断落 `<home>/logs/opencode-adapter.log`（绝不污染宿主终端；`AGENTCHAT_LOG=console` 回退）。
+  const log = deps.log ?? createFileLog(deps.env, "plugin")
   const plugin: Plugin = async (input) => createRuntime(deps, input, queue, log)
   return { plugin, flush: () => queue.flush() }
 }

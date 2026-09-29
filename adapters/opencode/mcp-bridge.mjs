@@ -25,6 +25,7 @@ import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
+import { createFileLog } from "./file-log.mjs"
 
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 const CLIENT_INFO = { name: "agentchat-opencode-bridge", version: "0.1.0" }
@@ -52,9 +53,9 @@ function readTrimmed(path) {
   }
 }
 
-function log(message) {
-  process.stderr.write(`[agentchat-bridge] ${message}\n`)
-}
+// 诊断**只落文件**（`<home>/logs/opencode-adapter.log`，tag `bridge`，与插件同一文件）：
+// stdout 恒为 JSON-RPC、stderr 恒为空——绝不污染宿主（OpenCode）终端；`AGENTCHAT_LOG=console` 回退。
+const log = createFileLog(process.env, "bridge")
 
 function isRequestId(id) {
   return id !== undefined && id !== null

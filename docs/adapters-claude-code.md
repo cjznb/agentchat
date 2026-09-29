@@ -204,7 +204,24 @@ MCP 配置（`~/.claude.json` 顶层；见 `mcp.snippet.json`）：
 - `SessionStart` 的 `additionalContext` 真实渲染（仅用 `additionalContext`）。
 - Windows 上 `chmod 0600` 权限位实际生效情况（尽力而为）。
 
+## 日志（适配器不向宿主终端输出）
+
+hooks 的诊断/错误日志落 **`<AGENTCHAT_HOME>/logs/claude-code-adapter.log`**
+（行格式 `<ISO 时间> <消息>`），**不向宿主终端输出**（hook 退出码恒 0，失败只进日志）。查看：
+
+```bash
+tail -f ~/.agentchat/logs/claude-code-adapter.log                   # macOS / Linux
+Get-Content -Wait "$HOME\.agentchat\logs\claude-code-adapter.log"  # PowerShell（AGENTCHAT_HOME 未设时即 ~\.agentchat）
+```
+
+- **轮转**：单文件 > 1 MiB 时在下一次写入前整体改名 `claude-code-adapter.log.1`（覆盖旧 `.1`，只保留一份）。
+- 排障一律看 `<AGENTCHAT_HOME>/logs/*.log`；日志失败静默（绝不影响宿主），日志行绝不含 token 值。
+- 安装器（`install.mjs`）在终端的输出属正常：它是**用户主动执行**的 CLI。
+
 ## 排障表
+
+> 排障先看日志文件 `<AGENTCHAT_HOME>/logs/claude-code-adapter.log`——**适配器不向宿主终端输出**
+> （安装器 CLI 的终端输出除外）。
 
 | 症状 | 可能原因 | 处理 |
 |---|---|---|
