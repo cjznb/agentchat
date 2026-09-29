@@ -12,6 +12,18 @@ export interface StorageLike {
   setItem(key: string, value: string): void
 }
 
+/**
+ * 浏览器 `localStorage`（SSR / 隐私模式禁用存储时返回 `null` → 调用方不持久化）。
+ * 折叠态各调用方共用同一取值口径（避免各处重复 try/catch 漂移）。
+ */
+export function browserStorage(): StorageLike | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage
+  } catch {
+    return null
+  }
+}
+
 /** 读取展开 id；坏 JSON / 非字符串数组 / 存储异常 → 空数组（容错）。 */
 export function loadExpanded(storage: StorageLike | null, storageKey: string): readonly string[] {
   if (storage === null) return []

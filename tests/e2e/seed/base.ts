@@ -91,13 +91,16 @@ export interface OrgSeed {
   readonly logical: string
   /** 实例容器节点（`kind=runtime`、`role_tag=container`），不可 DM。 */
   readonly instance: string
-  /** 容器的子会话节点（体现扁平列表 `↳` 来源标注）。 */
+  /** 容器的子会话节点（分组后作为 `instance` 的缩进子行）。 */
   readonly session: string
+  /** 离线子级（注册在 root1 子列最前）——用于断言子节点在线优先稳定排序。 */
+  readonly offlineChild: string
 }
 
 /**
  * human + 两棵根树（含 busy/退役/逻辑/多层）+ 未读 + 实例容器（组织树用例）。
- * 容器语义与新 UI 一致：**实例为容器、会话为其子节点**（`role_tag=container` 仅标实例）。
+ * 容器语义：**实例为容器、会话为其子节点**（`role_tag=container` 仅标实例）。
+ * 另含一个离线子级（在线优先排序覆盖；顶层离线由 `logical`(offline) 覆盖）。
  */
 export function seedOrg(db: Db, home: string): OrgSeed {
   const human = ensureHuman(db)
@@ -109,6 +112,12 @@ export function seedOrg(db: Db, home: string): OrgSeed {
     roleTag: "组织者",
     remark: "主根",
   }).agent
+  // 排序覆盖（只加不改）：离线子级注册在 root1 子列最前 → 在线优先后应排到 busy 之后、退役之前。
+  const offlineChild = registerChild(db, {
+    name: "org-offline-child",
+    parentId: root1.id,
+    taskRef: "org-offline-t",
+  })
   const root2 = registerRoot(db, home, { name: "org-root2", vendor: "claude-code" }).agent
   const child1 = registerChild(db, {
     name: "org-child1",
@@ -145,6 +154,7 @@ export function seedOrg(db: Db, home: string): OrgSeed {
   })
   touchAgent(db, child2.id, "busy")
   setStatusText(db, child2.id, "编译中")
+  touchAgent(db, offlineChild.id, "offline")
   sendMessage(db, { from: child1.id, to: root1.id, body: "root1-ping" }) // root1 聚合未读
   sendMessage(db, { from: child1.id, to: human.id, body: "child1-ping" }) // child1 参与 human DM
   retire(db, child3.id)
@@ -158,6 +168,7 @@ export function seedOrg(db: Db, home: string): OrgSeed {
     logical: logical.id,
     instance: instance.id,
     session: session.id,
+    offlineChild: offlineChild.id,
   }
 }
 

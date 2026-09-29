@@ -1,16 +1,12 @@
 /**
- * Plan 3 T6 —— 通讯录组织树（**扁平单层**）+ 资料卡 E2E（真 Hub + 进程内种子）：
- * 恒渲染（无折叠/无层级属性/无缩进）、DFS 父前子随 + `↳` 来源标注、human 过滤、
- * 摘要 `N子·M忙` + 聚合徽标、退役灰显可点、busy 状态与角色色调、
- * 容器徽标 + 容器卡不可 DM、状态变化与实时挂载 <2s、资料卡字段与两按钮。
- *
- * 扁平化重写（评审 Critical #1）：
- * - 删除：toggle/折叠/手风琴断言与 `ensureExpanded` helper（`org-toggle` testid 已随
- *   `OrgTree.tsx` 扁平化删除，旧断言在第一条即中止、后续覆盖全部失效）。
- * - 新增：扁平恒渲染（9 行默认可见）、扁平 DOM（无嵌套/无层级属性/无缩进实测）、
- *   DFS 父前子随、`↳` 来源标注、容器行/容器卡（含「无 contact-message」）。
- * - 保留：human 过滤、逻辑图标、摘要与徽标、退役灰化可点、busy 与角色色调、
- *   实时状态变化、实时挂载、资料卡字段完整性、会话过滤视图、发消息开 DM。
+ * 通讯录组织树 E2E（真 Hub + 进程内种子）——**分组 + 默认折叠（手风琴）**：
+ * - 顶层只列主 agent（roster 根节点；human 过滤），默认无子行
+ * - 点折叠把手展开某根 → 子行出现、嵌套 `org-children`、缩进一档；**手风琴一次只开一个**
+ * - 在线优先稳定排序（顶层：离线 `logical` 排到在线根之后；子层：离线子级排到 busy 之后、退役之前）
+ * - 行内**无** `↳` 来源标注（`org-source` 已移除；归属由缩进表达）
+ * - 折叠父行摘要 `N子·M忙` + 全子树聚合未读徽标；容器徽标 + 容器卡不可 DM（保留）
+ * - 退役可点开卡（发消息禁用）、busy 状态文字、角色色调、实时状态/新子挂载、资料卡字段
+ * - 中间栏可滚动：内容超出视口时末行可滚到可见（三个 tab 的列表容器 `overflow-y:auto`）
  *
  * 前置：Playwright webServer 自举 `npm run build && npm start`（临时 `AGENTCHAT_HOME`，
  * 隔离于用户真实 Hub）；本 spec 内 `start({ port: 0 })` 另起独立临时 Hub。
@@ -33,28 +29,24 @@ function rowOf(page: Page, id: string): Locator {
 function nodeOf(page: Page, id: string): Locator {
   return page.locator(`[data-testid="org-node"][data-node-id="${id}"]`)
 }
+function toggleOf(page: Page, id: string): Locator {
+  return rowOf(page, id).getByTestId("org-toggle")
+}
 
-/** 扁平列表当前渲染顺序（自上而下的 `data-node-id` 序列；DFS 断言用）。 */
-async function rowOrder(page: Page): Promise<readonly string[]> {
-  const nodes = page.getByTestId("org-node")
-  const count = await nodes.count()
+/** 指定深度的行按渲染顺序的 `data-node-id` 序列（判定分组顺序用）。 */
+async function orderAtDepth(page: Page, depth: number): Promise<readonly string[]> {
+  const rows = page.locator(`[data-testid="org-row"][data-depth="${depth}"]`)
+  const count = await rows.count()
   const ids: string[] = []
   for (let i = 0; i < count; i++) {
-    const id = await nodes.nth(i).getAttribute("data-node-id")
-    if (id === null) throw new Error(`org-node[${i}] 缺少 data-node-id`)
+    const id = await rows.nth(i).getAttribute("data-node-id")
+    if (id === null) throw new Error(`org-row[depth=${depth}][${i}] 缺少 data-node-id`)
     ids.push(id)
   }
   return ids
 }
 
-/** 节点在扁平顺序中的下标（缺失即失败，避免静默 -1 误判）。 */
-function at(order: readonly string[], id: string): number {
-  const index = order.indexOf(id)
-  if (index < 0) throw new Error(`节点 ${id} 不在扁平列表：${order.join(", ")}`)
-  return index
-}
-
-test("org tree（扁平）：恒渲染 + DFS/↳ + 退役/忙碌/容器 + 实时挂载 + 资料卡", async ({
+test("org tree（分组手风琴）：默认折叠 + 缩进子行 + 手风琴 + 在线优先 + 容器 + 滚动", async ({
   page,
 }) => {
   resetWsHub()
@@ -65,78 +57,52 @@ test("org tree（扁平）：恒渲染 + DFS/↳ + 退役/忙碌/容器 + 实时
     const seed = seedOrg(db, home)
     await page.goto(`${running.url}/`)
     await page.getByRole("button", { name: "通讯录" }).click()
-    const tree = page.getByTestId("org-tree")
-    await expect(tree).toBeVisible()
+    await expect(page.getByTestId("org-tree")).toBeVisible()
 
-    // ── 扁平恒渲染：9 行默认全部可见（无折叠），human 不出现 ─────────────
-    await expect(page.getByTestId("org-row")).toHaveCount(9)
-    for (const id of [
-      seed.root1,
-      seed.root2,
-      seed.logical,
-      seed.child1,
-      seed.child2,
-      seed.child3,
-      seed.child4,
-      seed.instance,
-      seed.session,
-    ]) {
-      await expect(nodeOf(page, id)).toBeVisible()
-    }
+    // ── 默认折叠：仅顶层 4 个根可见（root1/root2/instance/logical），无子行 ─────
+    await expect(page.getByTestId("org-row")).toHaveCount(4)
+    await expect(page.getByTestId("org-children")).toHaveCount(0)
+    await expect(page.getByTestId("org-source")).toHaveCount(0) // ↳ 已移除
     await expect(page.locator('[data-testid="org-node"]', { hasText: "用户" })).toHaveCount(0)
+
+    // 在线优先稳定排序：离线 logical(org-board) 注册在 instance 之前，却排到最后。
+    expect(await orderAtDepth(page, 0)).toEqual([seed.root1, seed.root2, seed.instance, seed.logical])
 
     // 逻辑节点特殊图标（原覆盖保留）。
     await expect(nodeOf(page, seed.logical).locator(".node-icon")).toHaveText("◆")
+    // 折叠态父行摘要 + 全子树聚合未读徽标（root1 = 2；root2 无徽标）。
+    await expect(nodeOf(page, seed.root1).getByTestId("org-summary")).toHaveText("4子·1忙")
+    await expect(nodeOf(page, seed.root2).getByTestId("org-summary")).toHaveText("1子·0忙")
+    await expect(nodeOf(page, seed.root1).getByTestId("unread-badge")).toHaveText("2")
+    await expect(nodeOf(page, seed.root2).getByTestId("unread-badge")).toHaveCount(0)
 
-    // ── 扁平 DOM：无嵌套行 / 无 toggle / 无层级属性 / 无行级内联缩进 ──────
-    await expect(tree.locator("ul")).toHaveCount(0)
-    await expect(tree.locator("li li")).toHaveCount(0)
-    await expect(tree.locator(":scope > li")).toHaveCount(9)
-    await expect(
-      tree.locator(
-        '[data-testid="org-toggle"], .org-toggle, .org-children, .org-head, [aria-expanded], [role="tree"], [role="treeitem"], [role="group"]',
-      ),
-    ).toHaveCount(0)
-    await expect(tree.locator(".org-node[style]")).toHaveCount(0)
+    // ── 展开 root1：子行出现、缩进、子层在线优先稳定 ─────────────────────
+    const root1Toggle = toggleOf(page, seed.root1)
+    await expect(root1Toggle).toHaveAttribute("aria-expanded", "false")
+    await root1Toggle.click()
+    await expect(root1Toggle).toHaveAttribute("aria-expanded", "true")
+    await expect(rowOf(page, seed.root1).getByTestId("org-children")).toBeVisible()
+    await expect(page.getByTestId("org-row")).toHaveCount(8)
+    // 子层顺序：online(child1) → busy(child2) → offline(offlineChild) → retired(child3)
+    expect(await orderAtDepth(page, 1)).toEqual([
+      seed.child1,
+      seed.child2,
+      seed.offlineChild,
+      seed.child3,
+    ])
+    for (const id of [seed.child1, seed.child2, seed.child3, seed.offlineChild]) {
+      await expect(nodeOf(page, id)).toBeVisible()
+    }
+    // 缩进一档：子行左缘在父行右（层级由缩进表达，无 ↳）。
+    const parentBox = await nodeOf(page, seed.root1).boundingBox()
+    const childBox = await nodeOf(page, seed.child1).boundingBox()
+    expect(parentBox).not.toBeNull()
+    expect(childBox).not.toBeNull()
+    expect(childBox!.x).toBeGreaterThan(parentBox!.x)
+    // 展开后子行各显自身徽标（child1 = 2）。
+    await expect(nodeOf(page, seed.child1).getByTestId("unread-badge")).toHaveText("2")
 
-    // 无层级缩进（实测）：所有行计算样式的左内边距一致。
-    const paddings = await tree.locator(".org-node").evaluateAll((els) =>
-      els.map((el) => el.ownerDocument?.defaultView?.getComputedStyle(el).paddingLeft ?? ""),
-    )
-    expect(new Set(paddings).size).toBe(1)
-    expect(paddings[0]).not.toBe("")
-
-    // ── DFS 顺序：父在前、子紧随（子行紧跟其父，不跨层跳散） ─────────────
-    const order = await rowOrder(page)
-    expect(at(order, seed.child1)).toBe(at(order, seed.root1) + 1)
-    expect(at(order, seed.child2)).toBe(at(order, seed.root1) + 2)
-    expect(at(order, seed.child3)).toBe(at(order, seed.root1) + 3)
-    expect(at(order, seed.child4)).toBe(at(order, seed.root2) + 1)
-    expect(at(order, seed.session)).toBe(at(order, seed.instance) + 1)
-    expect(at(order, seed.root1)).toBeLessThan(at(order, seed.root2))
-
-    // ── `↳` 来源标注：子行标父名；根行（含容器）无标注 ───────────────────
-    await expect(rowOf(page, seed.root1).getByTestId("org-source")).toHaveCount(0)
-    await expect(rowOf(page, seed.child1).getByTestId("org-source")).toHaveText("↳ org-root1")
-    await expect(rowOf(page, seed.child4).getByTestId("org-source")).toHaveText("↳ org-root2")
-    await expect(rowOf(page, seed.session).getByTestId("org-source")).toHaveText("↳ org-instance")
-
-    // ── 摘要 `N子·M忙` + 聚合未读徽标（root1=2，root2 无徽标） ────────────
-    await expect(rowOf(page, seed.root1).getByTestId("org-summary")).toHaveText("3子·1忙")
-    await expect(rowOf(page, seed.root2).getByTestId("org-summary")).toHaveText("1子·0忙")
-    await expect(rowOf(page, seed.instance).getByTestId("org-summary")).toHaveText("1子·0忙")
-    await expect(rowOf(page, seed.root1).getByTestId("unread-badge")).toHaveText("2")
-    await expect(rowOf(page, seed.root2).getByTestId("unread-badge")).toHaveCount(0)
-
-    // ── 退役节点：灰显、留原位、仍可点开资料卡（仅「发消息」禁用） ─────────
-    await expect(nodeOf(page, seed.child3)).toHaveAttribute("data-retired", "true")
-    await expect(nodeOf(page, seed.child3)).toBeEnabled()
-    await nodeOf(page, seed.child3).click()
-    await expect(page.getByTestId("contact-card")).toBeVisible()
-    await expect(page.getByTestId("contact-message")).toBeDisabled()
-    await page.getByTestId("contact-close").click()
-
-    // ── busy 状态点 + 状态文字；role 彩色标签 ─────────────────────────────
+    // busy 状态点 + 状态文字；role 彩色标签。
     await expect(nodeOf(page, seed.child2).locator(".node-dot")).toHaveText("🟠")
     await expect(nodeOf(page, seed.child2).getByTestId("status-text")).toHaveText("编译中")
     await expect(nodeOf(page, seed.child1).getByTestId("role-tag")).toHaveText("执行者")
@@ -145,8 +111,20 @@ test("org tree（扁平）：恒渲染 + DFS/↳ + 退役/忙碌/容器 + 实时
       "executor",
     )
 
+    // ── 手风琴：开 root2 → root1 自动收起 ───────────────────────────────
+    await toggleOf(page, seed.root2).click()
+    await expect(toggleOf(page, seed.root2)).toHaveAttribute("aria-expanded", "true")
+    await expect(toggleOf(page, seed.root1)).toHaveAttribute("aria-expanded", "false")
+    await expect(page.getByTestId("org-row")).toHaveCount(5)
+    await expect(nodeOf(page, seed.child1)).toHaveCount(0)
+    await expect(nodeOf(page, seed.child4)).toBeVisible()
+
     // ── 容器行：徽标 + data-container；不渲染裸英文 `container` 角色标签 ───
-    await expect(rowOf(page, seed.instance).getByTestId("container-badge")).toHaveText("容器")
+    await toggleOf(page, seed.instance).click()
+    await expect(toggleOf(page, seed.root2)).toHaveAttribute("aria-expanded", "false")
+    await expect(rowOf(page, seed.instance).getByTestId("org-children")).toBeVisible()
+    await expect(nodeOf(page, seed.session)).toBeVisible()
+    await expect(nodeOf(page, seed.instance).getByTestId("container-badge")).toHaveText("容器")
     await expect(nodeOf(page, seed.instance)).toHaveAttribute("data-container", "true")
     await expect(nodeOf(page, seed.instance).getByTestId("role-tag")).toHaveCount(0)
 
@@ -160,17 +138,33 @@ test("org tree（扁平）：恒渲染 + DFS/↳ + 退役/忙碌/容器 + 实时
     await expect(page.getByTestId("contact-conversations")).toBeVisible()
     await page.getByTestId("contact-close").click()
 
-    // ── 实时：状态变化（/internal/state 同路径）→ 摘要 <2s 刷新 ───────────
+    // ── 实时：状态变化（/internal/state 同路径）→ 折叠父行摘要 <2s 刷新 ────
     applyAgentState(db, { agentId: seed.child4, state: "busy" })
-    await expect(rowOf(page, seed.root2).getByTestId("org-summary")).toHaveText("1子·1忙", {
+    await expect(nodeOf(page, seed.root2).getByTestId("org-summary")).toHaveText("1子·1忙", {
       timeout: 2000,
     })
 
-    // ── 实时：新子节点注册 → 2s 内挂载（扁平：无需任何展开操作） ──────────
+    // ── 实时：新子节点注册 → 展开 root1 后 2s 内挂载 ─────────────────────
+    const root1Toggle2 = toggleOf(page, seed.root1)
+    if ((await root1Toggle2.getAttribute("aria-expanded")) === "false") await root1Toggle2.click()
     const live = registerChild(db, { name: "org-live", parentId: seed.root1, taskRef: "org-live" })
     await expect(nodeOf(page, live.id)).toBeVisible({ timeout: 2000 })
-    await expect(page.getByTestId("org-row")).toHaveCount(10)
-    await expect(rowOf(page, live.id).getByTestId("org-source")).toHaveText("↳ org-root1")
+    await expect(nodeOf(page, seed.root1).getByTestId("org-summary")).toHaveText("5子·1忙")
+    expect(await orderAtDepth(page, 1)).toEqual([
+      seed.child1,
+      seed.child2,
+      live.id,
+      seed.offlineChild,
+      seed.child3,
+    ])
+
+    // ── 退役节点：灰显、仍可点开资料卡（仅「发消息」禁用） ────────────────
+    await expect(nodeOf(page, seed.child3)).toHaveAttribute("data-retired", "true")
+    await expect(nodeOf(page, seed.child3)).toBeEnabled()
+    await nodeOf(page, seed.child3).click()
+    await expect(page.getByTestId("contact-card")).toBeVisible()
+    await expect(page.getByTestId("contact-message")).toBeDisabled()
+    await page.getByTestId("contact-close").click()
 
     // ── 资料卡：点节点 → 字段齐全 + 两按钮（普通节点按钮在，对照容器） ─────
     await nodeOf(page, seed.child1).click()
@@ -199,6 +193,40 @@ test("org tree（扁平）：恒渲染 + DFS/↳ + 退役/忙碌/容器 + 实时
     await expect(page.getByTestId("chat-view").locator("h1")).toContainText("org-child2", {
       timeout: 3000,
     })
+
+    // ── 中间栏滚动：内容超出视口时末行可滚到可见 ────────────────────────
+    await page.setViewportSize({ width: 1280, height: 360 })
+    await page.getByRole("button", { name: "通讯录" }).click()
+    const tree = page.getByTestId("org-tree")
+    await expect(tree).toBeVisible()
+    const scrollable = await tree.evaluate((el) => el.scrollHeight > el.clientHeight)
+    expect(scrollable).toBe(true)
+    const lastRow = page.getByTestId("org-row").last()
+    await lastRow.scrollIntoViewIfNeeded()
+    await expect(lastRow).toBeVisible()
+    const lastBox = await lastRow.boundingBox()
+    expect(lastBox).not.toBeNull()
+    expect(lastBox!.y).toBeGreaterThanOrEqual(0)
+    expect(lastBox!.y + lastBox!.height).toBeLessThanOrEqual(361)
+    await page.setViewportSize({ width: 1280, height: 720 })
+
+    // ── 三个 tab 的中间栏列表均可滚动（overflow-y: auto 已落到容器） ─────
+    await page.getByRole("button", { name: "通讯录" }).click()
+    expect(
+      await page.getByTestId("org-tree").evaluate((el) => el.ownerDocument.defaultView?.getComputedStyle(el).overflowY),
+    ).toBe("auto")
+    await page.getByRole("button", { name: "聊天" }).click()
+    expect(
+      await page
+        .getByTestId("conversation-list")
+        .evaluate((el) => el.ownerDocument.defaultView?.getComputedStyle(el).overflowY),
+    ).toBe("auto")
+    await page.getByRole("button", { name: "通知" }).click()
+    expect(
+      await page
+        .getByTestId("notification-aside")
+        .evaluate((el) => el.ownerDocument.defaultView?.getComputedStyle(el).overflowY),
+    ).toBe("auto")
   } finally {
     await page.close()
     resetWsHub()

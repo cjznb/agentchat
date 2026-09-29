@@ -1,13 +1,12 @@
 /**
- * Plan 3 T6 —— 组织树折叠纯函数单测（矩阵：human 过滤 / 摘要 / 徽标 / role 颜色 /
- * 状态点 / 手风琴 + localStorage 容错）。
+ * Plan 3 T6 —— 组织树纯函数单测（矩阵：human 过滤 / 在线优先稳定排序 / 摘要 / 徽标 /
+ * role 颜色 / 状态点 / 手风琴 + localStorage 容错 / 行结构无 ↳ 标注）。
  */
 import { describe, expect, it } from "vitest"
 import type { AgentStatus, RosterNode } from "../../../shared/contracts"
 import type { StorageLike } from "../accordion"
 import {
   EXPANDED_TREE_KEY,
-  flattenTree,
   foldTree,
   isContainerNode,
   isHuman,
@@ -16,6 +15,7 @@ import {
   saveExpandedTree,
   statusGlyph,
   statusLabel,
+  statusRank,
   summarize,
   toggleTreeRow,
   visibleChildren,
@@ -50,7 +50,7 @@ function node(
   }
 }
 
-// root1{ child1, child2(busy), child3(retired) } / root2{ child4 } / logi(logical)
+// root1{ child1, child2(busy), child3(retired) } / root2{ child4 } / logi(logical, offline)
 const roster: readonly RosterNode[] = [
   node("human", { kind: "logical", vendor: "human" }),
   node("root1", {
@@ -81,7 +81,7 @@ describe("foldTree", () => {
   })
 
   it("行徽标取传入的全子树聚合表（缺省 0）；逻辑节点行 logical 标记", () => {
-    // F1：树行徽标由调用方传入 aggregateUnread 结果（human 观察者全子树口径），不再取 node.unread。
+    // 树行徽标由调用方传入 aggregateUnread 结果（human 观察者全子树口径：自身 + 全部后代）。
     const unread = new Map<string, number>([["root1", 5], ["child1", 2]])
     const rows = foldTree(roster, unread)
     const root1 = rows.find((row) => row.node.id === "root1")
@@ -106,44 +106,72 @@ describe("foldTree", () => {
   })
 })
 
-describe("flattenTree（扁平 DFS 列表）", () => {
-  it("展平后父行在前、子行紧随，DFS 顺序", () => {
-    const flat = flattenTree(foldTree(roster))
-    expect(flat.map((row) => row.node.id)).toEqual([
-      "root1",
-      "child1",
-      "child2",
-      "child3",
-      "root2",
-      "child4",
-      "logi",
+describe("在线优先排序（顶层 + 各层子节点）", () => {
+  it("statusRank：online/busy 并列最优，offline 次之，retired 最后", () => {
+    expect(statusRank("online")).toBe(0)
+    expect(statusRank("busy")).toBe(0)
+    expect(statusRank("offline")).toBe(1)
+    expect(statusRank("retired")).toBe(2)
+  })
+
+  it("顶层根：离线根被排到全部在线根之后（即便注册更早）", () => {
+    const rows = foldTree([
+      node("offline-root", { status: "offline" }),
+      node("online-root"),
+      node("busy-root", { status: "busy" }),
+      node("retired-root", { status: "retired" }),
+    ])
+    expect(rows.map((row) => row.node.id)).toEqual([
+      "online-root",
+      "busy-root",
+      "offline-root",
+      "retired-root",
     ])
   })
 
-  it("每行携带 parentName（根为 null，非根为父节点名）", () => {
-    const flat = flattenTree(foldTree(roster))
-    const child1 = flat.find((row) => row.node.id === "child1")
-    expect(child1?.parentName).toBe("root1")
-    const root1 = flat.find((row) => row.node.id === "root1")
-    expect(root1?.parentName).toBe(null)
-    const logi = flat.find((row) => row.node.id === "logi")
-    expect(logi?.parentName).toBe(null)
+  it("同级内稳定：同权重保持 roster 原有相对顺序", () => {
+    const rows = foldTree([
+      node("online-a"),
+      node("offline-x", { status: "offline" }),
+      node("busy-b", { status: "busy" }),
+      node("online-c"),
+      node("offline-y", { status: "offline" }),
+    ])
+    expect(rows.map((row) => row.node.id)).toEqual([
+      "online-a",
+      "busy-b",
+      "online-c",
+      "offline-x",
+      "offline-y",
+    ])
   })
 
-  it("human 过滤仍在（human 不出现在展平结果）", () => {
-    const flat = flattenTree(foldTree(roster))
-    expect(flat.some((row) => row.node.id === "human")).toBe(false)
+  it("子节点同样在线优先稳定（离线子级从队首移到 busy 之后、退役之前）", () => {
+    const root = node("r", {
+      children: [
+        node("offline-child", { status: "offline" }),
+        node("online-child"),
+        node("busy-child", { status: "busy" }),
+        node("retired-child", { status: "retired" }),
+      ],
+    })
+    expect(foldTree([root])[0]?.children.map((row) => row.node.id)).toEqual([
+      "online-child",
+      "busy-child",
+      "offline-child",
+      "retired-child",
+    ])
   })
+})
 
-  it("展平行不携带 depth/缩进层级字段（UI 单层无缩进）", () => {
-    const flat = flattenTree(foldTree(roster))
-    for (const row of flat) {
-      expect(row).not.toHaveProperty("depth")
-      expect(row.node.id).toBeTypeOf("string")
-    }
-    // 来自父节点的标注可通过 parentName 推导 `↳ <父节点>`。
-    const child2 = flat.find((row) => row.node.id === "child2")
-    expect(child2?.parentName).toBe("root1")
+describe("TreeRow 行结构（无 ↳ 来源标注）", () => {
+  it("行不含 parentName 字段；归属由嵌套 children 表达", () => {
+    const [root1] = foldTree(roster).filter((row) => row.node.id === "root1")
+    expect(root1).toBeDefined()
+    expect(root1).not.toHaveProperty("parentName")
+    expect(root1?.children.map((row) => row.node.id)).toContain("child1")
+    // 子行不再携带父名字段（缩进表达归属）。
+    expect(root1?.children[0]).not.toHaveProperty("parentName")
   })
 })
 
@@ -163,6 +191,19 @@ describe("summarize（N子·M忙）", () => {
       children: [node("a", { status: "busy" }), node("h", { vendor: "human", status: "busy" })],
     })
     expect(summarize(mixed)).toEqual({ count: 1, busy: 1, text: "1子·1忙" })
+  })
+})
+
+describe("折叠父行未读合计（复用全子树聚合口径）", () => {
+  it("父行徽标 = aggregateUnread 全子树值（含全部子级未读，≥ 任一子行）", () => {
+    // root1 子级各有未读 2 / 3；全子树聚合（子级之和 + 自身 1）= 6 落在父行。
+    const unread = new Map<string, number>([["root1", 6], ["child1", 2], ["child2", 3]])
+    const root1 = foldTree(roster, unread).find((row) => row.node.id === "root1")
+    if (root1 === undefined) throw new Error("root1 missing")
+    const childSum = root1.children.reduce((sum, child) => sum + child.unread, 0)
+    expect(root1.unread).toBe(6)
+    expect(root1.unread).toBeGreaterThanOrEqual(childSum)
+    expect(childSum).toBe(5)
   })
 })
 
@@ -227,7 +268,7 @@ describe("组织树展开态（手风琴 + localStorage）", () => {
     }
   }
 
-  it("手风琴：展开新节点只保留它，再点已展开的节点则收起", () => {
+  it("手风琴状态机：展开新节点只保留它，再点已展开的节点则收起", () => {
     expect(toggleTreeRow([], "root1")).toEqual(["root1"])
     expect(toggleTreeRow(["root1"], "root2")).toEqual(["root2"])
     expect(toggleTreeRow(["root1"], "root1")).toEqual([])
