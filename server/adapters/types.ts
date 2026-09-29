@@ -76,15 +76,23 @@ export function pullAdapter(id: string): VendorAdapter {
 }
 
 /**
+ * 幂等注册某厂商的 pull 占位：**已注册同 id（push 或 pull）则不覆盖**。
+ * 用于 `/internal/wake` 首见某厂商时自动识别为 pull 适配器——令 env / 配置文件成为可选
+ * （首次收到该厂商取件请求即登记，dispatcher 随即把其 job 从派发窗口排除，不再空转）。
+ */
+export function ensurePullAdapter(vendor: string): void {
+  if (registry.has(vendor)) return
+  registry.set(vendor, pullAdapter(vendor))
+}
+
+/**
  * 按配置把每个 vendor 注册为 pull 占位（可用性登记）。
  * 已注册同 id 的适配器不覆盖——测试可先注册 push fake 抢占。
  */
 export function registerConfiguredAdapters(config: {
   readonly adapters: readonly string[]
 }): void {
-  for (const id of config.adapters) {
-    if (!registry.has(id)) registry.set(id, pullAdapter(id))
-  }
+  for (const id of config.adapters) ensurePullAdapter(id)
 }
 
 export function clearAdapters(): void {

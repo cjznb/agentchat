@@ -131,6 +131,49 @@ describe("pull adapter seam", () => {
   })
 })
 
+describe("首次 /internal/wake 自动识别 pull 厂商（env/配置成为可选）", () => {
+  it("registers an unconfigured vendor as a pull adapter when it polls wake", async () => {
+    const app = createApp(db, { hubTokenPath: join(home, "hub_token"), adapters: [] })
+    expect(adapterFor("opencode")).toBeUndefined()
+
+    const sender = makeAgent("auto-sender")
+    const node = makeAgent("auto-node")
+    const { message } = sendMessage(db, { from: sender.id, to: node.id, body: "自取" })
+
+    const res = await post(app, "/internal/wake", { agentId: node.id })
+    expect(res.status).toBe(200)
+    expect(adapterFor("opencode")?.mode).toBe("pull")
+    expect(expectJob(message.seq, node.id).state).toBe("sending")
+  })
+
+  it("stops deferring the vendor's due jobs after auto registration", async () => {
+    const app = createApp(db, { hubTokenPath: join(home, "hub_token"), adapters: [] })
+    const sender = makeAgent("auto2-sender")
+    const node = makeAgent("auto2-node")
+    const first = sendMessage(db, { from: sender.id, to: node.id, body: "第一条" })
+    await post(app, "/internal/wake", { agentId: node.id }) // 自动登记 pull 并认领第一条
+
+    // 登记后再来一条：dispatcher 不再把它当「无适配器」空转 defer
+    const second = sendMessage(db, { from: sender.id, to: node.id, body: "第二条" })
+    await dispatcher.tick(Date.now() + 5000)
+    expect(expectJob(second.message.seq, node.id)).toMatchObject({ state: "pending", attempts: 0 })
+    expect(expectJob(first.message.seq, node.id).state).toBe("sending")
+  })
+
+  it("never overwrites an already-registered push adapter", async () => {
+    const fake = new FakeAdapter()
+    registerAdapter(fake)
+    const app = createApp(db, { hubTokenPath: join(home, "hub_token"), adapters: [] })
+    const sender = makeAgent("auto3-sender")
+    const node = makeAgent("auto3-node")
+    sendMessage(db, { from: sender.id, to: node.id, body: "推送" })
+
+    await post(app, "/internal/wake", { agentId: node.id })
+    expect(adapterFor("opencode")).toBe(fake)
+    expect(adapterFor("opencode")?.mode).toBeUndefined()
+  })
+})
+
 describe("push adapter zero regression", () => {
   it("injects through a registered push fake (no mode) and accepts the job", async () => {
     const fake = new FakeAdapter({

@@ -23,7 +23,7 @@ import { dirname } from "node:path"
 import { Hono } from "hono"
 import { z } from "zod"
 import type { ReceiptStage } from "../../shared/contracts"
-import { adapterStateSchema, type AdapterState } from "../adapters/types"
+import { adapterFor, adapterStateSchema, ensurePullAdapter, type AdapterState } from "../adapters/types"
 import { canTransition, emitAgentTree, retire } from "../core/agents"
 import { receiptState } from "../core/messaging"
 import { publishReceipt } from "../core/publish"
@@ -208,6 +208,9 @@ export function internalRoutes(db?: Db, options?: InternalRoutesOptions): Hono {
       const database = resolveDb(db)
       const agent = getAgent(database, parsed.data.agentId)
       if (agent === undefined) return c.json({ ok: false, error: "agent_not_found" }, 404)
+      // 首次收到某厂商取件请求 → 自动登记 pull 占位（已注册的 push 适配器不被覆盖）。
+      // 令 env/配置文件成为可选：登记后 dispatcher 将其 job 排除出派发窗口，不再空转。
+      if (adapterFor(agent.vendor) === undefined) ensurePullAdapter(agent.vendor)
       const backlog = claimWakeBacklog(database, parsed.data)
       for (const conversationId of backlog.conversations) publishReceipt(database, conversationId)
       return c.json({ messages: backlog.messages, receipts: backlog.receipts })

@@ -37,7 +37,7 @@ MCP server 的官方 JSON 位置是 `~/.claude.json`、项目 `.mcp.json`、或 
 | `AGENTCHAT_URL` | 否 | `http://127.0.0.1:<AGENTCHAT_PORT 或 4646>` | Hub 地址；安装器用它推导 MCP `url` |
 | `AGENTCHAT_PORT` | 否 | `4646` | 仅用于推导默认 `AGENTCHAT_URL` |
 | `AGENTCHAT_HOOK_TIMEOUT_MS` | 否 | `3000` | hook HTTP 超时覆盖（仅测试用途；生产恒 3s） |
-| `AGENTCHAT_ADAPTERS` | **建议设** | — | **Hub 侧**环境变量（不是 hook 环境变量）：启动 Hub 时设 `claude-code`，把它登记为 pull 厂商。不设的历史后果是发送时不建 wake_job、界面一直「排队中」；本版已改为发送即建 job，但建议显式登记以免 dispatcher 对每条消息做无谓退避 |
+| `AGENTCHAT_ADAPTERS` | 否 | `<home>/config.json` 或空 | **Hub 侧**变量（不是 hook 变量）：厂商登记**覆盖**（逗号分隔）。缺省读 `<AGENTCHAT_HOME>/config.json` 的 `adapters`；两者都空时 Hub 会在**首次**收到 `claude-code` 的 `POST /internal/wake` 时自动识别为 pull 适配器。安装器已自动写入该文件，**通常无需手动设置** |
 
 hook 由 Claude Code 进程派生，故 `HUB_TOKEN` 需出现在**启动 `claude` 的环境**里（`export HUB_TOKEN=…`）。
 
@@ -62,18 +62,23 @@ hook 由 Claude Code 进程派生，故 `HUB_TOKEN` 需出现在**启动 `claude
 在交互会话里要用户逐项目批准）；需要团队共享/版本控制时改用 `--mcp-config <repo>/.mcp.json`。
 `CLAUDE_CONFIG_DIR` 与 settings 的解析优先级一致，避免「MCP 写到别处、Claude Code 读不到」的静默不可见。
 
-写入策略：改动前备份 `<file>.bak`，再以**临时文件 + rename 原子替换**；`--dry-run` 只打印两处目标、不落盘。
+写入策略：改动前备份 `<file>.bak`，再以**临时文件 + rename 原子替换**；`--dry-run` 只打印三处目标（hooks / MCP / Hub 适配器）、不落盘。
 合并语义：`hooks` 下**用户既有条目一律保留**，只追加本适配器条目并按**规范化绝对路径**去重（幂等）；
 `mcpServers` 只增/改 `agentchat` 键。**MCP 条目所有权守卫**：写入前对既有 `mcpServers.agentchat` 做结构比对——
 仅当结构与本安装器将写入的一致才覆盖；结构不同则**拒绝并给非 0 退出码**（除非 `--force`）。`--uninstall` 仅当结构
 匹配本安装器产物时才精确移除该键（否则保留并提示）。**同一文件拒绝**按**规范化真实路径**（`realpath` + win32/darwin
 大小写折叠）判定，大小写变体/别名无法绕过。
 
+**顺手登记 Hub 厂商（免手动 env）**：同一次安装还会把 `claude-code` 合并进
+**`<AGENTCHAT_HOME>/config.json`**（缺省 `~/.agentchat/config.json`）的 `adapters` 数组——
+文件不存在则创建、保留其它键、**幂等**；`--uninstall` 只移除 `claude-code`（保留文件与其它键）；
+`--dry-run` 只打印不落盘。Hub 侧优先级为 **env `AGENTCHAT_ADAPTERS` > 该文件 > 空**，
+故**无需再手动 `$env:AGENTCHAT_ADAPTERS`**。Hub **只读**该文件（绝不创建），仅安装器/CLI 写。
+
 ### PowerShell（Windows）
 
 ```powershell
-# 1) 运行 Hub：登记 claude-code 为 pull 厂商，并写出 token（另开终端；可保持运行）
-$env:AGENTCHAT_ADAPTERS = "claude-code"
+# 1) 运行 Hub，写出 token（另开终端；可保持运行）——厂商登记由安装器自动写入 config.json，无需手动设 env
 npm start
 
 # 2) 导出环境变量（当前终端）
@@ -81,7 +86,7 @@ $env:AGENTCHAT_HOME = "$HOME\.agentchat"
 $env:HUB_TOKEN = (Get-Content "$HOME\.agentchat\hub_token" -Raw).Trim()
 $env:AGENTCHAT_URL = "http://127.0.0.1:4646"   # 可选，默认即此
 
-# 3) 预演（打印两处将写入内容），确认无误后去掉 --dry-run
+# 3) 预演（打印三处将写入内容：hooks / MCP / Hub 适配器），确认无误后去掉 --dry-run
 node adapters/claude-code/install.mjs --config "$HOME\.claude\settings.json" --dry-run
 node adapters/claude-code/install.mjs --config "$HOME\.claude\settings.json"
 # 项目级 MCP 落 .mcp.json（可选）：加 --mcp-config "$PWD\.mcp.json"
@@ -90,7 +95,8 @@ node adapters/claude-code/install.mjs --config "$HOME\.claude\settings.json"
 ### POSIX（macOS / Linux）
 
 ```bash
-# 启动 Hub（另开终端，登记 claude-code 为 pull 厂商）：AGENTCHAT_ADAPTERS="claude-code" npm start
+# 启动 Hub（另开终端）——厂商登记由安装器自动写入 config.json
+npm start
 
 export AGENTCHAT_HOME="$HOME/.agentchat"
 export HUB_TOKEN="$(cat "$AGENTCHAT_HOME/hub_token")"

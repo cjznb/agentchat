@@ -24,7 +24,7 @@
 | `AGENTCHAT_MCP_TIMEOUT_MS` | 否 | `30000` | MCP 桥单次上游请求超时（钳制到 `[100, 600000]`，非法值回落默认） |
 | `AGENTCHAT_POLL_MS` | 否 | `10000` | **插件**空闲轮询间隔（1s–1h 钳制，非法值回落 10s）；见 `adapters/opencode/README.md` |
 | `AGENTCHAT_LOG` | 否 | （落文件） | 诊断日志去向：缺省写 `<AGENTCHAT_HOME>/logs/opencode-adapter.log`；设为 `console` 时改打 stderr（**调试回退**，默认关闭） |
-| `AGENTCHAT_ADAPTERS` | **建议设** | — | **Hub 侧**环境变量（非插件环境变量）：登记 `opencode` 为 pull 厂商。启动 Hub 时设 `opencode`；未设见下方说明 |
+| `AGENTCHAT_ADAPTERS` | 否 | `<home>/config.json` 或空 | **Hub 侧**变量（非插件变量）：厂商登记**覆盖**（逗号分隔）。缺省读 `<AGENTCHAT_HOME>/config.json` 的 `adapters`；两者都空时 Hub 会在**首次**收到该厂商 `POST /internal/wake` 时自动识别为 pull 适配器。安装器已自动写入该文件，**通常无需手动设置** |
 
 **token 解析顺序（插件与 MCP 桥一致）**：`env.HUB_TOKEN`（非空优先）→ `<AGENTCHAT_HOME>/hub_token`（trim）
 → 空。安装器不写任何 token，**安装步骤无需 `export HUB_TOKEN`**；两处都拿不到时插件会打明确 warn，调用按
@@ -111,6 +111,12 @@
 幂等：重复安装内容等价；`--uninstall` 只精确移除本适配器条目，保留用户其它键（含注释安全的 JSONC 解析，
 但改写后的活动文件为标准 JSON——原文可在 `.bak` 找回）。
 
+**顺手登记 Hub 厂商（免手动 env）**：同一次安装还会把 `opencode` 合并进
+**`<AGENTCHAT_HOME>/config.json`**（缺省 `~/.agentchat/config.json`）的 `adapters` 数组——
+文件不存在则创建、保留其它键、**幂等**；`--uninstall` 只移除 `opencode`（保留文件与其它键）；
+`--dry-run` 只打印不落盘。Hub 侧优先级为 **env `AGENTCHAT_ADAPTERS` > 该文件 > 空**，
+故**无需再手动 `$env:AGENTCHAT_ADAPTERS`**。Hub **只读**该文件（绝不创建），仅安装器/CLI 写。
+
 **MCP 条目所有权守卫**：写入前对既有 `mcp.agentchat` 做结构比对：
 
 - 结构与本安装器将写入的一致 → 幂等无改动；
@@ -121,11 +127,10 @@
 ### PowerShell（Windows）
 
 ```powershell
-# 1) 运行 Hub，使其写出 token，并把 opencode 登记为 pull 厂商
-$env:AGENTCHAT_ADAPTERS = "opencode"
+# 1) 运行 Hub，使其写出 token
 npm start   # 另开一个终端；启动后 Ctrl+C 或保持运行
 
-# 2) 安装（安装器不需要 HUB_TOKEN；--dry-run 先预演）
+# 2) 安装（安装器不需要 HUB_TOKEN；会自动登记 opencode 进 %USERPROFILE%\.agentchat\config.json；--dry-run 先预演）
 node adapters/opencode/install.mjs --config "$HOME\.config\opencode\opencode.jsonc" --dry-run
 node adapters/opencode/install.mjs --config "$HOME\.config\opencode\opencode.jsonc"
 ```
@@ -133,18 +138,18 @@ node adapters/opencode/install.mjs --config "$HOME\.config\opencode\opencode.jso
 ### POSIX（macOS / Linux）
 
 ```bash
-export AGENTCHAT_ADAPTERS="opencode"
-npm start   # 另开终端；或 `npm start` 前在同一 shell 里 export
+npm start   # 另开终端
 node adapters/opencode/install.mjs --config ~/.config/opencode/opencode.jsonc --dry-run
 node adapters/opencode/install.mjs --config ~/.config/opencode/opencode.jsonc
 ```
 
-> **为什么要设 `AGENTCHAT_ADAPTERS`**：它在 **Hub 进程**里生效，把 `opencode` 登记为一个
-> **pull 厂商**（`server/adapters/types.ts` 的占位注册）。**不设的历史后果**：Hub 不认该厂商 →
-> 发送时**不建 wake_job**，回执永远是 `queued`、界面一直显示「排队中」——这正是本版修复的真实缺陷之一。
-> 本版（Plan 5 修复 2）已改为**发送即建 job**（不再依赖厂商登记），pull 适配器在空闲轮询时认领，
-> 故即使不设也能投递；但仍**建议显式登记**：dispatcher 因此知道存在 pull 通道、不再对每条消息做无谓退避重投。
-> 该变量是 **Hub 侧**变量（不是插件/桥的环境变量），设一次、随 Hub 进程生命周期生效。
+> **无需再手动设 `AGENTCHAT_ADAPTERS`**：安装器会把 `opencode` 写进 `<AGENTCHAT_HOME>/config.json`
+> 的 `adapters`（Hub 侧读取，优先级 **env > 文件 > 空**）。厂商登记的作用是让 dispatcher 知道存在
+> pull 通道、**不再对该厂商的到期消息做无谓退避重试**。**发送时已一律建 wake_job**（Plan 5 修复 2，
+> 不依赖登记），pull 适配器在空闲轮询时认领，故**完全未登记也能投递**——此时 dispatcher 只是对到期
+> 消息做**有界重试（每 ≤30s 一次，消息不丢）**；且 Hub 在**首次**收到该厂商 `POST /internal/wake`
+> 时会**自动识别为 pull 适配器**，此后不再空转。（旧文案「不登记就不会投递」是错的。）
+> 该变量仍是 **Hub 侧**变量（不是插件/桥的环境变量），若要用 env 覆盖，设一次随 Hub 进程生效。
 
 ### 默认查找 / 卸载
 
@@ -261,7 +266,7 @@ Get-Content -Wait "$HOME\.agentchat\logs\opencode-adapter.log"  # PowerShell（A
 | MCP 会话 `session_not_found` | 30min TTL 淘汰 / Hub 重启清空会话表 | **桥会自动重新 initialize 并重试一次**；一般无需人工干预 |
 | MCP 命令找不到 / 启动失败 | 换过 node 或升级后旧 `command[0]` 失效 | **重跑安装器**刷新 node 绝对路径 |
 | 插件未注册 / 节点不在 `GET /api/roster` | 插件未加载 / 导出形态不符 / token 未解析到 | 确认 `plugin` 含本目录且默认导出 `{id,server}`；确认 `AGENTCHAT_HOME` 与 Hub 一致（插件自动读 `<home>/hub_token`，也可用 `HUB_TOKEN` 覆盖）；查日志文件 `<AGENTCHAT_HOME>/logs/opencode-adapter.log`（`[plugin]` 行；适配器不向宿主终端输出，可 `AGENTCHAT_LOG=console` 临时回退） |
-| 消息一直「排队中」（agent 已 idle 很久） | 旧版只在 idle **事件**拉取：消息在「已经 idle 之后」到达时无触发者；或 Hub 未登记该厂商（无 job） | 本版已修：idle 期间**周期轮询**补拉（`AGENTCHAT_POLL_MS`，默认 10s）；并建议 Hub 启动时 `AGENTCHAT_ADAPTERS=opencode`。核对 `<AGENTCHAT_HOME>/logs/opencode-adapter.log` 中 `[plugin]` 的 `wake failed`/`idle heartbeat failed` |
+| 消息一直「排队中」（agent 已 idle 很久） | 旧版只在 idle **事件**拉取：消息在「已经 idle 之后」到达时无触发者；或插件/hub 版本不一致 | 本版已修：idle 期间**周期轮询**补拉（`AGENTCHAT_POLL_MS`，默认 10s）。厂商登记已**无需手动**（安装器写 `<home>/config.json`；未写时 Hub 首见 `POST /internal/wake` 也会自动识别）。核对 `<AGENTCHAT_HOME>/logs/opencode-adapter.log` 中 `[plugin]` 的 `wake failed`/`idle heartbeat failed` |
 | 空闲未被唤醒（idle 未触发） | 宿主未发 `session.idle`/`session.status`（版本差异） | 核对 `@opencode-ai/plugin` 版本（实测 1.18.32）；`session.idle` 是主要触发，`session.status` 仅补 busy 起点；即便两者都缺，空闲轮询仍会补拉 |
 | 回信似乎「开了新回合」 | 注入走 `client.session.promptAsync`，会开启新回合（符合「唤醒即续跑」语义） | 预期行为：busy 期间到达的消息会在**下一次 idle** 才被认领注入 |
 | 会话节点在 roster 中长期残留 | 退役依赖宿主发 `session.deleted` 事件 | 会话删除时插件调 `/internal/retire`（幂等；`404` 视为已退役）；**会话被归档**（`time.archived`）时插件同样退役该节点并停其轮询；若宿主版本两者都不发则节点留待下一次清理（已知限制，见 `adapters/opencode/README.md` 健壮性） |

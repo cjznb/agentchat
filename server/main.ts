@@ -11,7 +11,7 @@
  */
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
-import { registerConfiguredAdapters } from "./adapters/types"
+import { adapterFor, registerConfiguredAdapters } from "./adapters/types"
 import { config } from "./config"
 import { Dispatcher } from "./core/dispatcher"
 import { openDb, type Db } from "./db"
@@ -38,6 +38,23 @@ export interface BootstrapOptions {
   readonly log?: (message: string) => void
 }
 
+/**
+ * 是否存在「合格但收件方 vendor 无适配器」的到期 pending job（启动警告判定）：
+ * 合格 = runtime 且 `status='online'`（busy/offline 的退避由状态自身解释，不算空转）。
+ * 精确 SQL（不受派发窗口 LIMIT 影响）；逐 vendor 用 `adapterFor` 判定是否已有适配器。
+ */
+function hasUnadapteredPendingJob(db: Db, now: number): boolean {
+  const rows = db
+    .prepare<[number], { vendor: string }>(
+      `SELECT DISTINCT a.vendor AS vendor
+         FROM wake_jobs j JOIN agents a ON a.id = j.agent_id
+        WHERE j.state = 'pending' AND j.retry_at <= ?
+          AND a.kind = 'runtime' AND a.status = 'online'`,
+    )
+    .all(now)
+  return rows.some((row) => adapterFor(row.vendor) === undefined)
+}
+
 export interface HubHandle {
   /** 实际监听的基础地址（含真实端口）。 */
   readonly url: string
@@ -54,18 +71,20 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<HubHand
   const ownsDb = options.db === undefined
   const db = options.db ?? openDb(join(home, "agentchat.db"))
   const adapters = options.adapters ?? config.adapters
-  // 未登记任何厂商适配器时给一条明确启动警告（不阻塞、不改退出码）：用户会看到消息
-  // 一直停在「排队中」却毫无提示——这是最易踩的沉默配置。
-  if (adapters.length === 0) {
+  // 先登记可用性，再判定警告，最后拉起 dispatcher（避免首轮把 pull 目标误当无通道/推送处理）。
+  registerConfiguredAdapters({ adapters })
+  // 仅当「未配置任何适配器」**且**库中确实存在「收件方 vendor 无适配器」的到期待投递 job 时提示：
+  // 此时 dispatcher 会对其做**有界退避重试**（每 ≤30s 一次），并非丢消息；首次收到该厂商
+  // `POST /internal/wake` 后会自动识别为 pull 适配器，届时不再空转（旧文案「不会被投递」是错的）。
+  if (adapters.length === 0 && hasUnadapteredPendingJob(db, Date.now())) {
     const log = options.log ?? ((message: string): void => console.warn(message))
     log(
-      "[agentchat] AGENTCHAT_ADAPTERS 未设置（适配器列表为空）：消息会一直停在「排队中」且不会被投递。" +
-        ' 设置后重启 Hub —— Windows：`$env:AGENTCHAT_ADAPTERS = "opencode,claude-code"; npm start`；' +
-        "POSIX：`AGENTCHAT_ADAPTERS=opencode,claude-code npm start`。",
+      "[agentchat] 未配置任何适配器（adapters 为空），且库中存在收件方厂商无适配器的到期待投递消息：" +
+        "dispatcher 会对这类任务做有界退避重试（每 ≤30s 一次，消息不丢）。" +
+        "该厂商首次 `POST /internal/wake` 后会被自动识别为 pull 适配器，届时不再重试空转；" +
+        `也可在 ${join(home, "config.json")} 的 adapters 字段或 env AGENTCHAT_ADAPTERS 中声明（重启生效）。`,
     )
   }
-  // 先登记可用性，再拉起 dispatcher（避免首轮把 pull 目标误当无通道/推送处理）。
-  registerConfiguredAdapters({ adapters })
   const dispatcher =
     options.startDispatcher === false
       ? undefined

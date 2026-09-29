@@ -8,7 +8,10 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { openDb } from "../../server/db"
 import { bootstrap, type HubHandle } from "../../server/main"
+import { insertAgent } from "../../server/store/agents"
+import { sendMessage } from "../../server/core/messaging"
 
 describe("bootstrap 生产入口（C1）", () => {
   let home = ""
@@ -51,19 +54,37 @@ describe("bootstrap 生产入口（C1）", () => {
     expect(res.status).toBe(200)
   })
 
-  it("warns once when no adapters are configured, and stays silent when some are", async () => {
+  it("warns only when adapters are empty AND an eligible job has no adapter", async () => {
     const warnings: string[] = []
     const collect = (message: string): void => void warnings.push(message)
+    const warns = (): string[] => warnings.filter((message) => message.includes("有界退避重试"))
 
+    // ① 无适配器、无合格 job → 不输出警告
     home = mkdtempSync(join(tmpdir(), "agentchat-bootstrap-"))
     ;(await bootstrap({ port: 0, home, startDispatcher: false, log: collect })).close()
+    expect(warns()).toHaveLength(0)
 
-    const afterEmpty = warnings.filter((message) => message.includes("AGENTCHAT_ADAPTERS"))
-    expect(afterEmpty).toHaveLength(1)
-    expect(afterEmpty[0]).toContain("排队中")
-    expect(afterEmpty[0]).toContain("$env:AGENTCHAT_ADAPTERS") // Windows 示例
-    expect(afterEmpty[0]).toContain("AGENTCHAT_ADAPTERS=opencode") // POSIX 示例
+    // ② 无适配器 + 存在「收件方 vendor 无适配器」的到期 pending job → 精确警告一次
+    const withJob = mkdtempSync(join(tmpdir(), "agentchat-bootstrap-"))
+    extras.push(withJob)
+    const db = openDb(join(withJob, "agentchat.db"))
+    const sender = insertAgent(db, { name: "warn-sender", kind: "runtime", status: "online", vendor: "opencode" })
+    const node = insertAgent(db, { name: "warn-node", kind: "runtime", status: "online", vendor: "opencode" })
+    sendMessage(db, { from: sender.id, to: node.id, body: "待投递" })
+    db.prepare("UPDATE wake_jobs SET retry_at = 0").run() // 使 job 立即到期
+    await (
+      await bootstrap({ port: 0, home: withJob, db, startDispatcher: false, adapters: [], log: collect })
+    ).close()
+    db.close()
 
+    const emitted = warns()
+    expect(emitted).toHaveLength(1)
+    expect(emitted[0]).toContain("AGENTCHAT_ADAPTERS") // 提示可声明处
+    expect(emitted[0]).toContain("config.json")
+    expect(emitted[0]).not.toContain("不会被投递") // 旧文案的错误后果必须消失
+    expect(emitted[0]).not.toContain("排队中")
+
+    // ③ 有适配器 → 不新增警告
     const withAdapters = mkdtempSync(join(tmpdir(), "agentchat-bootstrap-"))
     extras.push(withAdapters)
     await (
@@ -75,7 +96,6 @@ describe("bootstrap 生产入口（C1）", () => {
         log: collect,
       })
     ).close()
-
-    expect(warnings.filter((message) => message.includes("AGENTCHAT_ADAPTERS"))).toHaveLength(1)
+    expect(warns()).toHaveLength(1)
   })
 })

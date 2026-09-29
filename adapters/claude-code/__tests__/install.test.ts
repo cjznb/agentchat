@@ -68,11 +68,13 @@ function seedMcp(path: string): void {
 }
 
 function run(args: readonly string[], env: Record<string, string> = {}): SpawnSyncReturns<string> {
-  // 显式清空可能泄漏的宿主变量（否则 hubUrl / 目标路径会与 snippet、断言不一致）。
+  // 显式清空可能泄漏的宿主变量（否则 hubUrl / 目标路径会与 snippet、断言不一致）；
+  // AGENTCHAT_HOME 默认指向临时 home，隔离安装器写入的 `<home>/config.json`。
   return spawnSync(process.execPath, [INSTALL, ...args], {
     encoding: "utf8",
     env: {
       ...process.env,
+      AGENTCHAT_HOME: join(tempDir(), "home"),
       AGENTCHAT_URL: "",
       AGENTCHAT_PORT: "",
       CLAUDE_CONFIG_DIR: "",
@@ -464,5 +466,72 @@ describe("snippet 一致性", () => {
     expect(JSON.stringify(mcpEntry(readConfig(mcpFile), "agentchat"))).toBe(
       JSON.stringify(mcpEntry(mcpSnippet, "agentchat")),
     )
+  })
+})
+
+// ── Hub config.json 登记（免手动设 AGENTCHAT_ADAPTERS）──────────────
+
+describe("Hub config.json 登记", () => {
+  function agentchatConfig(home: string): Record<string, unknown> {
+    return readConfig(join(home, "config.json"))
+  }
+
+  it("writes the vendor into adapters, preserving other keys, and is idempotent", () => {
+    const dir = tempDir()
+    const cfg = join(dir, "settings.json")
+    const mcpFile = join(dir, "claude.json")
+    seedSettings(cfg)
+    seedMcp(mcpFile)
+    const home = join(tempDir(), "home")
+    mkdirSync(home, { recursive: true })
+    writeFileSync(
+      join(home, "config.json"),
+      `${JSON.stringify({ port: 5555, adapters: ["opencode"] }, null, 2)}\n`,
+    )
+
+    expect(run(["--config", cfg, "--mcp-config", mcpFile], { AGENTCHAT_HOME: home }).status).toBe(0)
+    const first = readFileSync(join(home, "config.json"), "utf8")
+    const parsed = agentchatConfig(home)
+    expect(parsed["adapters"]).toEqual(["opencode", "claude-code"])
+    expect(parsed["port"]).toBe(5555)
+
+    expect(run(["--config", cfg, "--mcp-config", mcpFile], { AGENTCHAT_HOME: home }).status).toBe(0)
+    expect(readFileSync(join(home, "config.json"), "utf8")).toBe(first) // 幂等
+  })
+
+  it("--uninstall removes only this vendor, keeping the file and other keys", () => {
+    const dir = tempDir()
+    const cfg = join(dir, "settings.json")
+    const mcpFile = join(dir, "claude.json")
+    seedSettings(cfg)
+    seedMcp(mcpFile)
+    const home = join(tempDir(), "home")
+    mkdirSync(home, { recursive: true })
+    writeFileSync(
+      join(home, "config.json"),
+      `${JSON.stringify({ port: 5555, adapters: ["opencode", "claude-code"] }, null, 2)}\n`,
+    )
+
+    expect(run(["--config", cfg, "--mcp-config", mcpFile, "--uninstall"], { AGENTCHAT_HOME: home }).status).toBe(0)
+    const parsed = agentchatConfig(home)
+    expect(parsed["adapters"]).toEqual(["opencode"])
+    expect(parsed["port"]).toBe(5555)
+    expect(existsSync(join(home, "config.json"))).toBe(true)
+  })
+
+  it("--dry-run prints the config target without writing it", () => {
+    const dir = tempDir()
+    const cfg = join(dir, "settings.json")
+    const mcpFile = join(dir, "claude.json")
+    seedSettings(cfg)
+    seedMcp(mcpFile)
+    const home = join(tempDir(), "home")
+
+    const result = run(["--config", cfg, "--mcp-config", mcpFile, "--dry-run"], { AGENTCHAT_HOME: home })
+    expect(result.status).toBe(0)
+    expect(result.stdout ?? "").toContain("Hub 适配器")
+    expect(result.stdout ?? "").toContain("claude-code")
+    expect(existsSync(join(home, "config.json"))).toBe(false)
+    expect(existsSync(`${cfg}.bak`)).toBe(false)
   })
 })

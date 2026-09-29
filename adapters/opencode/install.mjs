@@ -24,8 +24,17 @@ import { homedir } from "node:os"
 import { basename, dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { parseConfig } from "./jsonc.mjs"
+import {
+  agentchatConfigPath,
+  applyVendor,
+  readAgentchatConfig,
+  serializeAgentchatConfig,
+  writeAgentchatConfig,
+} from "../agentchat-config.mjs"
 
 const MCP_KEY = "agentchat"
+/** 本厂商 id：写入 `<home>/config.json` 的 `adapters`（令用户免于手动设 env）。 */
+const VENDOR_ID = "opencode"
 const ADAPTER_DIR = dirname(fileURLToPath(import.meta.url))
 const BRIDGE_PATH = join(ADAPTER_DIR, "mcp-bridge.mjs")
 const LEGACY_AGENT_ID = /^\{file:.*agents\/opencode\.id\}$/
@@ -224,6 +233,7 @@ const HELP = [
   "  --config <path>   目标 OpenCode 配置（默认：$OPENCODE_CONFIG 或 ~/.config/opencode/opencode.jsonc|json）",
   "  --dry-run 只打印不落盘；--uninstall 精确移除本适配器条目；--help 显示本帮助",
   "  --force 覆盖结构不同的既有 mcp.agentchat 条目（默认拒绝；本适配器旧结构会自动迁移，无需此参数）",
+  "另外把 opencode 登记进 Hub 的 $AGENTCHAT_HOME/config.json（adapters 字段），免手动设 AGENTCHAT_ADAPTERS",
 ].join("\n") + "\n"
 
 function main() {
@@ -246,6 +256,11 @@ function main() {
     const outcome = args.uninstall
       ? uninstall(config, entries)
       : { ...install(config, entries, args.force), keptForeign: false }
+    // 顺手把本厂商登记进 Hub `<home>/config.json` 的 adapters（免手动设 env）。
+    const agentchatPath = agentchatConfigPath(env)
+    const agentchatConfig = readAgentchatConfig(agentchatPath)
+    const adaptersChanged = applyVendor(agentchatConfig, agentchatPath, VENDOR_ID, args.uninstall)
+    const changed = outcome.changed || adaptersChanged
     const text = `${JSON.stringify(config, null, 2)}\n`
     if (outcome.keptForeign) {
       console.error("[agentchat] 已保留结构不同的 mcp.agentchat 条目（非本适配器产物，未删除）")
@@ -253,26 +268,37 @@ function main() {
 
     if (args.dryRun) {
       process.stdout.write(text)
-      console.error(`[agentchat] --dry-run：未写入 ${configPath}（${outcome.changed ? "将有改动" : "无改动"}）`)
+      process.stdout.write(`# Hub 适配器 → ${agentchatPath}\n${serializeAgentchatConfig(agentchatConfig)}`)
+      console.error(`[agentchat] --dry-run：未写入（${changed ? "将有改动" : "无改动"}）`)
       return 0
     }
-    if (!outcome.changed) {
+    if (!changed) {
       console.log(`[agentchat] 目标配置已是最新（${action}无改动）：${configPath}`)
       return 0
     }
-    copyFileSync(configPath, `${configPath}.bak`)
-    const tmp = `${configPath}.tmp-${process.pid}`
-    writeFileSync(tmp, text)
-    renameSync(tmp, configPath)
+    if (outcome.changed) {
+      copyFileSync(configPath, `${configPath}.bak`)
+      const tmp = `${configPath}.tmp-${process.pid}`
+      writeFileSync(tmp, text)
+      renameSync(tmp, configPath)
+    }
+    if (adaptersChanged) writeAgentchatConfig(agentchatPath, agentchatConfig)
     if (outcome.migrated) {
       console.log(
         "[agentchat] 已从会砖的旧结构（remote + {file:…opencode.id} 身份头）迁移为本地 stdio 桥",
       )
     }
-    console.log(`[agentchat] ${action}完成：${configPath}`)
-    console.log(`[agentchat] 原文件已备份：${configPath}.bak`)
-    console.log(`[agentchat] 插件条目：${entries.pluginPath}`)
-    console.log(`[agentchat] MCP 条目：${MCP_KEY} → local ${entries.mcp.command[1]}`)
+    console.log(`[agentchat] ${action}完成`)
+    if (outcome.changed) {
+      console.log(`[agentchat] OpenCode 配置：${configPath}（备份：${configPath}.bak）`)
+      console.log(`[agentchat] 插件条目：${entries.pluginPath}`)
+      console.log(`[agentchat] MCP 条目：${MCP_KEY} → local ${entries.mcp.command[1]}`)
+    } else {
+      console.log(`[agentchat] OpenCode 配置已是最新：${configPath}`)
+    }
+    if (adaptersChanged) {
+      console.log(`[agentchat] Hub 适配器登记（${VENDOR_ID}）→ ${agentchatPath}（备份：${agentchatPath}.bak）`)
+    }
     return 0
   } catch (error) {
     console.error(`[agentchat] 错误：${error instanceof Error ? error.message : String(error)}`)

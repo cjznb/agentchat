@@ -37,8 +37,17 @@ import {
   resolveSettingsPath,
   serialize,
 } from "./install-io.mjs"
+import {
+  agentchatConfigPath,
+  applyVendor,
+  readAgentchatConfig,
+  serializeAgentchatConfig,
+  writeAgentchatConfig,
+} from "../agentchat-config.mjs"
 
 const MCP_KEY = "agentchat"
+/** 本厂商 id：写入 `<home>/config.json` 的 `adapters`（令用户免于手动设 env）。 */
+const VENDOR_ID = "claude-code"
 const ADAPTER_DIR = dirname(fileURLToPath(import.meta.url))
 const ADAPTER_POSIX = ADAPTER_DIR.split(sep).join("/")
 
@@ -219,6 +228,7 @@ const HELP =
     "  --mcp-config <path>  MCP 目标（默认：$CLAUDE_CONFIG_DIR/.claude.json 或 ~/.claude.json；项目级可用 <repo>/.mcp.json）",
     "  --dry-run 只打印不落盘；--uninstall 精确移除两处本适配器条目；--help 显示本帮助",
     "  --force 覆盖结构不同的既有 mcpServers.agentchat 条目（默认拒绝，以免破坏用户自有同名条目）",
+    "另外把 claude-code 登记进 Hub 的 $AGENTCHAT_HOME/config.json（adapters 字段），免手动设 AGENTCHAT_ADAPTERS",
   ].join("\n") + "\n"
 
 function main() {
@@ -255,6 +265,11 @@ function main() {
     if (mcpOutcome.keptForeign) {
       console.error("[agentchat] 已保留结构不同的 mcpServers.agentchat 条目（非本适配器产物，未删除）")
     }
+    // 顺手把本厂商登记进 Hub `<home>/config.json` 的 adapters（免手动设 env）。
+    const agentchatPath = agentchatConfigPath(env)
+    const agentchatConfig = readAgentchatConfig(agentchatPath)
+    const adaptersChanged = applyVendor(agentchatConfig, agentchatPath, VENDOR_ID, args.uninstall)
+    const changed = hooksChanged || mcpChanged || adaptersChanged
     const action = args.uninstall ? "卸载" : "安装"
 
     if (args.dryRun) {
@@ -262,18 +277,23 @@ function main() {
       if (!args.uninstall || existingMcp !== undefined) {
         process.stdout.write(`# MCP → ${mcpPath}\n${serialize(mcp)}`)
       }
-      console.error(`[agentchat] --dry-run：未写入（${hooksChanged || mcpChanged ? "将有改动" : "无改动"}）`)
+      process.stdout.write(`# Hub 适配器 → ${agentchatPath}\n${serializeAgentchatConfig(agentchatConfig)}`)
+      console.error(`[agentchat] --dry-run：未写入（${changed ? "将有改动" : "无改动"}）`)
       return 0
     }
-    if (!hooksChanged && !mcpChanged) {
+    if (!changed) {
       console.log(`[agentchat] 目标已是最新（${action}无改动）`)
       return 0
     }
     if (hooksChanged) commit(settingsPath, serialize(settings))
     if (mcpChanged) commit(mcpPath, serialize(mcp))
+    if (adaptersChanged) writeAgentchatConfig(agentchatPath, agentchatConfig)
     console.log(`[agentchat] ${action}完成`)
     console.log(`[agentchat] hooks → ${settingsPath}${hooksChanged ? `（备份：${settingsPath}.bak）` : "（无改动）"}`)
     console.log(`[agentchat] MCP   → ${mcpPath}${mcpChanged ? `（备份：${mcpPath}.bak）` : "（无改动）"}`)
+    if (adaptersChanged) {
+      console.log(`[agentchat] Hub 适配器登记（${VENDOR_ID}）→ ${agentchatPath}（备份：${agentchatPath}.bak）`)
+    }
     return 0
   } catch (error) {
     console.error(`[agentchat] 错误：${error instanceof Error ? error.message : String(error)}`)

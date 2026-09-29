@@ -44,10 +44,17 @@ dispatcher 不在 `createApp()`/`start()` 内部启动（测试反复调用会�
 ## 适配器
 
 把 OpenCode / Claude Code 接入 Hub —— 两者都是**进程外 pull 适配器**：Hub **不主动推送**，由适配器在 agent
-空闲时**主动拉取**待投递内容（agent 侧无长驻连接可被 Hub 推送）。Hub 侧登记的厂商列表由 `AGENTCHAT_ADAPTERS`
-控制（逗号分隔，**启动 Hub 时请显式登记**，如 `AGENTCHAT_ADAPTERS=opencode,claude-code npm start`；空/未设 = 不登记）。
-发送时 Hub 一律为合格收件方建 wake_job（不再依赖厂商登记），pull 适配器在认领时投递；
+空闲时**主动拉取**待投递内容（agent 侧无长驻连接可被 Hub 推送）。
+发送时 Hub 一律为合格收件方建 wake_job（不依赖厂商登记），pull 适配器在认领时投递；
 OpenCode 插件在空闲期间还会**周期轮询**（`AGENTCHAT_POLL_MS`，默认 10s）补拉，故「已经 idle 之后」到达的消息也能被投递。
+
+**厂商登记免手动配置**：厂商列表按 **env `AGENTCHAT_ADAPTERS` > `<AGENTCHAT_HOME>/config.json` 的
+`adapters` 字段 > 空** 解析。两个安装器安装时会把**本厂商 id 自动合并**进 `config.json`（幂等、保留其它键、
+`--uninstall` 精确移除），因此**无需再手动 `$env:AGENTCHAT_ADAPTERS`**。即便完全未登记，Hub 在**首次**收到
+某厂商的 `POST /internal/wake` 时会**自动识别为 pull 适配器**（此后 dispatcher 不再对该厂商的到期消息做退避）；
+未登记的真实代价只是 dispatcher 对到期消息做**有界重试（每 ≤30s 一次）**，消息不会丢失。
+`config.json` 其它可选键：`port`（env `AGENTCHAT_PORT` 覆盖）、`openBrowser`（env `AGENTCHAT_NO_OPEN` /
+`AGENTCHAT_OPEN` 覆盖）。
 
 一条命令安装（在**仓库根目录**执行；先 `npm start` 让 Hub 写出 `hub_token`。安装器不读 `HUB_TOKEN`；
 **OpenCode 适配器运行时无需手动 export** —— 插件与本地桥都自动读 `<AGENTCHAT_HOME>/hub_token`

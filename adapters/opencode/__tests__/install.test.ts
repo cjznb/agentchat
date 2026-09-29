@@ -5,7 +5,7 @@
  * ⑤ JSONC（含注释与尾逗号）可就地合并。
  */
 import { spawnSync, type SpawnSyncReturns } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -296,14 +296,86 @@ describe("install.mjs 幂等安装", () => {
     seedConfig(cfg)
 
     const env: Record<string, string> = {}
+    const home = tempDir()
     for (const [key, value] of Object.entries(process.env)) {
       if (value !== undefined && !key.startsWith("AGENTCHAT_") && key !== "HUB_TOKEN") env[key] = value
     }
+    // 隔离默认 home（`~` → 临时目录），避免安装器把 config.json 写到真实用户目录。
+    env.HOME = home
+    env.USERPROFILE = home
     const result = spawnSync(process.execPath, [INSTALL, "--config", cfg], { encoding: "utf8", env })
     expect(result.status).toBe(0)
     const agentchat = mcpEntry(readConfig(cfg), "agentchat")
     if (agentchat === undefined) throw new Error("mcp.agentchat missing")
     expect(agentchat["environment"]).toBeUndefined()
     expect(agentchat["command"]).toEqual([process.execPath, EXPECTED_BRIDGE])
+  })
+})
+
+// ── Hub config.json 登记（免手动设 AGENTCHAT_ADAPTERS）──────────────
+
+describe("Hub config.json 登记", () => {
+  function agentchatConfig(home: string): Record<string, unknown> {
+    return readConfig(join(home, "config.json"))
+  }
+
+  it("writes the vendor into adapters, preserving other keys, and is idempotent", () => {
+    const cfg = join(tempDir(), "opencode.json")
+    seedConfig(cfg)
+    const home = join(tempDir(), "home")
+    mkdirSync(home, { recursive: true })
+    writeFileSync(
+      join(home, "config.json"),
+      `${JSON.stringify({ port: 5555, adapters: ["other-vendor"], openBrowser: false }, null, 2)}\n`,
+    )
+
+    expect(run(["--config", cfg], { AGENTCHAT_HOME: home }).status).toBe(0)
+    const first = readFileSync(join(home, "config.json"), "utf8")
+    const parsed = agentchatConfig(home)
+    expect(parsed["adapters"]).toEqual(["other-vendor", "opencode"])
+    expect(parsed["port"]).toBe(5555)
+    expect(parsed["openBrowser"]).toBe(false)
+
+    expect(run(["--config", cfg], { AGENTCHAT_HOME: home }).status).toBe(0)
+    expect(readFileSync(join(home, "config.json"), "utf8")).toBe(first) // 幂等
+  })
+
+  it("creates the config file when it is missing", () => {
+    const cfg = join(tempDir(), "opencode.json")
+    seedConfig(cfg)
+    const home = join(tempDir(), "home")
+    expect(run(["--config", cfg], { AGENTCHAT_HOME: home }).status).toBe(0)
+    expect(existsSync(join(home, "config.json"))).toBe(true)
+    expect(agentchatConfig(home)["adapters"]).toEqual(["opencode"])
+  })
+
+  it("--uninstall removes only this vendor, keeping the file and other keys", () => {
+    const cfg = join(tempDir(), "opencode.json")
+    seedConfig(cfg)
+    const home = join(tempDir(), "home")
+    mkdirSync(home, { recursive: true })
+    writeFileSync(
+      join(home, "config.json"),
+      `${JSON.stringify({ port: 5555, adapters: ["opencode", "claude-code"] }, null, 2)}\n`,
+    )
+
+    expect(run(["--config", cfg, "--uninstall"], { AGENTCHAT_HOME: home }).status).toBe(0)
+    const parsed = agentchatConfig(home)
+    expect(parsed["adapters"]).toEqual(["claude-code"])
+    expect(parsed["port"]).toBe(5555)
+    expect(existsSync(join(home, "config.json"))).toBe(true)
+  })
+
+  it("--dry-run prints the config target without writing it", () => {
+    const cfg = join(tempDir(), "opencode.json")
+    seedConfig(cfg)
+    const home = join(tempDir(), "home")
+
+    const result = run(["--config", cfg, "--dry-run"], { AGENTCHAT_HOME: home })
+    expect(result.status).toBe(0)
+    expect(result.stdout ?? "").toContain("Hub 适配器")
+    expect(result.stdout ?? "").toContain("opencode")
+    expect(existsSync(join(home, "config.json"))).toBe(false)
+    expect(existsSync(`${cfg}.bak`)).toBe(false)
   })
 })
