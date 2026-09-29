@@ -88,7 +88,10 @@ function toolFailed(result: unknown): boolean {
 /** 解析 MCP `ask` 出参（`{ask, reply?}`）；调用失败即抛。 */
 function parseAsk(result: unknown) {
   if (toolFailed(result)) throw new Error(`ask failed: ${textOf(result)}`)
-  return MCP_TOOL_OUTPUTS.ask.parse(JSON.parse(textOf(result)))
+  const parsed = MCP_TOOL_OUTPUTS.ask.parse(JSON.parse(textOf(result)))
+  // 契约现为「DM 单卡 | 群 asks[]」判别联合（shared/contracts Task 2）；本助手只服务 DM 场景。
+  if (!("ask" in parsed)) throw new Error("expected single ask output, got group asks[]")
+  return parsed
 }
 
 function delay(ms: number): Promise<void> {

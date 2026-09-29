@@ -6,6 +6,7 @@
  * 供边界校验与 `z.infer` 复用（zod v4 语法）。
  */
 import { z } from "zod"
+import type { MentionsEcho } from "./mentions"
 
 // ── 锁定枚举（as const） ────────────────────────────────────────────
 
@@ -254,6 +255,11 @@ export type WsServerFrame = z.infer<typeof wsServerFrameSchema>
 export const mcpWaitSchema = z.object({
   until: waitUntilSchema.default("either"),
   timeoutMs: z.number().int().positive().default(285000),
+  /**
+   * 群 ask 等待范围（spec §3.4）：`all` = 全体回复才返回；`any` = 任一先回即返回。
+   * 可选且**不写 default**——群 ask 默认 `all` 由 Task 4 服务端生效，schema 层不设默认以免影响 send/shout 语义。
+   */
+  scope: z.enum(["all", "any"]).optional(),
 })
 export type McpWait = z.infer<typeof mcpWaitSchema>
 
@@ -274,6 +280,8 @@ const mcpRegisterInput = z.object({
 const mcpSendInput = z.object({
   to: z.string().min(1),
   body: z.string(),
+  /** 结构化提及（spec §3.1）：名字 / id / id 前 8 位 / `"*"`；解析见 `shared/mentions.ts`。 */
+  mentions: z.array(z.string()).optional(),
   wait: mcpWaitSchema.optional(),
   idempotencyKey: z.string().optional(),
 })
@@ -292,6 +300,8 @@ const mcpAckInput = z.object({
 const mcpRosterInput = z.object({
   filter: z.string().optional(),
   online_only: z.boolean().optional(),
+  /** 只返回该会话（群）的参与者（spec §4.4；shout 广播会话不接受）。 */
+  conversation: z.string().optional(),
 })
 
 const mcpConversationInput = z.object({
@@ -319,12 +329,14 @@ const mcpMessageStatusInput = z.object({
   ids: z.array(z.string().min(1)).min(1),
 })
 
-/** `ask` 入参（spec §9/§17：`to` = `'human'` 或目标 agent id；`wait?` 同 §6.2 阻塞语义）。 */
+/** `ask` 入参（spec §9/§17：`to` = `'human'` 或目标 agent id（群会话 id 见 spec §3.1）；`wait?` 同 §6.2 阻塞语义）。 */
 const mcpAskInput = z.object({
   to: z.string().min(1),
   question: z.string(),
   options: z.array(z.string()),
   allow_custom: z.boolean().optional(),
+  /** 结构化提及（spec §3.1）：`to` 为群会话 id 时必填（必填校验在 Task 4 服务端）。 */
+  mentions: z.array(z.string()).optional(),
   wait: mcpWaitSchema.optional(),
 })
 
@@ -397,10 +409,22 @@ const mcpApprovalOutput = z.object({
   decidedAt: z.number().int().nonnegative().optional(),
 })
 
+/**
+ * 提及回声线格式（Task 1 `shared/mentions.ts` 的 `MentionsEcho`）：
+ * `z.ZodType<MentionsEcho>` 注解使字段类型与 import 的类型在编译期对齐（防两处漂移）。
+ */
+const mentionsEchoSchema: z.ZodType<MentionsEcho> = z.object({
+  matched: z.array(z.object({ id: z.string(), name: z.string() })),
+  unmatched: z.array(z.string()),
+  scope: z.enum(["all", "explicit", "none"]),
+})
+
 const mcpSendOutput = z.object({
   message: mcpMessageOutput,
   receipts: z.array(mcpReceiptOutput),
   readReceipts: z.array(mcpReceiptOutput),
+  /** 提及回声（spec §3.3：宽容回显、不阻断发送）；Task 3 起产出 → 既有金样例无此字段，故 optional。 */
+  mentions: mentionsEchoSchema.optional(),
   reply: z
     .object({
       timedOut: z.boolean(),
@@ -426,6 +450,10 @@ const mcpGroupOutput = z.union([
         name: z.string().nullable(),
         created_by: z.string(),
         members: z.array(z.string()),
+        /** 群成员卡片（spec §4.4：`members` id 数组不变，本字段 additive 追加）。 */
+        member_cards: z
+          .array(z.object({ id: z.string(), name: z.string(), status: agentStatusSchema }))
+          .optional(),
       }),
     ),
   }),
@@ -450,18 +478,40 @@ const mcpAskOutput = z.object({
   decidedAt: z.number().int().nonnegative().optional(),
 })
 
-/** `ask` 答复视图：已决 `{choice|text, timedOut:false}`；超时 `{timedOut:true}`（spec §9）。 */
+/** `ask` 单卡答复视图（DM / `human`）：已决 `{choice|text, timedOut:false}`；超时 `{timedOut:true}`（spec §9）。 */
 const mcpAskReplyOutput = z.object({
   timedOut: z.boolean(),
   choice: z.string().optional(),
   text: z.string().optional(),
 })
 
-/** `ask` 出参：批示单 + 带 `wait` 时的答复视图。 */
-const mcpAskToolOutput = z.object({
+/** DM / `human` ask 出参（spec §3.3：形状**一字不变**，既有金样例零改动）。 */
+const mcpAskSingleOutput = z.object({
   ask: mcpAskOutput,
   reply: mcpAskReplyOutput.optional(),
 })
+
+/** 群 ask 答复视图（spec §3.3/§3.4）：`replies` = 已回（按 target 判别谁回的），`pending` = 未回名单。 */
+const mcpAskGroupReplyOutput = z.object({
+  timedOut: z.boolean(),
+  replies: z.array(
+    z.object({
+      target: z.string(),
+      choice: z.string().optional(),
+      text: z.string().optional(),
+    }),
+  ),
+  pending: z.array(z.string()),
+})
+
+/** 群 ask 出参（spec §3.3 D2：一目标一卡，靠 `asks` 字段与 DM 形态判别）。 */
+const mcpAskGroupOutput = z.object({
+  asks: z.array(mcpAskOutput),
+  reply: mcpAskGroupReplyOutput.optional(),
+})
+
+/** `ask` 出参：DM/human 单卡 `{ask, reply?}` | 群 `{asks, reply?}` 判别联合（导出名 `mcpAskToolOutput` 锁定不变）。 */
+const mcpAskToolOutput = z.union([mcpAskSingleOutput, mcpAskGroupOutput])
 
 /** 十二工具出参（键恰为 MCP_TOOLS；spec §9 返回列的 zod 化）。 */
 export const MCP_TOOL_OUTPUTS = {

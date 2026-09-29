@@ -356,6 +356,7 @@ describe("ask/respond_ask 端到端（DoD ⑤）", () => {
       const result = await pending
       expect(toolFailed(result)).toBe(false)
       const parsed = MCP_TOOL_OUTPUTS.ask.parse(JSON.parse(textOf(result)))
+      if (!("ask" in parsed)) throw new Error("expected DM ask output, got group asks[]")
       expect(parsed.ask.status).toBe("answered")
       expect(parsed.reply?.timedOut).toBe(false)
       expect(parsed.reply?.choice).toBe("yes")
@@ -387,6 +388,7 @@ describe("ask/respond_ask 端到端（DoD ⑤）", () => {
       const result = await pending
       expect(toolFailed(result)).toBe(false)
       const parsed = MCP_TOOL_OUTPUTS.ask.parse(JSON.parse(textOf(result)))
+      if (!("ask" in parsed)) throw new Error("expected DM ask output, got group asks[]")
       expect(parsed.reply?.timedOut).toBe(false)
       expect(parsed.reply?.text).toBe("custom")
     } finally {
