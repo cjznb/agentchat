@@ -23,22 +23,29 @@ import { start } from "../../server/index"
 import { resetWsHub } from "../../server/ws"
 import { seedBase } from "./seed"
 
-/** 可阻塞假适配器：`inject` 挂起至测试放行，令 `sending` 态可稳定观测。 */
+/**
+ * 可阻塞假适配器：`inject` 挂起至测试放行，令 `sending` 态可稳定观测。
+ * 放行语义：`settle()` 置 `released` 并 flush 已排队的 resolver；此后（含两阶段派发中
+ * 排在其后的 job 的）`inject` 一律立即 resolve —— 「放行注入 → delivered」对全部注入生效。
+ */
 class GatedAdapter implements VendorAdapter {
   readonly id = "opencode" as const
-  private release: ((result: AdapterInjectResult) => void) | undefined
+  private released: AdapterInjectResult | undefined
+  private resolvers: ((result: AdapterInjectResult) => void)[] = []
 
   start(): void {}
   reportState(_nodeId: string, _state: AdapterState): void {}
   inject(): Promise<AdapterInjectResult> {
+    if (this.released !== undefined) return Promise.resolve(this.released)
     return new Promise((resolve) => {
-      this.release = resolve
+      this.resolvers.push(resolve)
     })
   }
 
-  /** 测试放行注入（`delivered`/`refused`）。 */
+  /** 测试放行注入（`delivered`/`refused`）：解锁已排队的注入，其后注入立即完成。 */
   settle(result: AdapterInjectResult): void {
-    this.release?.(result)
+    this.released = result
+    for (const resolve of this.resolvers.splice(0)) resolve(result)
   }
 }
 
@@ -46,7 +53,7 @@ test("lights up queued → sending → delivered → read on the sender's own bu
   resetWsHub()
   const seeded = seedBase("agentchat-receipts-e2e-")
   const adapter = new GatedAdapter()
-  registerAdapter(adapter) // 注册后发送才建 wake job（enqueueWakeJobs 要求推送通道存在）
+  registerAdapter(adapter) // push 适配器按 vendor 匹配（建 job 不再依赖注册时机，seed 消息同样有 job）
   const dispatcher = new Dispatcher({ db: seeded.db, home: seeded.home })
   const running = await start({
     port: 0,

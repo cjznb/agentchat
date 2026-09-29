@@ -4,8 +4,9 @@
  *
  * - 周期 `DISPATCHER_INTERVAL_MS = 2000`；`tick(now)` 可注入时钟，测试不 sleep
  * - 每轮：`backupIfDue`（spec §12 每日单文件备份）→ busy 24h 过期 → 在途超时回收 →
- *   到期 job 分流（busy/offline/无适配器 → 退避重投；pull 适配器 → 跳过保持 pending；
- *   online → 原子认领 → `adapter.inject` → 结果落库）→ 失败通知扫描（30min 同对合并）
+ *   到期 job **两阶段**派发（阶段一同步分流+认领：busy/offline/无适配器 → 退避重投、
+ *   pull → 跳过保持 pending、online → 原子认领 `sending`；阶段二按 id 升序逐条
+ *   `adapter.inject` → 结果落库）→ 失败通知扫描（30min 同对合并）
  * - 与适配器解耦：经进程内 `VendorAdapter` 注册表按收件方 `vendor` 取适配器，
  *   单测注入 fake（Constraints）
  * - 状态推进处由本层发布回执事件（T5 交接的第三发布点）；
@@ -13,10 +14,10 @@
  */
 import { mkdirSync, readdirSync, rmSync, statSync } from "node:fs"
 import { basename, join } from "node:path"
-import { adapterFor, pullAdapterIds } from "../adapters/types"
+import { adapterFor, pullAdapterIds, type VendorAdapter } from "../adapters/types"
 import type { Db } from "../db"
 import { getAgent } from "../store/agents"
-import { getBySeq, send } from "../store/messages"
+import { getBySeq, send, type Message } from "../store/messages"
 import {
   applyDeliveryResult,
   backoffMs,
@@ -257,7 +258,17 @@ export class Dispatcher {
     }
   }
 
+  /**
+   * 两阶段派发到期 job：**阶段一（认领，同步）** 按现有分流逐条处理并完成认领，
+   * **阶段二（注入）** 按 id 升序逐条 `await adapter.inject` + 与旧版一致的后续处理。
+   *
+   * 认领全部先于任一注入：前一条注入挂起不再阻塞其余 job 的认领（否则低 id job 的
+   * `inject` 永挂起会令高 id job 永远停在 `pending`、回执恒 `queued`）；所有到期 job
+   * 同轮进入 `sending`（回执「唤醒中」），注入顺序与后续语义同旧版逐条一致。
+   */
   private async dispatchDue(now: number): Promise<void> {
+    type Injection = { readonly claimed: WakeJob; readonly message: Message; readonly adapter: VendorAdapter }
+    const injections: Injection[] = []
     // 排除 pull 厂商：其 job 由 `/internal/wake` 认领，留在窗口内只会占满 LIMIT 且不推进 retry_at
     // （饿死其它厂商）。`mode === "pull"` 守卫仍保留作纵深防御。
     for (const job of dueWakeJobs(this.db, now, DUE_JOBS_PER_TICK, pullAdapterIds())) {
@@ -285,7 +296,11 @@ export class Dispatcher {
       if (claimed === undefined) continue
       const message = getBySeq(this.db, claimed.messageId)
       if (message === undefined) continue // FK 保证不可达；防呆留空
-      publishReceipt(this.db, message.conversationId)
+      publishReceipt(this.db, message.conversationId) // 认领 → `sending`（唤醒中）即刻可见
+      injections.push({ claimed, message, adapter })
+    }
+    // 阶段二：按 id 升序逐条注入（顺序与旧版一致）。
+    for (const { claimed, message, adapter } of injections) {
       // 注入（适配器抛错按拒收计，计入连续拒收；失败不打断本轮其余 job）。
       let result: DeliveryResult
       try {
