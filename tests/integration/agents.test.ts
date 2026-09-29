@@ -4,7 +4,8 @@
  * - `task_ref` 幂等（同 id、parent_id 不变）、子注册挂树
  * - `retire` 不可恢复（task_ref / join_token 两条注册路径均拒绝）
  * - `GET /api/roster` 嵌套树含 vendor/model/role_tag/remark/purpose/status/unread
- * - 展示态离线：`last_seen` 超过 600000ms 报 offline（存储状态不回写）
+ * - 展示态离线：`last_seen` 超过 600000ms 报 offline 并**持久化为 offline**
+ *   （写库仅在状态真的变化时发生、幂等；再次读取不重复写、不重复发事件）
  * - 状态迁移白名单 `canTransition`
  * 每个用例使用独立临时 $AGENTCHAT_HOME。
  */
@@ -178,7 +179,7 @@ describe("retire", () => {
 })
 
 describe("rosterTree", () => {
-  it("reports a stale online node as offline while the stored status stays online", () => {
+  it("reports a stale online node as offline AND persists the row to offline", () => {
     const { agent } = registerRoot(db, home, { name: "stale-root" })
     db.prepare<[number, string], void>("UPDATE agents SET last_seen = ? WHERE id = ?").run(
       Date.now() - OFFLINE_AFTER_MS - 1,
@@ -188,10 +189,10 @@ describe("rosterTree", () => {
     const node = rosterTree(db).find((n) => n.id === agent.id)
 
     expect(node?.status).toBe("offline")
-    expect(getAgent(db, agent.id)?.status).toBe("online")
+    expect(getAgent(db, agent.id)?.status).toBe("offline")
   })
 
-  it("reports a stale busy node as offline while the stored status stays busy", () => {
+  it("reports a stale busy node as offline AND persists the row to offline", () => {
     const { agent } = registerRoot(db, home, { name: "stale-busy" })
     touchAgent(db, agent.id, "busy")
     db.prepare<[number, string], void>("UPDATE agents SET last_seen = ? WHERE id = ?").run(
@@ -202,7 +203,75 @@ describe("rosterTree", () => {
     const node = rosterTree(db).find((n) => n.id === agent.id)
 
     expect(node?.status).toBe("offline")
-    expect(getAgent(db, agent.id)?.status).toBe("busy")
+    expect(getAgent(db, agent.id)?.status).toBe("offline")
+  })
+
+  it("persists once and emits exactly one agent event; re-reading neither rewrites nor re-emits", () => {
+    const { agent } = registerRoot(db, home, { name: "stale-once" })
+    db.prepare<[number, string], void>("UPDATE agents SET last_seen = ? WHERE id = ?").run(
+      Date.now() - OFFLINE_AFTER_MS - 1,
+      agent.id,
+    )
+    resetWsHub()
+    const before = currentWsSeq()
+
+    const first = rosterTree(db)
+    expect(first.find((n) => n.id === agent.id)?.status).toBe("offline")
+    expect(getAgent(db, agent.id)?.status).toBe("offline")
+    expect(currentWsSeq()).toBe(before + 1) // 落库即发一次 agent 树事件
+
+    rosterTree(db) // 幂等：已 offline 的行不再写、不再发事件
+    expect(currentWsSeq()).toBe(before + 1)
+    expect(getAgent(db, agent.id)?.status).toBe("offline")
+  })
+
+  it("leaves fresh, offline, retired and logical nodes untouched on a roster read", () => {
+    const stale = registerRoot(db, home, { name: "co-exists-stale" }).agent
+    const fresh = registerRoot(db, home, { name: "co-fresh" }).agent
+    const retiredNode = registerRoot(db, home, { name: "co-retired" }).agent
+    const logical = registerLogical(db, { name: "co-logical", parentId: fresh.id })
+    retire(db, retiredNode.id)
+    const offlineRoot = registerRoot(db, home, { name: "co-offline" }).agent
+    touchAgent(db, offlineRoot.id, "offline")
+    // 把未超阈值节点的 last_seen 拉到可辨识的旧值：若被误触碰即可检出。
+    const observed = Date.now() - 5000
+    for (const id of [fresh.id, retiredNode.id, logical.id, offlineRoot.id]) {
+      db.prepare<[number, string], void>("UPDATE agents SET last_seen = ? WHERE id = ?").run(observed, id)
+    }
+    db.prepare<[number, string], void>("UPDATE agents SET last_seen = ? WHERE id = ?").run(
+      Date.now() - OFFLINE_AFTER_MS - 1,
+      stale.id,
+    )
+    resetWsHub()
+    const before = currentWsSeq()
+
+    const tree = rosterTree(db)
+
+    expect(tree.find((n) => n.id === stale.id)?.status).toBe("offline")
+    expect(getAgent(db, stale.id)?.status).toBe("offline")
+    expect(currentWsSeq()).toBe(before + 1) // 只有 stale 这一处变化 → 恰好一次事件
+    // 其余节点原样：状态与 last_seen 均未被触碰。
+    expect(getAgent(db, fresh.id)?.status).toBe("online")
+    expect(getAgent(db, retiredNode.id)?.status).toBe("retired")
+    expect(getAgent(db, logical.id)?.status).toBe("offline")
+    expect(getAgent(db, offlineRoot.id)?.status).toBe("offline")
+    for (const id of [fresh.id, retiredNode.id, logical.id, offlineRoot.id]) {
+      expect(getAgent(db, id)?.lastSeen).toBe(observed)
+    }
+  })
+
+  it("keeps registration at exactly one agent event even when a stale node exists (no double emit)", () => {
+    const stale = registerRoot(db, home, { name: "co-stale-parent" }).agent
+    db.prepare<[number, string], void>("UPDATE agents SET last_seen = ? WHERE id = ?").run(
+      Date.now() - OFFLINE_AFTER_MS - 1,
+      stale.id,
+    )
+    resetWsHub()
+    const before = currentWsSeq()
+
+    registerRoot(db, home, { name: "co-newcomer" })
+
+    expect(currentWsSeq()).toBe(before + 1) // 读路径落库与 emitAgentTree 不叠加
   })
 
   it("keeps retired nodes in the tree with status retired", () => {
@@ -363,11 +432,16 @@ describe("canTransition", () => {
   })
 
   it("rejects transitions outside the whitelist", () => {
-    expect(canTransition("offline", "online")).toBe(false)
     expect(canTransition("offline", "busy")).toBe(false)
     expect(canTransition("retired", "online")).toBe(false)
     expect(canTransition("retired", "busy")).toBe(false)
     expect(canTransition("retired", "offline")).toBe(false)
+  })
+
+  // 展示态落库后的重激活裁决：roster 把超阈值节点写成 offline 后，
+  // 活节点必须能经状态上报（`/internal/state idle→online`）拉回，否则会永久卡死。
+  it("permits offline → online so a persisted-offline node can be reactivated by a state report", () => {
+    expect(canTransition("offline", "online")).toBe(true)
   })
 })
 
@@ -442,5 +516,29 @@ describe("GET /api/roster", () => {
     const again = rosterTreeSchema.parse(await (await createApp(db).request("/api/roster")).json())
     const reread = again.find((n) => n.id === root.id)?.children.find((n) => n.name === "skills-child")
     expect(reread?.skills).toEqual(["ts"])
+  })
+
+  it("shows a stale node offline and persists its DB row to offline (display state now lands in the store)", async () => {
+    const root = registerRoot(db, home, { name: "persist-root", vendor: "opencode" }).agent
+    const staleChild = registerChild(db, {
+      taskRef: "task-persist-stale",
+      parentId: root.id,
+      name: "persist-stale",
+    })
+    db.prepare<[number, string], void>("UPDATE agents SET last_seen = ? WHERE id = ?").run(
+      Date.now() - OFFLINE_AFTER_MS - 1,
+      staleChild.id,
+    )
+
+    const res = await createApp(db).request("/api/roster")
+
+    expect(res.status).toBe(200)
+    const nodes = rosterTreeSchema.parse(await res.json())
+    const childNode = nodes.find((n) => n.id === root.id)?.children.find((n) => n.id === staleChild.id)
+    expect(childNode?.status).toBe("offline")
+    expect(getAgent(db, staleChild.id)?.status).toBe("offline")
+    // 未超阈值的根节点不受影响。
+    expect(nodes.find((n) => n.id === root.id)?.status).toBe("online")
+    expect(getAgent(db, root.id)?.status).toBe("online")
   })
 })

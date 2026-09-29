@@ -27,7 +27,7 @@ import {
 } from "../../server/adapters/types"
 import { loadConfig } from "../../server/config"
 import { openDb, type Db } from "../../server/db"
-import { registerRoot, retire } from "../../server/core/agents"
+import { OFFLINE_AFTER_MS, registerRoot, retire, rosterTree } from "../../server/core/agents"
 import { DISPATCHER_INTERVAL_MS, Dispatcher } from "../../server/core/dispatcher"
 import { ensureHuman, inbox, receiptState, sendMessage, shout } from "../../server/core/messaging"
 import type { Gated } from "../../server/core/permissions"
@@ -247,6 +247,63 @@ describe("offline root reconnect", () => {
   })
 })
 
+// ── status coherence：roster 落库 offline → dispatcher 离线退避（修复 status 不落库的空转）──
+
+describe("status coherence (roster persist → dispatch)", () => {
+  it("persists a stale node offline on a roster read, then defers its job with reason offline (was a null-reason spin), and resumes delivery once the node reports online", async () => {
+    clearAdapters() // 无适配器 vendor：修复前 dispatcher 只能 defer(reason=null) 无谓空转
+    const sender = makeAgent("coh-sender")
+    const node = makeAgent("coh-node")
+    const { message } = sendMessage(db, { from: sender.id, to: node.id, body: "死节点消息" })
+    expect(expectJob(message.seq, node.id)).toMatchObject({
+      state: "pending",
+      pendingReason: null,
+      attempts: 0,
+    })
+    // 节点失联：last_seen 超过展示态阈值（库里仍是 online —— 病灶本体）。
+    db.prepare<[number, string], void>("UPDATE agents SET last_seen = ? WHERE id = ?").run(
+      Date.now() - OFFLINE_AFTER_MS - 1,
+      node.id,
+    )
+
+    // 修复前行为锁定：recipientStatus=online 且无适配器 → defer(reason=null) 空转。
+    const t0 = Date.now() + 1000
+    await dispatcher.tick(t0)
+    expect(expectJob(message.seq, node.id)).toMatchObject({
+      state: "pending",
+      pendingReason: null,
+      attempts: 1,
+    })
+
+    // 一次 roster 读取 → 展示态 offline 落库。
+    rosterTree(db)
+    expect(getAgent(db, node.id)?.status).toBe("offline")
+
+    // 落库后 dispatcher 按 offline 分流退避（pending_reason='offline'）；offline 不过期（既有裁决）。
+    const t1 = t0 + 60_000
+    await dispatcher.tick(t1)
+    expect(expectJob(message.seq, node.id)).toMatchObject({
+      state: "pending",
+      pendingReason: "offline",
+      attempts: 2,
+    })
+    await dispatcher.tick(t1 + 86_400_000 + 1000)
+    expect(expectJob(message.seq, node.id)).toMatchObject({
+      state: "pending",
+      pendingReason: "offline",
+    })
+
+    // 节点重新上报 online（idle→online 重激活）→ 立即到期并恢复投递。
+    registerAdapter(fake)
+    expect(applyAgentState(db, { agentId: node.id, state: "idle" })).toEqual({ ok: true })
+    expect(getAgent(db, node.id)?.status).toBe("online")
+    await dispatcher.tick(Date.now())
+    expect(fake.injections).toHaveLength(1)
+    expect(fake.injections[0]?.nodeId).toBe(node.id)
+    expect(expectJob(message.seq, node.id).state).toBe("accepted")
+  })
+})
+
 describe("retire cancellation", () => {
   it("cancels undelivered jobs and sends the sender a system message saying the peer left", () => {
     const sender = makeAgent("retire-sender")
@@ -318,12 +375,13 @@ describe("internal endpoints", () => {
     expect(await childOffline.json()).toEqual({ ok: false, error: "child_never_offline" })
     expect(getAgent(db, child.id)?.status).toBe("online")
 
-    // 白名单外迁移：offline → online 必须走 join_token 身份认领
+    // 展示态落库后的重激活：roster 把超阈值节点写成 offline 后，
+    // 状态上报（idle→online）必须能拉回，否则活节点会永久卡死在 offline。
     expect(await (await post("/internal/state", { agentId: root.id, state: "offline" })).json()).toEqual({ ok: true })
-    const rejected = await post("/internal/state", { agentId: root.id, state: "online" })
-    expect(rejected.status).toBe(409)
-    expect(await rejected.json()).toEqual({ ok: false, error: "transition_rejected" })
-    expect(getAgent(db, root.id)?.status).toBe("offline")
+    const reactivated = await post("/internal/state", { agentId: root.id, state: "online" })
+    expect(reactivated.status).toBe(200)
+    expect(await reactivated.json()).toEqual({ ok: true })
+    expect(getAgent(db, root.id)?.status).toBe("online")
   })
 
   it("excludes self-authored messages from the wake backlog (T4 handoff: inbox contains own messages)", async () => {

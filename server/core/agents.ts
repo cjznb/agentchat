@@ -5,7 +5,8 @@
  *   `$AGENTCHAT_HOME/tokens/<id>`，0600）；重连带 token 认领同一节点并激活 online
  * - 子：`task_ref` 幂等入树（重复注册同 id、parent 不改写）；逻辑节点：永不上线
  * - 退役不可恢复：`retire` 后任何注册路径都拒绝复活
- * - `rosterTree()` 产出森林结构 + 联系人卡 + 直达未读；展示态离线在读取时计算
+ * - roster 读模型与展示态离线回写在 `core/roster`（`rosterTree`/`emitAgentTree`
+ *   由本模块 re-export 保持既有导入路径）
  */
 import { createHash, randomBytes } from "node:crypto"
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
@@ -24,21 +25,19 @@ import {
   getAgentByTokenHash,
   insertAgent,
   insertAgentKey,
-  listAgents,
   touchAgent,
-  unreadCounts,
   updateAgentCard,
   type Agent,
   type AgentCardPatch,
   type InsertAgentInput,
 } from "../store/agents"
 import { makeJobsDue } from "../store/wake"
-import { emit } from "../ws"
 import { publishMessage, publishReceipt } from "./publish"
+import { emitAgentTree } from "./roster"
 import { retireWakeJobs } from "./dispatcher"
 
-/** 展示态离线阈值（brief：`last_seen` 超过 600000ms → roster 报 offline）。 */
-export const OFFLINE_AFTER_MS = 600_000
+// roster 读模型（展示态落库 + 树快照发布）自 `core/roster` re-export：既有导入路径不变。
+export { emitAgentTree, OFFLINE_AFTER_MS, rosterTree } from "./roster"
 
 /** 注册与退役的域错误；`code` 供调用方（MCP/UI）分流处理。 */
 export class RegistrationError extends Error {
@@ -53,12 +52,14 @@ export class RegistrationError extends Error {
 
 /**
  * 状态迁移白名单（brief Constraints）：`online↔busy`、`online|busy→offline`、任意→`retired`。
- * 注册认领的 `offline→online` 属 spec §5.2 身份认领（重启带 token），不走此白名单。
+ * 注册认领的 `offline→online` 属 spec §5.2 身份认领（重启带 token），不走此白名单；
+ * 另经状态上报的 `offline→online` 是展示态落库后的**重激活**（roster 把超阈值节点写成
+ * offline，活节点的心跳上报必须能拉回，否则永久卡死）——白名单放行，`touchAgent` 拉回。
  */
 const ALLOWED_TRANSITIONS: Record<AgentStatus, readonly AgentStatus[]> = {
   online: ["busy", "offline", "retired"],
   busy: ["online", "offline", "retired"],
-  offline: ["retired"],
+  offline: ["online", "retired"],
   retired: [],
 }
 
@@ -272,56 +273,3 @@ export function retire(db: Db, id: string): Agent {
 // 此处 re-export 保持既有导入路径（`core/agents.rosterTreeSchema`）。
 export { rosterTreeSchema }
 export type { RosterNode }
-
-/**
- * 展示态状态（读取时计算，**不回写库**）：
- * 存储为 online/busy 但 `last_seen` 超过阈值 → 报 offline；offline/retired 原样。
- */
-function displayStatus(agent: Agent, now: number): AgentStatus {
-  if (agent.status === "online" || agent.status === "busy") {
-    return now - agent.lastSeen > OFFLINE_AFTER_MS ? "offline" : agent.status
-  }
-  return agent.status
-}
-
-/** 森林结构 + 联系人卡 + 直达未读（spec §9 `roster`）。 */
-export function rosterTree(db: Db): RosterNode[] {
-  const now = Date.now()
-  const unread = unreadCounts(db)
-  const childrenByParent = new Map<string, Agent[]>()
-  const roots: Agent[] = []
-  for (const agent of listAgents(db)) {
-    if (agent.parentId === undefined) {
-      roots.push(agent)
-      continue
-    }
-    const bucket = childrenByParent.get(agent.parentId)
-    if (bucket === undefined) childrenByParent.set(agent.parentId, [agent])
-    else bucket.push(agent)
-  }
-  const build = (agent: Agent): RosterNode => ({
-    id: agent.id,
-    name: agent.name,
-    kind: agent.kind,
-    parent_id: agent.parentId ?? null,
-    vendor: agent.vendor,
-    model: agent.model,
-    status: displayStatus(agent, now),
-    status_text: agent.statusText ?? null,
-    purpose: agent.purpose ?? null,
-    role_tag: agent.roleTag ?? null,
-    remark: agent.remark ?? null,
-    skills: agent.skills,
-    unread: unread.get(agent.id) ?? 0,
-    children: (childrenByParent.get(agent.id) ?? []).map(build),
-  })
-  return roots.map(build)
-}
-
-/**
- * 节点树快照发布（`agent` WS 事件；Task 9 发布点）——注册/退役与 `/internal/state`
- * 状态变化处调用；路由层只调用本 core 导出函数，不直接广播。
- */
-export function emitAgentTree(db: Db): void {
-  emit("agent", { tree: rosterTree(db) })
-}
