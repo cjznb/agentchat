@@ -20,7 +20,7 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { loadConfig } from "../../server/config"
 import { registerRoot } from "../../server/core/agents"
-import { sendMessage } from "../../server/core/messaging"
+import { NotParticipantError, sendMessage } from "../../server/core/messaging"
 import {
   APPROVAL_TTL_MS,
   ask,
@@ -45,6 +45,7 @@ import {
   createGroup,
   dmKey,
   getConversationByKey,
+  isParticipant,
 } from "../../server/store/conversations"
 import { history } from "../../server/store/messages"
 import {
@@ -547,6 +548,42 @@ describe("群 ask：目标解析与错误码（Task 4，spec §3.2/§6）", () =
     expect(error).toBeInstanceOf(MentionNotParticipantError)
     expect(error).toMatchObject({ code: "mention_not_participant", outsiders: [outsider.name] })
     expect(listApprovals(db)).toHaveLength(0)
+  })
+
+  // F1（PAIR 评审）：成员表即授权边界 —— 非成员不得向他人群写卡/广播 approval。
+  it("rejects a non-member agent's group ask with not_participant before any card (0 orphan)", () => {
+    const { b, group } = seedGroup("g-gate")
+    const outsider = makeRoot("g-gate-outsider")
+    expect(isParticipant(db, group.id, outsider.id)).toBe(false)
+
+    const error = errorOf(() =>
+      askGroup(db, outsider.id, {
+        to: group.id,
+        question: "?",
+        options: ["ok"],
+        mentions: [b.name],
+      }),
+    )
+
+    expect(error).toBeInstanceOf(NotParticipantError)
+    expect(error).toMatchObject({ code: "not_participant" })
+    expect(listApprovals(db)).toHaveLength(0)
+  })
+
+  it("keeps the human super-observer exemption: a human outside the membership may group-ask", () => {
+    const { b, group } = seedGroup("g-human-gate")
+    const human = ensureHuman(db)
+    expect(isParticipant(db, group.id, human.id)).toBe(false)
+
+    const result = askGroup(db, human.id, {
+      to: group.id,
+      question: "人类发起？",
+      options: ["ok"],
+      mentions: [b.name],
+    })
+
+    expect(result.asks).toHaveLength(1)
+    expect(result.asks[0]).toMatchObject({ target: b.id, status: "pending" })
   })
 
   it("creates one card per mentioned member in that group (no wait → asks, no reply)", () => {

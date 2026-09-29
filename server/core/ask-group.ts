@@ -5,6 +5,8 @@
  * 仍由 `core/ask` 导出，本层只做群分支的解析、建卡与等待聚合）：
  * - `mentions` 必填且**必须全部命中**：未给 → `mentions_required`；未命中 →
  *   `mention_not_found`（含未命中名单）；真实节点但不在该群可提及集 → `mention_not_participant`。
+ * - **成员资格闸门**（F1）：非成员 agent 发起 → `not_participant`（复用 `core/messaging` 的
+ *   `NotParticipantError`，human 超观察者豁免同 `resolveConversation` 口径）；建卡前抛出，0 孤儿单。
  * - **一目标一卡**（多目标 = 多张 `kind='ask'` 单据，同落该群会话），`respond_ask` 按
  *   `ask_id` 逐卡答复；异步路径复用既有审批事件（不新增 WS 事件、不改 `approvals` 表）。
  * - 三形态等待（spec §3.4）：不传 `wait` → 立即返回 `asks`（无 `reply`）；带 `wait` 且
@@ -17,7 +19,7 @@ import { resolveMentions, type MentionTarget } from "../../shared/mentions"
 import type { Db } from "../db"
 import { AgentNotFoundError, getAgent, getAgentByName, listAgents } from "../store/agents"
 import { getApproval, type Approval } from "../store/approvals"
-import type { Conversation } from "../store/conversations"
+import { isParticipant, type Conversation } from "../store/conversations"
 import { latestInConversation } from "../store/messages"
 import {
   ConversationRequiredError,
@@ -27,7 +29,7 @@ import {
   MentionNotFoundError,
   MentionsRequiredError,
 } from "./ask"
-import { recipientsOf } from "./messaging"
+import { NotParticipantError, recipientsOf } from "./messaging"
 import { DEFAULT_WAIT_TIMEOUT_MS, messagesSince, waitFor, type WaitOptions } from "./wait"
 
 /** 群 ask 等待选项：既有 `wait` 字段 + `scope`（缺省 `"all"` —— 默认值在服务端生效，spec §3.4/D3）。 */
@@ -203,9 +205,16 @@ export function askGroup(
   from: string,
   input: GroupAskInput,
 ): GroupAskResult | Promise<GroupAskWaitResult> {
-  if (getAgent(db, from) === undefined) throw new AgentNotFoundError(from)
+  const requester = getAgent(db, from)
+  if (requester === undefined) throw new AgentNotFoundError(from)
   const conversation = groupConversation(db, input.to)
   if (conversation === undefined) throw new ConversationRequiredError(from, input.to)
+  // F1（PAIR 评审）：成员表即授权边界 —— 非成员不得向他人群写卡/广播 approval
+  //（`postSystem` 直写无闸）；口径同 messaging `resolveConversation` 的
+  // `NotParticipantError`（human 超观察者豁免），且在建卡前抛出 → 0 孤儿单。
+  if (requester.vendor !== "human" && !isParticipant(db, conversation.id, from)) {
+    throw new NotParticipantError(from, conversation.id)
+  }
   const targets = resolveGroupTargets(db, { from, conversation, mentions: input.mentions })
   const allowCustom = input.allowCustom ?? true
   const asks = targets.map((target) =>

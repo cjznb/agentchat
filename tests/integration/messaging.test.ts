@@ -337,6 +337,18 @@ describe("唤醒集合 T（spec §2，Task 3）", () => {
     expect(wakeAgentsOf(sent.message.seq)).toEqual([li.id])
   })
 
+  // F2（PAIR 评审裁决锁定）：spec §2 字面「M 空 → 人类 T=全体」—— 防止被反向「修」成无人唤醒。
+  it("人类@错字（M 空、scope=explicit）→ 唤醒全体参与者", () => {
+    const { owner, zhang, li, group } = t3Group("t3-human-typo")
+    const human = ensureHuman(db)
+
+    const sent = sendMessage(db, { from: human.id, to: group.id, body: "@错字 在吗" })
+
+    expect(sent.mentions).toMatchObject({ matched: [], unmatched: ["错字"], scope: "explicit" })
+    expect(sent.message.meta).toEqual({ mentions: [], mentionScope: "explicit" })
+    expect(new Set(wakeAgentsOf(sent.message.seq))).toEqual(new Set([owner.id, zhang.id, li.id]))
+  })
+
   it("结构化 mentions（id 前 8 位）与正文取并集并参与 T 计算", () => {
     const { owner, zhang, li, group } = t3Group("t3-structured")
 
