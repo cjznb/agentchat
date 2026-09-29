@@ -8,6 +8,9 @@
   "engines": {
     "node": ">=22"
   },
+  "bin": {
+    "agentchat": "./bin/agentchat.mjs"
+  },
   "scripts": {
     "start": "tsx server/main.ts",
     "dev": "vite --config client/vite.config.ts",

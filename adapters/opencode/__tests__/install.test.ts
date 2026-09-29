@@ -301,8 +301,8 @@ describe("install.mjs 幂等安装", () => {
       if (value !== undefined && !key.startsWith("AGENTCHAT_") && key !== "HUB_TOKEN") env[key] = value
     }
     // 隔离默认 home（`~` → 临时目录），避免安装器把 config.json 写到真实用户目录。
-    env.HOME = home
-    env.USERPROFILE = home
+    env["HOME"] = home
+    env["USERPROFILE"] = home
     const result = spawnSync(process.execPath, [INSTALL, "--config", cfg], { encoding: "utf8", env })
     expect(result.status).toBe(0)
     const agentchat = mcpEntry(readConfig(cfg), "agentchat")

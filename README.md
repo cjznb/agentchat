@@ -41,6 +41,32 @@ npm start        # = tsx server/main.ts：拉起 HTTP 服务 + 2s 唤醒 dispatc
 （2s 唤醒循环、每日备份、审批 24h 过期清扫）并监听端口，SIGINT/SIGTERM 优雅关停。
 dispatcher 不在 `createApp()`/`start()` 内部启动（测试反复调用会把 interval 与备份打进临时库）。
 
+### 一行命令（`agentchat` CLI）
+
+`npm link`（或 `npm i -g .`）后可直接用 `agentchat` 启动——它会在前端产物缺失时先构建，
+再拉起同一生产入口，因此无需手动 `npm run build` / `npm start`：
+
+```bash
+npm link      # 把 bin/agentchat.mjs 链入 PATH
+agentchat     # 按需构建前端 → 拉起 Hub → 交互式终端自动打开浏览器
+```
+
+| 参数 | 含义 |
+|---|---|
+| `--port <n>` | 监听端口（等价 env `AGENTCHAT_PORT`，优先于 `config.json`） |
+| `--home <dir>` | 数据目录（等价 env `AGENTCHAT_HOME`；默认 `~/.agentchat`） |
+| `--no-open` | 启动后不自动打开浏览器（等价 `AGENTCHAT_NO_OPEN=1`） |
+| `--build` | 强制重建前端（默认仅在 `client/dist` 缺失时构建） |
+| `-h, --help` / `-v, --version` | 帮助 / 版本 |
+| `--` | 其后的参数原样透传给 Hub 入口 |
+
+`npm start` 与 `npm run build` **保持不变**。
+
+**自动打开浏览器**：仅当**交互式终端**（`stdout.isTTY`）且**未被显式关闭**时才开；
+CI / 管道 / 脚本一律不开。`--no-open` 与 `AGENTCHAT_NO_OPEN` 是同一开关的两条路径
+（CLI 的 `--no-open` 即设置 `AGENTCHAT_NO_OPEN`），显式关闭优先于 `AGENTCHAT_OPEN`
+与 `config.json` 的 `openBrowser`。打开失败只 warn，绝不影响 Hub。
+
 ## 适配器
 
 把 OpenCode / Claude Code 接入 Hub —— 两者都是**进程外 pull 适配器**：Hub **不主动推送**，由适配器在 agent

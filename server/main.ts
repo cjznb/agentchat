@@ -16,6 +16,7 @@ import { config } from "./config"
 import { Dispatcher } from "./core/dispatcher"
 import { openDb, type Db } from "./db"
 import { start } from "./index"
+import { browserCommand, openBrowser } from "./open-browser"
 
 export interface BootstrapOptions {
   /** 监听端口；缺省 `config.port`（env `AGENTCHAT_PORT`）。传 0 = OS 分配临时端口。 */
@@ -122,6 +123,14 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<HubHand
 async function runForeground(): Promise<void> {
   const handle = await bootstrap()
   console.error(`[agentchat] hub listening on ${handle.url} (dispatcher started)`)
+  // 自动打开浏览器：仅真实入口触发（默认「交互式且未显式关闭」才开）；失败不阻塞 Hub。
+  const command = browserCommand({
+    platform: process.platform,
+    url: handle.url,
+    openBrowser: config.openBrowser,
+    isTTY: process.stdout.isTTY === true,
+  })
+  if (command !== undefined) openBrowser(command)
   const shutdown = (signal: NodeJS.Signals): void => {
     console.error(`[agentchat] ${signal} received, shutting down`)
     handle
