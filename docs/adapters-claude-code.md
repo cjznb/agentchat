@@ -171,6 +171,12 @@ MCP 配置（`~/.claude.json` 顶层；见 `mcp.snippet.json`）：
 **手工兜底**（自愈仍失败时）：删除 `<AGENTCHAT_HOME>/agents/claude-code.token`（可视情况连同 `claude-code.id`）
 后重启 `claude`；若 id 变化，`mcp-headers.mjs` 会在下次连接重读，无需改配置。
 
+**读盘鲁棒性（瞬时 fs 错误有限重试）**：`token.mjs` 读 `claude-code.id` / `claude-code.token` 等时，
+**`ENOENT`**（未注册 / 无文件）→ 直接视同「无」（保持既有静默 skip），**不重试**；**其它错误**（Windows 上
+新建文件被 Defender 瞬时扫描的 `EPERM`/`EACCES` 等）→ **有限重试**（默认 3 次、间隔 ~20ms），仍失败则向适配器
+日志（`<AGENTCHAT_HOME>/logs/claude-code-adapter.log`）写一条**含错误码**的行后按「无」处理——**绝不抛断宿主**。
+此前 `readText` 把一切异常与「未注册」混同，会让瞬时错误**静默丢弃一次投递**。
+
 ## 手动冒烟清单（**需真实 Claude Code**）
 
 > 以下 ①–⑤ 均须在**安装了真实 Claude Code 的真机**上执行；括号内为观察点。安装器本身的配置写入由单测覆盖。

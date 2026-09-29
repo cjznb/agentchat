@@ -8,7 +8,7 @@
  */
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 
 /** `AGENTCHAT_HOME`（空串视同未设）→ 数据目录；默认 `~/.agentchat`（与 Hub 一致）。 */
 export function resolveHome(env) {
@@ -33,14 +33,57 @@ export function adapterPaths(home) {
   }
 }
 
-/** 读文本；不存在/不可读/空白 → `undefined`（一律视同「无」）。 */
-export function readText(path) {
-  try {
-    const value = readFileSync(path, "utf8").trim()
-    return value === "" ? undefined : value
-  } catch {
-    return undefined
+/** 从落盘路径反推数据目录：`<home>/agents/x` → `<home>`、`<home>/hub_token` → `<home>`。 */
+function homeForPath(path) {
+  const parent = dirname(path)
+  return basename(parent) === "agents" ? dirname(parent) : parent
+}
+
+/** 提取 Node fs 错误码（`error.code`）；非对象/无码 → `undefined`。 */
+function errorCode(error) {
+  return typeof error === "object" && error !== null && typeof error.code === "string" ? error.code : undefined
+}
+
+/** 同步等待（Node 主线程 / worker 均允许 `Atomics.wait`）；`ms <= 0` 立即返回。 */
+function sleepSync(ms) {
+  if (!(ms > 0)) return
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * 可注入读取器的重试读取（产品侧鲁棒性缺口修复）：
+ * - `ENOENT` = 未注册 / 无文件 → 直接 `undefined`（保持既有静默 skip 语义，**不重试**）；
+ * - 其它错误（Windows 新建文件被 Defender 瞬时扫描的 `EPERM`/`EACCES` 等）→ 有限重试
+ *   （默认 3 次、间隔 ~20ms）；仍失败则**记含错误码的日志**后按「无」处理（**不得抛断宿主**）。
+ * 此前 `readText` 把一切异常与「未注册」混为一谈 → 瞬时 fs 错误会**静默丢弃一次投递**（flake 根因）。
+ */
+export function readTextWithRetry(path, options = {}) {
+  const attempts = options.attempts ?? 3
+  const delayMs = options.delayMs ?? 20
+  const read = options.read ?? readFileSync
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const value = read(path, "utf8").trim()
+      return value === "" ? undefined : value
+    } catch (error) {
+      const code = errorCode(error)
+      if (code === "ENOENT" || attempt >= attempts) {
+        if (code !== "ENOENT") {
+          appendLog(
+            homeForPath(path),
+            `readText: ${path} unreadable after ${attempt} attempt(s): ${code ?? errorMessage(error)}`,
+          )
+        }
+        return undefined
+      }
+      sleepSync(delayMs)
+    }
   }
+}
+
+/** 读文本；不存在/不可读/空白 → `undefined`（一律视同「无」）。瞬时 fs 错误经 {@link readTextWithRetry} 有限重试。 */
+export function readText(path) {
+  return readTextWithRetry(path)
 }
 
 /** 读 JSON 对象；不存在/非法/非对象 → `undefined`。 */

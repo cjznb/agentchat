@@ -1,0 +1,53 @@
+# AgentChat CI —— 类型检查 / 单测 / 前端构建（Node 22 与 24 矩阵）。
+#
+# 为什么**不跑** Playwright E2E：E2E 需要真实浏览器 + 本机自举 Hub（占用 4646 端口），
+# 与 CI 沙箱耦合、易抖动。本地跑法：先 `npm install`，再 `npx playwright test`
+# （`playwright.config.ts` 会自动用临时 `AGENTCHAT_HOME` 自举 Hub 与构建前端，需 4646 空闲）。
+#
+# better-sqlite3（Linux runner 上的注意点）：它靠 `prebuild-install` 拉取**预编译二进制**。
+# ubuntu-latest 镜像已预装 gcc/g++/make/python3，故若某 Node 版本没有对应 prebuild，
+# 会自动回退源码编译（**无需**额外 apt）。若未来在 ubuntu 上编译失败，备选方案：
+#   ① 在 `npm ci` 前加 `sudo apt-get update && sudo apt-get install -y build-essential python3`；
+#   ② 改用 `runs-on: windows-latest`（本仓主要在 Windows 开发，但需注意路径/行尾差异）。
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# 同一分支/PR 的新推送取消仍在跑的旧运行，省资源。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Node ${{ matrix.node }} · typecheck / test / build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

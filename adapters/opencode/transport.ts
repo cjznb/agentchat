@@ -6,7 +6,8 @@
  * （不重试）；重试耗尽以 `HubError` 抛出。
  */
 import { join } from "node:path"
-import { readToken, resolveHome } from "./token"
+import { resolveHome } from "./home"
+import { readToken } from "./token"
 
 export type HubErrorKind = "network" | "timeout" | "http" | "protocol" | "exhausted"
 

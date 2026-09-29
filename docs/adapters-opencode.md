@@ -217,6 +217,12 @@ export default { id: "agentchat", server: AgentChatPlugin }
 
 **手工兜底**（自愈仍失败时）：删除 `<AGENTCHAT_HOME>/agents/opencode.token` 后重启 OpenCode（勿删 id 亦可）。
 
+**读盘鲁棒性（瞬时 fs 错误有限重试）**：`token.ts` 的 `readToken`（读 `opencode.token` / `opencode.id` /
+`hub_token`）区分两类失败：**`ENOENT`**（未注册 / 无文件）→ 直接 `undefined`（保持既有静默语义），**不重试**；
+**其它错误**（Windows 上新建文件被瞬时抢占的 `EPERM`/`EACCES` 等）→ **有限重试**（默认 3 次、间隔 ~20ms），
+仍失败则向 `<AGENTCHAT_HOME>/logs/opencode-adapter.log` 写一条**含错误码**的 `[plugin]` 行后按「无」处理——
+**绝不抛断宿主**。（`resolveHome` 已抽到 `home.ts`，避免 `token ↔ log` 循环依赖。）
+
 ## 手动冒烟清单（需真实 OpenCode）
 
 1. **启动 Hub**（`npm start`），确认 `<AGENTCHAT_HOME>/hub_token` 已生成。

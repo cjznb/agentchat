@@ -32,9 +32,10 @@ import {
   type RegisterArgs,
   type RegisterResult,
 } from "./hub"
+import { resolveHome } from "./home"
 import { createFileLog } from "./log"
 import { IdlePoller, parsePollMs } from "./poll"
-import { agentIdPath, clearToken, readToken, resolveHome, tokenPath, writeToken } from "./token"
+import { agentIdPath, clearToken, readToken, tokenPath, writeToken } from "./token"
 import type { Hooks, OpencodeEvent, Plugin, PluginInput } from "./types"
 import { createBoundedSet, createTaskQueue, type BoundedSet, type TaskQueue } from "./util"
 

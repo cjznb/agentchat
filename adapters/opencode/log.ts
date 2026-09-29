@@ -9,11 +9,11 @@
  * - **绝不写入密钥**：任何日志行都不得含 `hub_token` / `join_token` 的**值**（只可出现变量名或路径）。
  * - 调试回退（默认关闭）：`AGENTCHAT_LOG=console` 时改打 stderr（现场排障用）。
  *
- * 与 `token.ts:resolveHome` 同语义：`AGENTCHAT_HOME` 空串视同未设，默认 `~/.agentchat`。
+ * 与 `home.ts:resolveHome` 同语义：`AGENTCHAT_HOME` 空串视同未设，默认 `~/.agentchat`。
  */
 import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs"
 import { dirname, join } from "node:path"
-import { resolveHome } from "./token"
+import { resolveHome } from "./home"
 
 /** 默认轮转阈值：1 MiB。 */
 export const DEFAULT_ROTATE_BYTES = 1024 * 1024
