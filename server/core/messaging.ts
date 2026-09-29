@@ -46,7 +46,7 @@ import {
 import { markRead } from "../store/read_states"
 import { enqueueWakeJobs } from "../store/wake"
 import { getApproval, type Approval } from "../store/approvals"
-import { approvalChannel, gate, type Gated } from "./permissions"
+import { approvalChannel, gate, postSystem, type Gated } from "./permissions"
 import { publishMessage, publishReceipt, receiptState } from "./publish"
 import {
   DEFAULT_WAIT_TIMEOUT_MS,
@@ -70,10 +70,43 @@ export function createGroup(db: Db, input: CreateGroupInput): Gated<Conversation
   return gate(db, "group_create", input.createdBy, payload, () => storeCreateGroup(db, input))
 }
 
+/**
+ * 入群系统通知（Task 5，spec §4.4）：拉人成功后给该会话落一条 `kind:"system"` 消息，
+ * 正文含「你被拉入群「X」。成员：<名>(<id前8>)、…」名单（新增成员在列）。
+ * 复用 `postSystem`（`store send` 直写 + message publish）—— **不经 `enqueueWakeJobs`**：
+ * `kind:"system"` 豁免即既有语义，入群通知 0 wake job（测试回归锁）。
+ */
+function joinNotice(db: Db, input: AddParticipantInput): void {
+  const conversation = getConversation(db, input.conversationId)
+  // store 写入已过 participants 外键 → 会话必在；此处仅类型收窄（不可达分支）。
+  if (conversation === undefined) return
+  const roster = listParticipants(db, conversation.id).flatMap((participant) => {
+    const agent = getAgent(db, participant.agentId)
+    return agent === undefined ? [] : [`${agent.name}(${agent.id.slice(0, 8)})`]
+  })
+  postSystem(db, {
+    conversationId: conversation.id,
+    fromAgentId: input.invitedBy ?? conversation.createdBy,
+    body: `你被拉入群「${conversation.name ?? conversation.key}」。成员：${roster.join("、")}`,
+    meta: { action: "group_add", agentId: input.agentId },
+    idempotencyKey: `group-add:${conversation.id}:${input.agentId}`,
+  })
+}
+
+/**
+ * 拉人落地（store 写入 + 入群通知）的**唯一业务路径**：闸内执行器与「已批准执行」
+ *（`routes/ui.ts.executeApproved` 的 group_add 分支）共用 —— 即时与审批两条入口
+ * 一条业务，通知逻辑不复制。
+ */
+export function applyAddParticipant(db: Db, input: AddParticipantInput): void {
+  storeAddParticipant(db, input)
+  joinNotice(db, input)
+}
+
 export function addParticipant(db: Db, input: AddParticipantInput): Gated<void> {
   const actorId = input.invitedBy ?? getConversation(db, input.conversationId)?.createdBy ?? ""
   const payload = { conversationId: input.conversationId, agentId: input.agentId, role: input.role }
-  return gate(db, "group_add", actorId, payload, () => storeAddParticipant(db, input))
+  return gate(db, "group_add", actorId, payload, () => applyAddParticipant(db, input))
 }
 
 /** `to` 解析失败：既非 `*`、也找不到会话或节点（brief：未知 id → RecipientNotFound）。 */

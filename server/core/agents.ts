@@ -37,7 +37,7 @@ import { emitAgentTree } from "./roster"
 import { retireWakeJobs } from "./dispatcher"
 
 // roster 读模型（展示态落库 + 树快照发布）自 `core/roster` re-export：既有导入路径不变。
-export { emitAgentTree, OFFLINE_AFTER_MS, rosterTree } from "./roster"
+export { conversationRoster, emitAgentTree, memberCards, OFFLINE_AFTER_MS, rosterTree, type MemberCard } from "./roster"
 
 /** 注册与退役的域错误；`code` 供调用方（MCP/UI）分流处理。 */
 export class RegistrationError extends Error {

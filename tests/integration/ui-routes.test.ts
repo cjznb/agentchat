@@ -5,6 +5,8 @@
  * - `GET/POST /api/groups` + `POST /api/groups/:id/members`：human 走既有 gate 即时执行
  * - `POST /api/shout`：写入喊话广播会话
  * - `GET /api/agents/:id`：资料卡（roster 节点 + 参与会话入口）；未知 404
+ * Task 5：`GET /api/roster?conversation=` 只返回该群成员（human 豁免）+ 拉人后
+ * `kind:"system"` 入群通知（含成员名单、0 wake job）
  * 每个用例独立临时 $AGENTCHAT_HOME，`createApp(db)` 直连路由（无需监听）。
  */
 import { mkdtempSync, rmSync } from "node:fs"
@@ -23,6 +25,7 @@ import {
   messageHistorySchema,
   notificationListSchema,
   notificationReadResultSchema,
+  rosterTreeSchema,
   sendMessageResultSchema,
   type ChatMessage,
 } from "../../shared/contracts"
@@ -171,6 +174,86 @@ describe("GET/POST /api/groups", () => {
     const afterAdd = groupListSchema.parse(await (await app.request("/api/groups")).json())
     const updated = afterAdd.groups.find((group) => group.id === createdJson.group.id)
     expect(new Set(updated?.members)).toEqual(new Set([humanId, rootId, child.id]))
+  })
+})
+
+// ── Task 5：`GET /api/roster?conversation=` 按会话过滤 + 入群 system 通知 ────
+
+describe("GET /api/roster?conversation=", () => {
+  it("returns only that group's members, each with id and name (human super-observer view)", async () => {
+    const created = await post("/api/groups", { name: "t5-filter", memberIds: [rootId] })
+    const createdJson = groupCreateResultSchema.parse(await created.json())
+    if (!("group" in createdJson)) throw new Error("human group creation must execute immediately")
+    const outsider = insertAgent(db, {
+      name: "t5-outsider",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      parentId: rootId,
+    })
+
+    const res = await app.request(`/api/roster?conversation=${createdJson.group.id}`)
+
+    expect(res.status).toBe(200)
+    const nodes = rosterTreeSchema.parse(await res.json())
+    // 只含该群成员（human owner + root），非成员子节点不出现。
+    expect(new Set(nodes.map((node) => node.id))).toEqual(new Set([humanId, rootId]))
+    expect(nodes.map((node) => node.id)).not.toContain(outsider.id)
+    for (const node of nodes) {
+      expect(typeof node.id).toBe("string")
+      expect(node.name.length).toBeGreaterThan(0)
+    }
+  })
+
+  it("keeps the no-parameter behaviour and returns an empty array for unknown/shout conversations", async () => {
+    // 不带参数：完整森林，行为与现状一致（既有用例不改即绿）。
+    const full = rosterTreeSchema.parse(await (await app.request("/api/roster")).json())
+    expect(full.map((node) => node.id)).toEqual(expect.arrayContaining([humanId, rootId]))
+
+    // 未知会话 id → 200 空数组（成员集为空；非成员 agent 在 MCP 侧先被闸门拒绝）。
+    const unknown = await app.request("/api/roster?conversation=does-not-exist")
+    expect(unknown.status).toBe(200)
+    expect(await unknown.json()).toEqual([])
+
+    // shout 广播会话（无 participants 行）→ 空数组（选「返回空」，见 task-5 报告）。
+    shout(db, humanId, "t5 shout")
+    const shoutId = getConversationByKey(db, SHOUT_KEY)?.id ?? ""
+    const shoutRes = await app.request(`/api/roster?conversation=${shoutId}`)
+    expect(shoutRes.status).toBe(200)
+    expect(await shoutRes.json()).toEqual([])
+  })
+})
+
+describe("POST /api/groups/:id/members（入群 system 通知，Task 5）", () => {
+  it("posts a kind:'system' join notice with the member roster and zero wake jobs", async () => {
+    const created = await post("/api/groups", { name: "t5-notice", memberIds: [rootId] })
+    const createdJson = groupCreateResultSchema.parse(await created.json())
+    if (!("group" in createdJson)) throw new Error("human group creation must execute immediately")
+    const newcomer = insertAgent(db, {
+      name: "t5-newcomer",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      parentId: rootId,
+    })
+
+    const added = await post(`/api/groups/${createdJson.group.id}/members`, {
+      agentId: newcomer.id,
+    })
+    expect(added.status).toBe(200)
+
+    const notice = history(db, { conversationId: createdJson.group.id }).find(
+      (m) => m.kind === "system" && m.body.startsWith("你被拉入群「t5-notice」。成员："),
+    )
+    if (notice === undefined) throw new Error("expected the join system message in the group")
+    // 名单 = 全体成员 <名>(<id前8>)，新成员在列。
+    expect(notice.body).toContain(`用户(${humanId.slice(0, 8)})`)
+    expect(notice.body).toContain(`ui-root(${rootId.slice(0, 8)})`)
+    expect(notice.body).toContain(`t5-newcomer(${newcomer.id.slice(0, 8)})`)
+    // kind:"system" 豁免回归锁：入群通知 0 wake job（对每一名成员）。
+    for (const agentId of [humanId, rootId, newcomer.id]) {
+      expect(getWakeJob(db, notice.seq, agentId)).toBeUndefined()
+    }
   })
 })
 

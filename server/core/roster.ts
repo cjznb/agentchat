@@ -17,8 +17,17 @@
  */
 import { type AgentStatus, type RosterNode } from "../../shared/contracts"
 import type { Db } from "../db"
-import { listAgents, touchAgent, unreadCounts, type Agent } from "../store/agents"
+import {
+  AgentNotFoundError,
+  getAgent,
+  listAgents,
+  touchAgent,
+  unreadCounts,
+  type Agent,
+} from "../store/agents"
+import { getConversation, isParticipant, listParticipants, SHOUT_KEY } from "../store/conversations"
 import { emit } from "../ws"
+import { NotParticipantError } from "./messaging"
 
 /** 展示态离线阈值（brief：`last_seen` 超过 600000ms → roster 报 offline）。 */
 export const OFFLINE_AFTER_MS = 600_000
@@ -108,6 +117,75 @@ export function rosterTree(db: Db): RosterNode[] {
     }
   }
   return tree
+}
+
+/**
+ * 过滤变体（Task 5）：只保留 `memberIds` 中的节点，仍返回 `RosterNode[]` 森林。
+ * 非成员祖先被整节点跳过 —— 其成员子节点上浮到该位置（输出**只含成员**，
+ * 不留只作结构用途的非成员节点）；成员的成员子节点保持原层级。
+ */
+function pickMembers(nodes: readonly RosterNode[], memberIds: ReadonlySet<string>): RosterNode[] {
+  const kept: RosterNode[] = []
+  for (const node of nodes) {
+    const children = pickMembers(node.children, memberIds)
+    if (memberIds.has(node.id)) kept.push({ ...node, children })
+    else kept.push(...children)
+  }
+  return kept
+}
+
+/**
+ * 会话成员 roster（spec §4.4；Task 5）：只返回该会话成员的过滤森林（`RosterNode[]`）。
+ *
+ * - **成员闸门**（口径同 `ask-group` F1 / `resolveConversation`，T4 范式）：
+ *   非 human 且非会话成员 → `NotParticipantError`（code `not_participant`）——
+ *   堵死「非成员 agent 枚举他群成员名单」的越权读。单一核心函数，显式 requester 传参：
+ *   MCP `roster {conversation}` 传调用方身份；HTTP `GET /api/roster?conversation=`
+ *   传 human 身份（人类 UI 视图 → 超观察者豁免），不写两套。
+ * - shout 广播会话**无 participants 行**（`store/conversations` 决议 3）→ 该参数不接受
+ *   喊话会话：先于闸门判定、恒返回 `[]`（选「返回空」：无成员即空，无需新错误码）。
+ * - 未知会话 id：成员集为空 → `[]`；非成员 agent 先被闸门以 `not_participant` 拒绝
+ *   （未知 id 与既有非成员会话同码，不泄露会话存在性）。
+ */
+export function conversationRoster(
+  db: Db,
+  requesterId: string,
+  conversationId: string,
+): RosterNode[] {
+  if (getConversation(db, conversationId)?.key === SHOUT_KEY) return []
+  const requester = getAgent(db, requesterId)
+  if (requester === undefined) throw new AgentNotFoundError(requesterId)
+  if (requester.vendor !== "human" && !isParticipant(db, conversationId, requesterId)) {
+    throw new NotParticipantError(requesterId, conversationId)
+  }
+  const memberIds = new Set(listParticipants(db, conversationId).map((row) => row.agentId))
+  return pickMembers(rosterTree(db), memberIds)
+}
+
+/** 群成员卡片（`group op:list.member_cards`，spec §4.4；id + 展示名 + 展示态）。 */
+export interface MemberCard {
+  readonly id: string
+  readonly name: string
+  readonly status: AgentStatus
+}
+
+/**
+ * 会话成员卡片（Task 5）：id/name/status 与 roster 节点**同口径**（走 `rosterTree`
+ * 的展示态；Task 6 落展示名后改 `buildRoster` 即同时回归 roster 与本卡）。
+ * 无闸门 —— 供 `group op:list`（既有无闸读）在 `members` 旁附卡片。
+ */
+export function memberCards(db: Db, conversationId: string): MemberCard[] {
+  const memberIds = new Set(listParticipants(db, conversationId).map((row) => row.agentId))
+  if (memberIds.size === 0) return []
+  const cards: MemberCard[] = []
+  const walk = (nodes: readonly RosterNode[]): void => {
+    for (const node of nodes) {
+      if (memberIds.has(node.id)) cards.push({ id: node.id, name: node.name, status: node.status })
+      walk(node.children)
+    }
+  }
+  walk(rosterTree(db))
+  return cards
 }
 
 /**

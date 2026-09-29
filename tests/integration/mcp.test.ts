@@ -9,6 +9,9 @@
  *    conversation_required / invalid_choice / ask_already_answered
  * ⑥ Task 4：群 ask 出参 `asks[]` 判别 + mentions_required / mention_not_found /
  *    mention_not_participant 三错误码
+ * ⑦ Task 5：`roster{conversation}` 只返回群成员（非成员 not_participant、shout 空）+
+ *    `group op:list` 增 `member_cards`（`members` 形状不变）+ `group op:add` 入群
+ *    `kind:"system"` 通知（含名单、0 wake job）
  * 每个用例独立临时 $AGENTCHAT_HOME，真实监听 `start({port:0})`。
  */
 import { mkdtempSync, rmSync } from "node:fs"
@@ -32,18 +35,20 @@ import { start, type RunningServer } from "../../server/index"
 import { applyAgentState, ensureHubToken } from "../../server/routes/internal"
 import { getAgent, insertAgent, type Agent } from "../../server/store/agents"
 import { listApprovals } from "../../server/store/approvals"
+import { ensureShoutConversation } from "../../server/store/conversations"
 
-/** 十二工具金样例（运行时注入真实 peer id 与可答复 ask id；键集合即「接线错误」检测基准）。 */
+/** 十二工具金样例（运行时注入真实 peer id、可答复 ask id 与成员会话 id；键集合即「接线错误」检测基准）。 */
 function goldenInputs(
   peerId: string,
   answerableAskId: string,
+  rosterConversationId: string,
 ): Record<McpToolName, Record<string, unknown>> {
   return {
     register: { name: "golden-root", kind: "runtime", vendor: "opencode", model: "test" },
     send: { to: peerId, body: "hi" },
     inbox: { conversation: "c", after: 0, ack: true },
     ack: { message_ids: ["abcdef"] },
-    roster: { filter: "golden", online_only: true },
+    roster: { filter: "golden", online_only: true, conversation: rosterConversationId },
     conversation: { id: "conv", before: 10, limit: 5 },
     group: { op: "create", name: "golden-group", member_ids: [] },
     shout: { body: "hello" },
@@ -247,7 +252,15 @@ describe("tools/list 与十二工具金样例端到端（DoD ①，Important #1�
     // 预置一条可答复 ask（peer → actor：actor 为 target），令 respond_ask 金样例有落点。
     sendMessage(db, { from: peer.id, to: actor.id, body: "seed-dm" })
     const seeded = ask(db, peer.id, { to: actor.id, question: "seeded?", options: ["yes", "no"] })
-    const golden = goldenInputs(peer.id, seeded.ask.id)
+    // 预置一个 actor 所在的群，令 `roster{conversation}` 金样例过成员闸门（Task 5）。
+    const human = ensureHuman(db)
+    const rosterGroup = createGroup(db, {
+      name: "golden-roster-group",
+      createdBy: human.id,
+      memberIds: [actor.id],
+    })
+    if (!("approved" in rosterGroup)) throw new Error("human group creation must execute immediately")
+    const golden = goldenInputs(peer.id, seeded.ask.id, rosterGroup.approved.id)
     const client = await connect(actor.id)
     try {
       const { tools } = await client.listTools()
@@ -550,6 +563,140 @@ describe("群 ask 出参与错误码（Task 4，spec §3.2/§3.3）", () => {
     } finally {
       await client.close()
     }
+  })
+})
+
+// ── Task 5：roster{conversation} 过滤 + 成员闸门 + 群成员卡片 + 入群通知 ─────
+
+describe("roster{conversation} 过滤与成员闸门（Task 5，spec §4.4）", () => {
+  it("returns only group members to a member and rejects an outsider with not_participant", async () => {
+    const human = ensureHuman(db)
+    const member = makeAgent("mcp-t5-member")
+    const outsider = makeAgent("mcp-t5-outsider")
+    const group = createGroup(db, {
+      name: "t5-roster-group",
+      createdBy: human.id,
+      memberIds: [member.id],
+    })
+    if (!("approved" in group)) throw new Error("human group creation must execute immediately")
+
+    const memberClient = await connect(member.id)
+    try {
+      const result = await callTool(memberClient, "roster", { conversation: group.approved.id })
+      expect(toolFailed(result)).toBe(false)
+      const nodes = MCP_TOOL_OUTPUTS.roster.parse(JSON.parse(textOf(result)))
+      expect(new Set(nodes.map((node) => node.id))).toEqual(new Set([human.id, member.id]))
+      for (const node of nodes) expect(node.name.length).toBeGreaterThan(0)
+    } finally {
+      await memberClient.close()
+    }
+
+    // 非成员 agent 枚举他群成员名单 = 越权读 → not_participant（评审点名的 membership gate）。
+    const outsiderClient = await connect(outsider.id)
+    try {
+      const denied = await callTool(outsiderClient, "roster", { conversation: group.approved.id })
+      expect(toolFailed(denied)).toBe(true)
+      expect(textOf(denied)).toContain("[not_participant]")
+    } finally {
+      await outsiderClient.close()
+    }
+  })
+
+  it("treats the shout conversation as an empty member set (parameter not accepted)", async () => {
+    const human = ensureHuman(db)
+    const outsider = makeAgent("mcp-t5-shout-outsider")
+    const shoutConversation = ensureShoutConversation(db, human.id)
+
+    const client = await connect(outsider.id)
+    try {
+      const result = await callTool(client, "roster", { conversation: shoutConversation.id })
+      expect(toolFailed(result)).toBe(false)
+      expect(MCP_TOOL_OUTPUTS.roster.parse(JSON.parse(textOf(result)))).toEqual([])
+    } finally {
+      await client.close()
+    }
+  })
+})
+
+describe("group op:list 成员卡片（Task 5，member_cards additive）", () => {
+  it("keeps members as an id array and adds member_cards {id,name,status}", async () => {
+    const human = ensureHuman(db)
+    const first = makeAgent("mcp-t5-list-a")
+    const second = makeAgent("mcp-t5-list-b")
+    const outsider = makeAgent("mcp-t5-list-outsider")
+    const group = createGroup(db, {
+      name: "t5-list-group",
+      createdBy: human.id,
+      memberIds: [first.id, second.id],
+    })
+    if (!("approved" in group)) throw new Error("human group creation must execute immediately")
+
+    const client = await connect(first.id)
+    try {
+      const result = await callTool(client, "group", { op: "list" })
+      expect(toolFailed(result)).toBe(false)
+      const parsed = MCP_TOOL_OUTPUTS.group.parse(JSON.parse(textOf(result)))
+      if (!("groups" in parsed)) throw new Error("expected the groups list output")
+      const listed = parsed.groups.find((entry) => entry.id === group.approved.id)
+      if (listed === undefined) throw new Error("expected the created group in the list")
+
+      // `members` 形状不变：id 数组。
+      expect(new Set(listed.members)).toEqual(new Set([human.id, first.id, second.id]))
+      expect(listed.members).not.toContain(outsider.id)
+      // `member_cards` additive：每卡 id + name + status，与成员集一一对应。
+      expect(listed.member_cards).toHaveLength(3)
+      expect(new Set(listed.member_cards?.map((card) => card.id))).toEqual(
+        new Set(listed.members),
+      )
+      for (const card of listed.member_cards ?? []) {
+        expect(card.name.length).toBeGreaterThan(0)
+      }
+    } finally {
+      await client.close()
+    }
+  })
+})
+
+describe("group op:add 入群 system 通知（Task 5）", () => {
+  it("delivers a kind:'system' join notice with the member roster and creates zero wake jobs", async () => {
+    const human = ensureHuman(db)
+    const actor = makeAgent("mcp-t5-add-actor")
+    const newcomer = makeAgent("mcp-t5-newcomer")
+    const group = createGroup(db, {
+      name: "t5-add-group",
+      createdBy: human.id,
+      memberIds: [actor.id],
+    })
+    if (!("approved" in group)) throw new Error("human group creation must execute immediately")
+
+    const client = await connect(actor.id)
+    try {
+      const result = await callTool(client, "group", {
+        op: "add",
+        group: group.approved.id,
+        member: newcomer.id,
+      })
+      expect(toolFailed(result)).toBe(false)
+      expect(JSON.parse(textOf(result))).toEqual({ ok: true })
+    } finally {
+      await client.close()
+    }
+
+    // 新成员收件箱收到入群通知（body 为 brief 逐字格式，名单含全体成员 名字(id前8)）。
+    const notice = inbox(db, newcomer.id).find(
+      (m) => m.kind === "system" && m.body.startsWith("你被拉入群「t5-add-group」。成员："),
+    )
+    if (notice === undefined) throw new Error("expected the join system message in the newcomer inbox")
+    expect(notice.conversationId).toBe(group.approved.id)
+    expect(notice.body).toContain(`用户(${human.id.slice(0, 8)})`)
+    expect(notice.body).toContain(`mcp-t5-add-actor(${actor.id.slice(0, 8)})`)
+    expect(notice.body).toContain(`mcp-t5-newcomer(${newcomer.id.slice(0, 8)})`)
+
+    // kind:"system" 豁免回归锁：该入群通知 0 wake job（全库计数）。
+    const wakeRows = db
+      .prepare<[number], { n: number }>("SELECT COUNT(*) AS n FROM wake_jobs WHERE message_id = ?")
+      .get(notice.seq)
+    expect(wakeRows?.n).toBe(0)
   })
 })
 

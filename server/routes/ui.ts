@@ -8,9 +8,10 @@
  */
 import { Hono } from "hono"
 import { z } from "zod"
-import { rosterTree } from "../core/agents"
+import { conversationRoster, rosterTree } from "../core/agents"
 import {
   addParticipant as gatedAddParticipant,
+  applyAddParticipant,
   ContainerNotChatTargetError,
   createGroup as gatedCreateGroup,
   NotParticipantError,
@@ -35,7 +36,7 @@ import { config } from "../config"
 import { openDb, type Db } from "../db"
 import { getAgent } from "../store/agents"
 import { getApproval, listApprovals, type Approval } from "../store/approvals"
-import { addParticipant, createDm, createGroup, getConversation } from "../store/conversations"
+import { createDm, createGroup, getConversation } from "../store/conversations"
 import { latestInConversation } from "../store/messages"
 import { markRead } from "../store/read_states"
 
@@ -82,7 +83,8 @@ function executeApproved(db: Db, approval: Approval): void {
     }
     case "group_add": {
       const { conversationId, agentId, role } = groupAddPayloadSchema.parse(approval.payload)
-      addParticipant(db, {
+      // 批准执行与闸内执行共用同一落地路径（store 写入 + 入群 system 通知，Task 5）。
+      applyAddParticipant(db, {
         conversationId,
         agentId,
         invitedBy: approval.requesterAgentId,
@@ -106,8 +108,12 @@ export function uiRoutes(db?: Db): Hono {
   return new Hono()
     .get("/api/roster", (c) => {
       const database = resolveDb(db)
-      ensureHuman(database)
-      return c.json(rosterTree(database))
+      const human = ensureHuman(database)
+      // Task 5：`?conversation=` 只返回该会话成员（人类 UI 视图 → 以 human 身份过闸，
+      // 超观察者豁免；shout/未知会话按核心口径返回空数组）。缺省/空值行为与现状一致。
+      const conversation = c.req.query("conversation")
+      if (conversation === undefined || conversation === "") return c.json(rosterTree(database))
+      return c.json(conversationRoster(database, human.id, conversation))
     })
     // Task 4：审批列表只列**审批单**（kind='action'）—— 批示单（ask）归 `/api/notifications`（含 ask）。
     .get("/api/approvals", (c) => c.json(listApprovals(resolveDb(db), "pending", "action")))

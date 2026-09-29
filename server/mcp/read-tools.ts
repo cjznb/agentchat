@@ -3,7 +3,7 @@
  * 群与喊话入口经 core 审批闸门（Task 7）：返回 `{approval}` 时不执行，交人审批。
  */
 import type { McpToolInput } from "../../shared/contracts"
-import { rosterTree, type RosterNode } from "../core/agents"
+import { conversationRoster, memberCards, rosterTree, type RosterNode } from "../core/agents"
 import {
   addParticipant,
   createGroup,
@@ -22,8 +22,12 @@ import {
 } from "./context"
 
 export function runRoster(ctx: ToolContext, input: McpToolInput<"roster">): unknown {
-  requireIdentity(ctx)
-  const tree = rosterTree(ctx.db)
+  const requester = requireIdentity(ctx)
+  // Task 5：`conversation` → 只返回该会话成员（带成员闸门，非成员 agent → not_participant）。
+  const tree =
+    input.conversation === undefined
+      ? rosterTree(ctx.db)
+      : conversationRoster(ctx.db, requester, input.conversation)
   const needle = input.filter?.toLowerCase()
   const onlineOnly = input.online_only === true
   if (needle === undefined && !onlineOnly) return tree
@@ -75,7 +79,11 @@ export function runGroup(ctx: ToolContext, input: McpToolInput<"group">): unknow
           id: conversation.id,
           name: conversation.name ?? null,
           created_by: conversation.createdBy,
-          members: listParticipants(ctx.db, conversation.id).map((participant) => participant.agentId),
+          // Task 5：`members` id 数组形状不变；`member_cards` additive（id+名+展示态）。
+          members: listParticipants(ctx.db, conversation.id).map(
+            (participant) => participant.agentId,
+          ),
+          member_cards: memberCards(ctx.db, conversation.id),
         }))
       return { groups }
     }
