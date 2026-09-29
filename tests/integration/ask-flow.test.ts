@@ -7,6 +7,8 @@
  * ③ 代答：MCP `ask{to:B}`（B 为 agent）→ 人经 REST 答复 → B 的 inbox 收到答复消息（`meta.askId`）。
  * ④ 过期：MCP `ask` 后注入时钟推进 >24h → `dispatcher.tick(now)` 触发 sweep →
  *    单据 `expired` + 发起方收「批示已过期」system 回执。
+ * ⑤ Task 4 群 ask 三形态：`scope:"all"` 全回 `timedOut:false` / 仅一人回超时 `pending[]` /
+ *    `scope:"any"` 首回即返回 / 不传 `wait` 立即返回 `asks`（无 `reply`）。
  *
  * 既有模式：临时 `$AGENTCHAT_HOME` + `loadConfig` + 真实监听 `start({port:0})`；注入时钟，无长 sleep。
  */
@@ -21,12 +23,13 @@ import { MCP_TOOL_OUTPUTS, notificationListSchema } from "../../shared/contracts
 import { loadConfig } from "../../server/config"
 import { Dispatcher } from "../../server/core/dispatcher"
 import { inbox, sendMessage } from "../../server/core/messaging"
-import { APPROVAL_TTL_MS, ensureHuman } from "../../server/core/permissions"
+import { APPROVAL_TTL_MS, ensureHuman, respondAsk } from "../../server/core/permissions"
 import { openDb, type Db } from "../../server/db"
 import { start, type RunningServer } from "../../server/index"
 import { ensureHubToken } from "../../server/routes/internal"
 import { insertAgent, type Agent } from "../../server/store/agents"
-import { getApproval, listApprovals } from "../../server/store/approvals"
+import { getApproval, listApprovals, type Approval } from "../../server/store/approvals"
+import { createGroup } from "../../server/store/conversations"
 import { history } from "../../server/store/messages"
 
 let home = ""
@@ -91,6 +94,14 @@ function parseAsk(result: unknown) {
   const parsed = MCP_TOOL_OUTPUTS.ask.parse(JSON.parse(textOf(result)))
   // 契约现为「DM 单卡 | 群 asks[]」判别联合（shared/contracts Task 2）；本助手只服务 DM 场景。
   if (!("ask" in parsed)) throw new Error("expected single ask output, got group asks[]")
+  return parsed
+}
+
+/** 解析 MCP `ask` 群形态出参（`{asks, reply?}`，spec §3.3）；调用失败即抛。 */
+function parseAskGroup(result: unknown) {
+  if (toolFailed(result)) throw new Error(`ask failed: ${textOf(result)}`)
+  const parsed = MCP_TOOL_OUTPUTS.ask.parse(JSON.parse(textOf(result)))
+  if (!("asks" in parsed)) throw new Error("expected group asks[] output, got DM single ask")
   return parsed
 }
 
@@ -256,5 +267,138 @@ describe("场景④ 过期（注入时钟 + dispatcher sweep）", () => {
         message.body.includes("批示已过期"),
     )
     expect(receipt).toBeDefined()
+  })
+})
+
+// ── Task 4：群 ask 三形态等待（spec §3.4）────────────────────────────
+
+describe("群 ask 三形态等待（Task 4，spec §3.4）", () => {
+  /** 群夹具：发起方（owner）+ 两成员，发起方经 MCP 发起群 ask 并持有客户端。 */
+  async function seed(prefix: string) {
+    const asker = makeAgent(`${prefix}-asker`)
+    const b = makeAgent(`${prefix}-b`)
+    const c = makeAgent(`${prefix}-c`)
+    const group = createGroup(db, { name: `${prefix}-group`, createdBy: asker.id, memberIds: [b.id, c.id] })
+    const client = await connect(asker.id)
+    return { asker, b, c, group, client }
+  }
+
+  /** 轮询到指定数量的 pending ask 单（群 ask = N 张卡，挂起期间已同步落库）。 */
+  async function pendingAskCards(count: number): Promise<Approval[]> {
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline) {
+      const cards = listApprovals(db, "pending").filter((approval) => approval.kind === "ask")
+      if (cards.length >= count) return cards
+      await delay(10)
+    }
+    throw new Error(`expected ${count} pending ask cards in time`)
+  }
+
+  /** 按 `target` 定位群卡（`created_at` 同毫秒时 id 序不可依赖）。 */
+  function cardFor(cards: readonly Approval[], targetId: string): Approval {
+    const card = cards.find((approval) => approval.target === targetId)
+    if (card === undefined) throw new Error(`no ask card for target ${targetId}`)
+    return card
+  }
+
+  it("scope=all resolves with both replies after the two members answer", async () => {
+    const { b, c, group, client } = await seed("flow-gask-all")
+    try {
+      const pending = client.callTool({
+        name: "ask",
+        arguments: {
+          to: group.id,
+          question: "走哪条线？",
+          options: ["x", "y"],
+          mentions: [b.name, c.name],
+          wait: { until: "message", timeoutMs: 5000, scope: "all" },
+        },
+      })
+      const cards = await pendingAskCards(2)
+      respondAsk(db, cardFor(cards, b.id).id, b.id, { choice: "x" })
+      respondAsk(db, cardFor(cards, c.id).id, c.id, { choice: "y" })
+
+      const settled = parseAskGroup(await pending)
+      expect(settled.reply?.timedOut).toBe(false)
+      expect(settled.reply?.replies).toEqual([
+        { target: b.id, choice: "x" },
+        { target: c.id, choice: "y" },
+      ])
+      expect(settled.reply?.pending).toEqual([])
+      expect(settled.asks).toHaveLength(2)
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("scope=all times out with the answered subset and pending holding the other member id", async () => {
+    const { b, c, group, client } = await seed("flow-gask-to")
+    try {
+      const pending = client.callTool({
+        name: "ask",
+        arguments: {
+          to: group.id,
+          question: "有人接吗？",
+          options: ["x", "y"],
+          mentions: [b.name, c.name],
+          wait: { until: "message", timeoutMs: 500, scope: "all" },
+        },
+      })
+      const cards = await pendingAskCards(2)
+      respondAsk(db, cardFor(cards, b.id).id, b.id, { choice: "x" })
+
+      const settled = parseAskGroup(await pending)
+      expect(settled.reply?.timedOut).toBe(true)
+      expect(settled.reply?.replies).toEqual([{ target: b.id, choice: "x" }])
+      expect(settled.reply?.pending).toEqual([c.id])
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("scope=any returns on the first answer with the rest pending", async () => {
+    const { b, c, group, client } = await seed("flow-gask-any")
+    try {
+      const pending = client.callTool({
+        name: "ask",
+        arguments: {
+          to: group.id,
+          question: "谁接这活？",
+          options: ["x", "y"],
+          mentions: [b.name, c.name],
+          wait: { until: "message", timeoutMs: 5000, scope: "any" },
+        },
+      })
+      const cards = await pendingAskCards(2)
+      respondAsk(db, cardFor(cards, c.id).id, c.id, { choice: "y" })
+
+      const settled = parseAskGroup(await pending)
+      expect(settled.reply?.timedOut).toBe(false)
+      expect(settled.reply?.replies).toEqual([{ target: c.id, choice: "y" }])
+      expect(settled.reply?.pending).toEqual([b.id])
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("without wait returns the asks immediately with no reply (async form)", async () => {
+    const { b, c, group, client } = await seed("flow-gask-async")
+    try {
+      const result = await client.callTool({
+        name: "ask",
+        arguments: {
+          to: group.id,
+          question: "异步问一下？",
+          options: ["x", "y"],
+          mentions: [b.name, c.name],
+        },
+      })
+      const parsed = parseAskGroup(result)
+      expect(parsed).not.toHaveProperty("reply")
+      expect(parsed.asks).toHaveLength(2)
+      expect(parsed.asks.map((card) => card.target).sort()).toEqual([b.id, c.id].sort())
+    } finally {
+      await client.close()
+    }
   })
 })

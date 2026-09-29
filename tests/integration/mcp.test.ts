@@ -7,6 +7,8 @@
  * ④ `register` 首次 → join_token → 离线后再认领同 id 回 online
  * ⑤ Task 3：`ask`/`respond_ask` 端到端（human 与 agent 两答复路径）+ 错误码
  *    conversation_required / invalid_choice / ask_already_answered
+ * ⑥ Task 4：群 ask 出参 `asks[]` 判别 + mentions_required / mention_not_found /
+ *    mention_not_participant 三错误码
  * 每个用例独立临时 $AGENTCHAT_HOME，真实监听 `start({port:0})`。
  */
 import { mkdtempSync, rmSync } from "node:fs"
@@ -468,6 +470,83 @@ describe("ask/respond_ask 错误契约（DoD ⑤）", () => {
       const again = await callTool(client, "respond_ask", { ask_id: seeded.ask.id, choice: "b" })
       expect(toolFailed(again)).toBe(true)
       expect(textOf(again)).toContain("ask_already_answered")
+    } finally {
+      await client.close()
+    }
+  })
+})
+
+describe("群 ask 出参与错误码（Task 4，spec §3.2/§3.3）", () => {
+  /** human 建群（即时执行）：成员 = actor + peer，发起方 actor 经 MCP 发起群 ask。 */
+  function seedGroup(actor: Agent, peer: Agent, name: string) {
+    const group = createGroup(db, {
+      name,
+      createdBy: ensureHuman(db).id,
+      memberIds: [actor.id, peer.id],
+    })
+    if (!("approved" in group)) throw new Error("human group creation must execute immediately")
+    return group.approved
+  }
+
+  it("returns asks[] for a group ask without wait (group discriminant, no reply)", async () => {
+    const actor = makeAgent("mcp-gask-actor")
+    const peer = makeAgent("mcp-gask-peer")
+    const group = seedGroup(actor, peer, "mcp-gask-group")
+    const client = await connect(actor.id)
+    try {
+      const result = await callTool(client, "ask", {
+        to: group.id,
+        question: "哪个方案？",
+        options: ["x", "y"],
+        mentions: [peer.name],
+      })
+      expect(toolFailed(result)).toBe(false)
+      const parsed = MCP_TOOL_OUTPUTS.ask.parse(JSON.parse(textOf(result)))
+      if (!("asks" in parsed)) throw new Error("expected group asks[] output, got DM single ask")
+      expect(parsed).not.toHaveProperty("reply")
+      expect(parsed.asks).toHaveLength(1)
+      expect(parsed.asks[0]).toMatchObject({ kind: "ask", status: "pending", target: peer.id })
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("maps mentions_required, mention_not_found (with the list) and mention_not_participant", async () => {
+    const actor = makeAgent("mcp-gask-err-actor")
+    const peer = makeAgent("mcp-gask-err-peer")
+    const outsider = makeAgent("mcp-gask-err-outsider")
+    const group = seedGroup(actor, peer, "mcp-gask-err-group")
+    const client = await connect(actor.id)
+    try {
+      const noMentions = await callTool(client, "ask", {
+        to: group.id,
+        question: "q",
+        options: [],
+      })
+      expect(toolFailed(noMentions)).toBe(true)
+      expect(textOf(noMentions)).toContain("mentions_required")
+
+      const typo = await callTool(client, "ask", {
+        to: group.id,
+        question: "q",
+        options: [],
+        mentions: ["不存在的人"],
+      })
+      expect(toolFailed(typo)).toBe(true)
+      expect(textOf(typo)).toContain("mention_not_found")
+      expect(textOf(typo)).toContain("不存在的人")
+
+      const notMember = await callTool(client, "ask", {
+        to: group.id,
+        question: "q",
+        options: [],
+        mentions: [outsider.name],
+      })
+      expect(toolFailed(notMember)).toBe(true)
+      expect(textOf(notMember)).toContain("mention_not_participant")
+
+      // 三个错误都在建卡前抛出：无孤儿单据。
+      expect(listApprovals(db)).toHaveLength(0)
     } finally {
       await client.close()
     }

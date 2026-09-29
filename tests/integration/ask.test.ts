@@ -9,6 +9,9 @@
  * - `ask{wait}`：respond 后 `{ask:已决,timedOut:false}`；短超时 → `{ask:pending,timedOut:true}`
  * - `sweepExpired` 覆盖 `kind='ask'`：24h → `expired` + 发起方收「批示过期」system 回执（R2）
  * - R1：`approvalSnapshotSchema` / MCP 审批出参容纳 `'ask'`；`emitApproval` 对 ask 行自校验通过
+ * - Task 4：群 ask —— `mentions_required` / `mention_not_found`（含名单）/ `mention_not_participant`
+ *   三错误码、一目标一卡、三形态等待（`scope:"all"` 全回 / 缺省 all 超时带 `pending` /
+ *   `scope:"any"` 首回即返回 / 不传 `wait` 立即返回 `asks` 无 `reply`）
  * 每个用例使用独立临时 $AGENTCHAT_HOME。
  */
 import { mkdtempSync, rmSync } from "node:fs"
@@ -27,12 +30,16 @@ import {
   ConversationRequiredError,
   ensureHuman,
   InvalidChoiceError,
+  MentionNotParticipantError,
+  MentionNotFoundError,
+  MentionsRequiredError,
   respondAsk,
   SelfAskError,
   sweepExpired,
 } from "../../server/core/permissions"
+import { askGroup } from "../../server/core/ask-group"
 import { openDb, type Db } from "../../server/db"
-import { getApproval, listApprovals } from "../../server/store/approvals"
+import { getApproval, listApprovals, type Approval } from "../../server/store/approvals"
 import {
   createDm,
   createGroup,
@@ -467,5 +474,186 @@ describe("ask{wait}: 群会话第三方消息不提前解锁、不忙旋（revie
     } finally {
       spy.mockRestore()
     }
+  })
+})
+
+// ── Task 4：群内 ask（spec §3.2/§3.3/§3.4）─────────────────────────
+
+/** 建群夹具：发起方 a（owner）+ 成员 b/c（`recipientsOf` 口径下可提及 = b/c）。 */
+function seedGroup(prefix: string) {
+  const a = makeRoot(`${prefix}-a`)
+  const b = makeRoot(`${prefix}-b`)
+  const c = makeRoot(`${prefix}-c`)
+  const group = createGroup(db, { name: `${prefix}-group`, createdBy: a.id, memberIds: [b.id, c.id] })
+  return { a, b, c, group }
+}
+
+/** 按 `target` 定位群卡（`created_at` 同毫秒时 id 序不可依赖）。 */
+function cardFor(cards: readonly Approval[], targetId: string): Approval {
+  const card = cards.find((approval) => approval.target === targetId)
+  if (card === undefined) throw new Error(`no ask card for target ${targetId}`)
+  return card
+}
+
+function pendingAskCards(): Approval[] {
+  return listApprovals(db, "pending").filter((approval) => approval.kind === "ask")
+}
+
+describe("群 ask：目标解析与错误码（Task 4，spec §3.2/§6）", () => {
+  it("rejects a group ask without mentions with mentions_required (ask 与 askGroup 同码，无孤儿单)", () => {
+    const { a, group } = seedGroup("g-req")
+
+    const viaAsk = errorOf(() => ask(db, a.id, { to: group.id, question: "?", options: ["ok"] }))
+    expect(viaAsk).toBeInstanceOf(MentionsRequiredError)
+    expect(viaAsk).toMatchObject({ code: "mentions_required" })
+
+    const viaGroup = errorOf(() => askGroup(db, a.id, { to: group.id, question: "?", options: ["ok"] }))
+    expect(viaGroup).toBeInstanceOf(MentionsRequiredError)
+    expect(viaGroup).toMatchObject({ code: "mentions_required" })
+    expect(listApprovals(db)).toHaveLength(0)
+  })
+
+  it("reports mention_not_found with the unmatched list and creates no card", () => {
+    const { a, group } = seedGroup("g-nf")
+
+    const error = errorOf(() =>
+      askGroup(db, a.id, {
+        to: group.id,
+        question: "?",
+        options: ["ok"],
+        mentions: ["不存在的人"],
+      }),
+    )
+
+    expect(error).toBeInstanceOf(MentionNotFoundError)
+    expect(error).toMatchObject({ code: "mention_not_found", unmatched: ["不存在的人"] })
+    expect(error.message).toContain("不存在的人")
+    expect(listApprovals(db)).toHaveLength(0)
+  })
+
+  it("reports mention_not_participant when the mentioned node is real but outside the group", () => {
+    const { a, group } = seedGroup("g-np")
+    const outsider = makeRoot("g-np-outsider")
+
+    const error = errorOf(() =>
+      askGroup(db, a.id, {
+        to: group.id,
+        question: "?",
+        options: ["ok"],
+        mentions: [outsider.name],
+      }),
+    )
+
+    expect(error).toBeInstanceOf(MentionNotParticipantError)
+    expect(error).toMatchObject({ code: "mention_not_participant", outsiders: [outsider.name] })
+    expect(listApprovals(db)).toHaveLength(0)
+  })
+
+  it("creates one card per mentioned member in that group (no wait → asks, no reply)", () => {
+    const { a, b, c, group } = seedGroup("g-cards")
+
+    const result = askGroup(db, a.id, {
+      to: group.id,
+      question: "走哪个方案？",
+      options: ["x", "y"],
+      mentions: [b.name, c.name],
+    })
+
+    expect(result.asks).toHaveLength(2)
+    expect(result.asks.map((card) => card.target)).toEqual([b.id, c.id])
+    expect(result).not.toHaveProperty("reply")
+    for (const card of result.asks) {
+      expect(card).toMatchObject({ kind: "ask", status: "pending" })
+      expect(card.payload).toMatchObject({ conversationId: group.id })
+      expect(messagesWithAsk(group.id, card.id)).toHaveLength(1)
+    }
+  })
+})
+
+describe("群 ask：三形态等待（Task 4，spec §3.4）", () => {
+  it("scope=all blocks until both cards are answered, then returns timedOut:false", async () => {
+    const { a, b, c, group } = seedGroup("g-all")
+    const pending = askGroup(db, a.id, {
+      to: group.id,
+      question: "走哪条线？",
+      options: ["x", "y"],
+      mentions: [b.name, c.name],
+      wait: { until: "message", timeoutMs: 4000, scope: "all" },
+    })
+    const cards = pendingAskCards()
+    expect(cards).toHaveLength(2)
+
+    respondAsk(db, cardFor(cards, b.id).id, b.id, { choice: "x" })
+    // 仅一人回：scope=all 不得提前解锁。
+    const raced = await Promise.race([
+      pending.then(() => "resolved" as const),
+      delay(120).then(() => "alive" as const),
+    ])
+    expect(raced).toBe("alive")
+
+    respondAsk(db, cardFor(cards, c.id).id, c.id, { choice: "y" })
+    const outcome = await pending
+    expect(outcome.reply.timedOut).toBe(false)
+    expect(outcome.reply.replies).toEqual([
+      { target: b.id, choice: "x" },
+      { target: c.id, choice: "y" },
+    ])
+    expect(outcome.reply.pending).toEqual([])
+    expect(outcome.asks).toHaveLength(2)
+  })
+
+  it("scope=all times out with the answered subset and the pending target id", async () => {
+    const { a, b, c, group } = seedGroup("g-to")
+    const pending = askGroup(db, a.id, {
+      to: group.id,
+      question: "有人接吗？",
+      options: ["x", "y"],
+      mentions: [b.name, c.name],
+      wait: { until: "message", timeoutMs: 400, scope: "all" },
+    })
+    const cards = pendingAskCards()
+    expect(cards).toHaveLength(2)
+    respondAsk(db, cardFor(cards, b.id).id, b.id, { choice: "x" })
+
+    const outcome = await pending
+    expect(outcome.reply.timedOut).toBe(true)
+    expect(outcome.reply.replies).toEqual([{ target: b.id, choice: "x" }])
+    expect(outcome.reply.pending).toEqual([c.id])
+  })
+
+  it("scope=any returns as soon as the first member answers", async () => {
+    const { a, b, c, group } = seedGroup("g-any")
+    const pending = askGroup(db, a.id, {
+      to: group.id,
+      question: "谁接这活？",
+      options: ["x", "y"],
+      mentions: [b.name, c.name],
+      wait: { until: "message", timeoutMs: 4000, scope: "any" },
+    })
+    const cards = pendingAskCards()
+    expect(cards).toHaveLength(2)
+    respondAsk(db, cardFor(cards, c.id).id, c.id, { choice: "y" })
+
+    const outcome = await pending
+    expect(outcome.reply.timedOut).toBe(false)
+    expect(outcome.reply.replies).toEqual([{ target: c.id, choice: "y" }])
+    expect(outcome.reply.pending).toEqual([b.id])
+  })
+
+  it("defaults scope to all when wait omits it (partial answer still times out)", async () => {
+    const { a, b, c, group } = seedGroup("g-def")
+    const pending = askGroup(db, a.id, {
+      to: group.id,
+      question: "缺省 scope？",
+      options: ["x", "y"],
+      mentions: [b.name, c.name],
+      wait: { until: "message", timeoutMs: 300 },
+    })
+    const cards = pendingAskCards()
+    respondAsk(db, cardFor(cards, b.id).id, b.id, { choice: "x" })
+
+    const outcome = await pending
+    expect(outcome.reply.timedOut).toBe(true)
+    expect(outcome.reply.pending).toEqual([c.id])
   })
 })
