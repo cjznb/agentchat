@@ -55,6 +55,11 @@ export class RegistrationError extends Error {
  * 注册认领的 `offline→online` 属 spec §5.2 身份认领（重启带 token），不走此白名单；
  * 另经状态上报的 `offline→online` 是展示态落库后的**重激活**（roster 把超阈值节点写成
  * offline，活节点的心跳上报必须能拉回，否则永久卡死）——白名单放行，`touchAgent` 拉回。
+ *
+ * **有意不放行 `offline→busy`（spec 既有裁决，勿扩矩阵）**：展示态落库 offline 后，
+ * 节点若持续上报 busy 会收到 409，直至其首次 idle/online 上报重激活（白名单 offline→online
+ * 已放行）。即「忙回合跨过阈值被判离线」的节点在下一帧 idle 前会短暂 409，这是**有意为之**
+ * （busy 不是一次可自行脱离的重激活入口，只有回到 online/idle 才证明它活着）。
  */
 const ALLOWED_TRANSITIONS: Record<AgentStatus, readonly AgentStatus[]> = {
   online: ["busy", "offline", "retired"],

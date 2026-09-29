@@ -12,7 +12,8 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import Database from "better-sqlite3"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   canTransition,
   OFFLINE_AFTER_MS,
@@ -27,6 +28,7 @@ import {
 import { loadConfig } from "../../server/config"
 import { openDb, type Db } from "../../server/db"
 import { createApp } from "../../server/index"
+import { applyAgentState } from "../../server/routes/internal"
 import { AgentNotFoundError, getAgent, touchAgent } from "../../server/store/agents"
 import { createDm } from "../../server/store/conversations"
 import { send } from "../../server/store/messages"
@@ -282,6 +284,62 @@ describe("rosterTree", () => {
     const rootNode = rosterTree(db).find((n) => n.id === root.id)
 
     expect(rootNode?.children.find((n) => n.id === child.id)?.status).toBe("retired")
+  })
+
+  // Important #1：写失败不得拖死读 —— 只读连接上 SELECT 成功、UPDATE 抛 SQLITE_READONLY。
+  it("returns the correct tree without throwing when the offline persist write fails (readonly connection)", () => {
+    const { agent } = registerRoot(db, home, { name: "ro-stale" })
+    db.prepare<[number, string], void>("UPDATE agents SET last_seen = ? WHERE id = ?").run(
+      Date.now() - OFFLINE_AFTER_MS - 1,
+      agent.id,
+    )
+    // 同库第二条**只读**连接：展示态可算（SELECT 通），落库必败（UPDATE → SQLITE_READONLY）。
+    const roDb = new Database(loadConfig({ AGENTCHAT_HOME: home }).dbPath, { readonly: true })
+    const logged: unknown[][] = []
+    const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logged.push(args)
+    })
+    resetWsHub()
+    const before = currentWsSeq()
+    try {
+      const tree = rosterTree(roDb)
+
+      // 读照常成功，展示态正确（未抛、非 500）。
+      expect(tree.find((n) => n.id === agent.id)?.status).toBe("offline")
+      // 写确实失败：行仍是 online（未被半写），也未发树事件。
+      expect(getAgent(db, agent.id)?.status).toBe("online")
+      expect(currentWsSeq()).toBe(before)
+      // 失败被记日志（而非静默）。
+      expect(logged.length).toBeGreaterThan(0)
+    } finally {
+      spy.mockRestore()
+      roDb.close()
+    }
+  })
+})
+
+// 展示态落库 offline 后的状态上报序列（有意裁决：offline→busy 409，offline→online 放行）。
+describe("展示态落库 offline 后的状态上报", () => {
+  it("rejects busy with 409 while offline, then reactivates on the first online report", () => {
+    const { agent } = registerRoot(db, home, { name: "reactivate-root" })
+    db.prepare<[number, string], void>("UPDATE agents SET last_seen = ? WHERE id = ?").run(
+      Date.now() - OFFLINE_AFTER_MS - 1,
+      agent.id,
+    )
+    rosterTree(db) // 读路径把超阈值行落库 offline
+    expect(getAgent(db, agent.id)?.status).toBe("offline")
+
+    // 持续上报 busy → 409（白名单不扩：offline→busy 仍拒），行不动。
+    expect(applyAgentState(db, { agentId: agent.id, state: "busy" })).toEqual({
+      ok: false,
+      error: "transition_rejected",
+      status: 409,
+    })
+    expect(getAgent(db, agent.id)?.status).toBe("offline")
+
+    // 首次 idle（→online）上报重激活，200 + 拉回 online。
+    expect(applyAgentState(db, { agentId: agent.id, state: "idle" })).toEqual({ ok: true })
+    expect(getAgent(db, agent.id)?.status).toBe("online")
   })
 })
 

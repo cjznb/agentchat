@@ -8,6 +8,8 @@
  *   （status coherence 修复：死节点从「`defer(reason=null)` 空转」变为按 offline 退避）；
  * - 写库仅在展示态与存储态真的背离时发生（同一次读取内幂等：落库后再次读取零写、
  *   零事件），落库后照旧发一次 `agent` 树事件；未超阈值/offline/retired/logical 节点原样；
+ * - 落库是**可失败的副作用**，失败绝不拖垮读（见 `rosterTree` 的 try/catch 说明）：
+ *   读方拿的永远是已算出的展示态，写失败仅记日志、下次读重试（多行落库单事务）。
  * - `emitAgentTree()` 走**纯快照**（不回写、不重入）：注册/状态变化路径与读路径的
  *   「落库+发事件」互不叠加（同一次请求内不会发出两条同态事件）。
  *
@@ -81,12 +83,30 @@ function buildRoster(db: Db, now: number, stale: string[] = []): RosterNode[] {
  * 森林结构 + 联系人卡 + 直达未读（spec §9 `roster`）。
  * 展示态 offline 的行**就地持久化**（仅状态真的变化时写、幂等），随后照旧发一次
  * `agent` 树事件；再次读取无背离 → 零写、零事件（读→发→读 不成事件风暴）。
+ *
+ * **写失败不影响读（Important #1）**：落库与发事件整体包在 `try/catch` 内 ——
+ * `touchAgent` 会抛（`AgentNotFoundError` / `SQLITE_READONLY` / `SQLITE_FULL` / `IOERR`），
+ * 而本函数的调用方（`GET /api/roster`、MCP `roster`、`agentCard`）没有 `app.onError`
+ * 兜底，异常上抛会把**本可成功的读**变成 500、整份 roster 拿不到，尽管展示态已经算对。
+ * 故失败只记日志、**仍返回已算出的树**；落库幂等 → 下次读自动重试补齐。
  */
 export function rosterTree(db: Db): RosterNode[] {
   const stale: string[] = []
   const tree = buildRoster(db, Date.now(), stale)
-  for (const id of stale) touchAgent(db, id, "offline")
-  if (stale.length > 0) emitAgentTree(db)
+  if (stale.length > 0) {
+    try {
+      // 单事务写完全部 stale 行：要么全成、要么全不成（避免「半个 roster 落库」）。
+      // `immediate` 开局取写锁，规避 WAL 下读→写升级的 SQLITE_BUSY（与 registerRoot 同法）。
+      db.transaction((ids: readonly string[]) => {
+        for (const id of ids) touchAgent(db, id, "offline")
+      }).immediate(stale)
+      // 只在**真的写入了任何行**后发一次（事务抛 → 不发）。
+      emitAgentTree(db)
+    } catch (error) {
+      // 只记错误对象（SQLite 错误码/消息与域错误名），不输出行数据/token 等敏感值。
+      console.error("[agentchat] roster offline persist failed", error)
+    }
+  }
   return tree
 }
 

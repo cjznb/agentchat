@@ -28,7 +28,7 @@
 |---|---|
 | （首次需要时） | MCP `register`（**实例节点**，根）：可读名 `opencode@<主机名>`；无 token → 首注册并把返回的 `join_token` 写 `<home>/agents/opencode.token`（0600）；有 token → 带 `join_token` 重连认领。其实例 id 写 `<home>/agents/opencode.id` |
 | `session.created`（根或子代理） | 会话登记为**实例节点的子节点**（根会话）或**其所属会话节点的子节点**（子代理）：MCP `register{parent_ref, task_ref: info.id, name: 标题}`；标题空回退 `opencode:<id 前 8 位>` |
-| `session.status`（`busy`/`retry`/`idle`） | `POST /internal/state {busy\|idle}`（**按会话节点 id**；同态去重） |
+| `session.status`（`busy`/`retry`/`idle`） | `POST /internal/state {busy\|idle}`（**按会话节点 id**；同态去重；**同时对实例根同态上报**——实例是根容器搭车 touch 刷新 `last_seen`，空闲轮询心跳不走去重） |
 | `session.idle` | 报 `idle`（心跳上报）→ `POST /internal/wake` → 逐条 `client.session.promptAsync` 注入（**按 `messageId` 有界去重**，租约重投不重复注入）→ `POST /internal/result {items:[{messageId,result:"delivered"\|"refused"}]}`（注入抛错记 `refused`）；随后为该会话**启动空闲轮询** |
 | **（idle 期间·无事件）** | **空闲轮询**（默认 10s，`AGENTCHAT_POLL_MS` 覆盖）：每次执行与 `session.idle` **同一路径**并上报 `idle` 心跳（刷新 `last_seen`）；转 `busy`/`retry` 即停；`dispose`/会话删除时清理定时器 |
 | `session.deleted`（任意会话） | `POST /internal/retire {agentId:<会话节点>}` 退役该会话节点（**幂等**；`404` 视为已退役，不重试）；会话节点是**子节点**故**绝不报 `offline`**（Hub 侧 409 `child_never_offline` 拒绝） |

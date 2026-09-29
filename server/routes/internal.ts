@@ -82,6 +82,10 @@ export interface StateReportInput {
 /**
  * 状态上报（HTTP 与 fake 适配器共用）：`canTransition` 白名单判定 + 心跳触碰；
  * 上报 `online`（含 `idle` 映射）时使该节点全部 `pending` job 立即到期（补投）。
+ *
+ * 与 roster 展示态落库配套的**有意裁决**（见 `core/agents` 白名单注释）：节点被读路径
+ * 落库为 offline 后，**持续上报 busy 会拿到 409 `transition_rejected`**，直至它的首次
+ * `idle`/`online` 上报重激活（`offline→online` 白名单已放行）。矩阵**不**因此扩 `offline→busy`。
  */
 export function applyAgentState(db: Db, input: StateReportInput): StateReportOutcome {
   const agent = getAgent(db, input.agentId)
