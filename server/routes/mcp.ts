@@ -13,12 +13,12 @@
 import { randomUUID } from "node:crypto"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
-import { Hono } from "hono"
+import { Hono, type Context } from "hono"
 import { config } from "../config"
 import { openDb, type Db } from "../db"
 import { registerTools } from "../mcp/tools"
 import type { ToolContext } from "../mcp/context"
-import { getAgent } from "../store/agents"
+import { getAgent, getAgentByTaskRef } from "../store/agents"
 import { ensureHubToken } from "./internal"
 
 /** 空闲会话淘汰阈值（缺省 30min）：SDK 客户端 `close()` 只 abort 不发 DELETE，必须有 TTL 兜底。 */
@@ -43,6 +43,51 @@ interface McpSession {
 
 // 生产缺省连接（同 routes/internal 模式）：首个请求时按 config 打开并复用。
 let defaultDb: Db | undefined
+
+/**
+ * 会话身份提示（M2，按会话归属）：请求头 `x-agentchat-session` 非空 → 以会话节点 `task_ref`
+ * （= `session.id`）解析身份。这是 OpenCode 适配器的**逐调用**通道 —— 插件 `tool.execute.before`
+ * 把当前会话 id 注入工具入参，桥剥离后转请求头；一进程只有一个 MCP 连接（桥的 `x-agent-id`
+ * 只能表达实例级/容器身份），故必须按会话重解析，否则所有回复都会冒名容器。
+ * - `resolved`：命中会话节点 → 身份 = 会话节点 id（**忽略** `x-agent-id`）
+ * - `unresolved`：带该头但查无节点 → **省略身份、绝不回落容器**（记日志、不 400）
+ * - `absent`：无该头 → 既有 `x-agent-id` 行为完全不变
+ */
+type SessionIdentity =
+  | { readonly kind: "resolved"; readonly agentId: string }
+  | { readonly kind: "unresolved" }
+  | { readonly kind: "absent" }
+
+function sessionIdentity(db: Db, ref: string | undefined): SessionIdentity {
+  if (ref === undefined || ref === "") return { kind: "absent" }
+  const session = getAgentByTaskRef(db, ref)
+  if (session === undefined) {
+    console.warn(
+      `[agentchat] /mcp x-agentchat-session 未解析到会话节点（task_ref=${ref}）；省略身份（不回落容器）`,
+    )
+    return { kind: "unresolved" }
+  }
+  return { kind: "resolved", agentId: session.id }
+}
+
+/**
+ * initialize 的 `ToolContext`：会话头优先（命中用会话节点身份、未命中也**不回落到 `x-agent-id`**）；
+ * 无会话头才走既有 `x-agent-id`（存在但查无此节点 → `agent_not_found` 400）。
+ */
+function initializeContext(
+  c: Context,
+  db: Db,
+  home: string,
+  hint: SessionIdentity,
+): ToolContext | { readonly error: string } {
+  if (hint.kind === "resolved") return { db, home, agentId: hint.agentId }
+  if (hint.kind === "unresolved") return { db, home }
+  const agentId = c.req.header("x-agent-id")
+  if (agentId !== undefined && getAgent(db, agentId) === undefined) {
+    return { error: "agent_not_found" }
+  }
+  return { db, home, ...(agentId === undefined ? {} : { agentId }) }
+}
 
 /** 单路由（`/mcp`）表；`db` 缺省时惰性取进程配置库（测试显式注入临时库 + home）。 */
 export function mcpRoutes(db?: Db, options?: McpRoutesOptions): Hono {
@@ -75,23 +120,22 @@ export function mcpRoutes(db?: Db, options?: McpRoutesOptions): Hono {
     .all("/mcp", async (c) => {
       const now = Date.now()
       sweepSessions(now)
+      const database = resolveDb()
+      const hint = sessionIdentity(database, c.req.header("x-agentchat-session"))
       const sessionId = c.req.header("mcp-session-id")
       if (sessionId !== undefined) {
         const session = sessions.get(sessionId)
         if (session === undefined) return c.json({ ok: false, error: "session_not_found" }, 404)
+        // 逐调用身份：一进程一 MCP 连接、多会话共用 → 带会话头即按会话重解析（命中设身份、
+        // 未命中清身份绝不留容器）；不带会话头（notifications 等）保持既有身份不动。
+        if (hint.kind === "resolved") session.ctx.agentId = hint.agentId
+        else if (hint.kind === "unresolved") delete session.ctx.agentId
         session.lastSeen = now
         return session.transport.handleRequest(c.req.raw)
       }
       if (c.req.method !== "POST") return c.json({ ok: false, error: "missing_session" }, 400)
-      const agentId = c.req.header("x-agent-id")
-      if (agentId !== undefined && getAgent(resolveDb(), agentId) === undefined) {
-        return c.json({ ok: false, error: "agent_not_found" }, 400)
-      }
-      const ctx: ToolContext = {
-        db: resolveDb(),
-        home,
-        ...(agentId === undefined ? {} : { agentId }),
-      }
+      const ctx = initializeContext(c, database, home, hint)
+      if ("error" in ctx) return c.json({ ok: false, error: ctx.error }, 400)
       const server = new McpServer({ name: "agentchat-hub", version: "0.1.0" })
       registerTools(server, ctx)
       const transport = new WebStandardStreamableHTTPServerTransport({

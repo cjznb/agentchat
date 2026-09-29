@@ -9,6 +9,7 @@ import type { ConversationSummary, RosterNode } from "../../shared/contracts"
 import { loadExpanded, saveExpanded, toggleExpanded, type StorageLike } from "./accordion"
 import {
   buildRosterIndex,
+  hasContainerParticipant,
   isHumanDm,
   resolveOwner,
   type RosterIndex,
@@ -129,6 +130,8 @@ export function foldConversations(
     }
     const owner = resolveOwner(conversation.key, index)
     if (owner === undefined) continue
+    // 分组容器不是聊天实体：与容器之间的会话不出现在聊天栏（仍保留在 roster 供通讯录分组）。
+    if (hasContainerParticipant(conversation.key, index)) continue
     if (owner.logical) {
       flat.push(flatRow("logical", conversation, owner.node))
       continue

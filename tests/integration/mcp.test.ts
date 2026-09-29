@@ -90,6 +90,16 @@ async function connect(agentId?: string): Promise<Client> {
   return client
 }
 
+/** 带任意额外请求头的客户端（所有请求回带；用于逐调用身份头 `x-agentchat-session`）。 */
+async function connectHeaders(headers: Record<string, string>): Promise<Client> {
+  const transport = new StreamableHTTPClientTransport(new URL(`${running.url}/mcp`), {
+    requestInit: { headers: { authorization: `Bearer ${token}`, ...headers } },
+  })
+  const client = new Client({ name: "mcp-test", version: "0.0.0" })
+  await client.connect(transport as Transport)
+  return client
+}
+
 function callTool(client: Client, name: McpToolName, args: Record<string, unknown>) {
   return client.callTool({ name, arguments: args })
 }
@@ -507,6 +517,97 @@ describe("register 首次与认领（DoD ④）", () => {
     } finally {
       await client.close()
     }
+  })
+})
+
+describe("出站身份按会话归属（M2：x-agentchat-session）", () => {
+  /** 容器（实例节点）+ 其会话子节点，模拟 OpenCode 的层级。 */
+  function containerWithSession(): { readonly box: Agent; readonly session: Agent } {
+    const box = insertAgent(db, {
+      name: `m2-container-${Math.random().toString(16).slice(2)}`,
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      roleTag: "container",
+    })
+    const session = insertAgent(db, {
+      name: `m2-session-${Math.random().toString(16).slice(2)}`,
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      parentId: box.id,
+      taskRef: `sess-${Math.random().toString(16).slice(2)}`,
+    })
+    return { box, session }
+  }
+
+  it("resolves a session header to the session node (ignoring x-agent-id=container)", async () => {
+    const { box, session } = containerWithSession()
+    const peer = makeAgent("m2-peer")
+    // 两个身份头并存：会话头优先 —— 发送方必须是会话节点，绝非容器。
+    const client = await connectHeaders({
+      "x-agent-id": box.id,
+      "x-agentchat-session": session.taskRef ?? "",
+    })
+    try {
+      const result = await callTool(client, "send", { to: peer.id, body: "hi" })
+      expect(toolFailed(result)).toBe(false)
+      const parsed = MCP_TOOL_OUTPUTS.send.parse(JSON.parse(textOf(result)))
+      expect(parsed.message.fromAgentId).toBe(session.id)
+      expect(parsed.message.fromAgentId).not.toBe(box.id)
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("omits identity (never falls back to the container) when the session header is unresolved", async () => {
+    const { box } = containerWithSession()
+    const client = await connectHeaders({
+      "x-agent-id": box.id,
+      "x-agentchat-session": "no-such-session",
+    })
+    try {
+      const result = await callTool(client, "send", { to: box.id, body: "x" })
+      expect(toolFailed(result)).toBe(true)
+      expect(textOf(result)).toContain("identity_required")
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("keeps the legacy x-agent-id behavior unchanged when no session header is present", async () => {
+    const sender = makeAgent("m2-legacy-sender")
+    const peer = makeAgent("m2-legacy-peer")
+    const client = await connect(sender.id)
+    try {
+      const result = await callTool(client, "send", { to: peer.id, body: "hi" })
+      const parsed = MCP_TOOL_OUTPUTS.send.parse(JSON.parse(textOf(result)))
+      expect(parsed.message.fromAgentId).toBe(sender.id)
+    } finally {
+      await client.close()
+    }
+    // 无会话头 + 陈旧 x-agent-id ⇒ 仍 400 agent_not_found（既有行为）。
+    const response = await fetch(`${running.url}/mcp`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "x-agent-id": "no-such-agent",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "raw", version: "0" },
+        },
+      }),
+    })
+    await response.text()
+    expect(response.status).toBe(400)
   })
 })
 

@@ -19,6 +19,7 @@ import { openDb, type Db } from "../../server/db"
 import {
   addParticipant,
   ack,
+  ContainerNotChatTargetError,
   createGroup,
   ensureHuman,
   history,
@@ -44,7 +45,7 @@ import {
   listParticipants,
 } from "../../server/store/conversations"
 import { getReadState } from "../../server/store/read_states"
-import { history as storeHistory } from "../../server/store/messages"
+import { history as storeHistory, send as storeSend } from "../../server/store/messages"
 
 let home = ""
 let db: Db
@@ -207,6 +208,63 @@ describe("shout", () => {
     // 幂等：再次喊话复用同一广播会话
     const again = approved(shout(db, human.id, "再喊一次"))
     expect(again.message.conversationId).toBe(result.message.conversationId)
+  })
+})
+
+describe("分组容器不是聊天实体（M1 服务端守卫）", () => {
+  /** 分组容器（`role_tag="container"`，如 `opencode@<host>` 实例节点）。 */
+  const container = (name: string): Agent =>
+    insertAgent(db, {
+      name,
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      roleTag: "container",
+    })
+
+  it("rejects a DM to a container on the auto-create path (container_not_chat_target)", () => {
+    const human = ensureHuman(db)
+    const box = container("m1-box-auto")
+    expect(() => sendMessage(db, { from: human.id, to: box.id, body: "hi" })).toThrow(
+      ContainerNotChatTargetError,
+    )
+    // 被拒的发送不得留下 DM 会话。
+    expect(getConversationByKey(db, `dm:${[human.id, box.id].sort().join("_")}`)).toBeUndefined()
+  })
+
+  it("rejects sending into an existing container DM (conversation-id path, historical rows)", () => {
+    const human = ensureHuman(db)
+    const box = container("m1-box-existing")
+    // 直造历史 DM（模拟旧数据；`createDm` 是 store 原语，不经守卫）。
+    const dm = createDm(db, human.id, box.id)
+    expect(() => sendMessage(db, { from: human.id, to: dm.id, body: "hi" })).toThrow(
+      ContainerNotChatTargetError,
+    )
+  })
+
+  it("keeps internal system messages deliverable into a container DM (kind=system exempt)", () => {
+    const human = ensureHuman(db)
+    const box = container("m1-box-system")
+    const dm = createDm(db, human.id, box.id)
+    expect(() =>
+      storeSend(db, {
+        conversationId: dm.id,
+        fromAgentId: human.id,
+        kind: "system",
+        body: "（系统）提醒",
+      }),
+    ).not.toThrow()
+    expect(history(db, dm.id)).toHaveLength(1)
+  })
+
+  it("excludes containers from shout recipients (no receipt, no wake job)", () => {
+    const human = ensureHuman(db)
+    const box = container("m1-box-shout")
+    const peer = makeAgent("m1-shout-peer")
+    const result = approved(shout(db, human.id, "全员注意"))
+    const recipients = result.receipts.map((r) => r.agentId)
+    expect(recipients).toContain(peer.id)
+    expect(recipients).not.toContain(box.id)
   })
 })
 

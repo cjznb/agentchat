@@ -48,6 +48,9 @@
   `application/json` 与 `text/event-stream`（SSE）。
 - **逐请求从磁盘读取**身份与 token：`Authorization: Bearer <home>/hub_token`；
   `x-agent-id: <home>/agents/opencode.id`（**文件不存在则省略该头**，不报错、不拒绝启动）。
+- **逐调用会话头**：`tools/call` 入参里的 `x-agentchat-session`（插件注入）由桥**原地剥离**
+  （Hub 绝不能看到）并转为请求头 `x-agentchat-session`；Hub 据此把该次调用的身份解析为**会话节点**
+  而非实例容器（否则回复会从容器发出）。无该键则不带该头，行为与从前一致。
 - 会话 id 取自 initialize 响应头 `Mcp-Session-Id` 并在后续请求回带；`404 session_not_found`
   （30min TTL 淘汰 / Hub 重启）→ 自动**重新 initialize 一次**并重试。
 - 每次上游请求带**显式超时**（默认 30s，`AGENTCHAT_MCP_TIMEOUT_MS` 覆盖）：Hub「收下却不回」时以
@@ -67,7 +70,8 @@
 ```
 
 - **实例节点**：以可读名 `opencode@<os.hostname()>` 注册（拿不到主机名则 `opencode`），`vendor=opencode`；
-  仍是**根**（`join_token` 认领、`dispose` 时可报 `offline`）。它也是 MCP 出站身份。
+  仍是**根**（`join_token` 认领、`dispose` 时可报 `offline`）。它也是 MCP **回退**出站身份
+  （仅在无逐调用会话头 `x-agentchat-session` 时使用，如 `register`）。
 - **会话节点**：`parent_ref` = 实例节点 id（根会话）或其所属会话节点 id（子代理），
   `task_ref` = `session.id`（Hub 侧幂等：同 `task_ref` 重注册返回原节点），
   `name` = 会话标题（空标题回退 `opencode:<sessionid 前 8 位>`），有可用 `model` 时一并透传。
@@ -84,16 +88,21 @@
   一律用**该会话的节点 id**；`session.deleted` → `/internal/retire` 退役该会话节点
   （**绝不报 offline**：子节点 offline 会被 Hub `409 child_never_offline` 拒绝）。
 
-> **MCP 出站身份是实例级，投递/状态是会话级。** OpenCode 一个进程只暴露**一个** MCP server
-> （本地 stdio 桥），桥逐请求读 `<home>/agents/opencode.id` 作 `x-agent-id` —— 故它是**实例节点**身份；
-> 而某个会话收/发消息时的状态与投递归属其**会话节点**。二者由插件分别维护（实例 id 单独保存，
-> `sessionToAgent` = sessionID → 会话节点 id）。
+> **MCP 出站身份按会话归属，投递/状态同样按会话。** OpenCode 一个进程只暴露**一个** MCP server
+> （本地 stdio 桥），桥逐请求读 `<home>/agents/opencode.id` 作 `x-agent-id` —— 这只是**回退**身份：
+> 旧模型下它会让**所有**工具调用都记在实例（容器）名下，从而出现「回复从父节点发出」。现机制：
+> 插件 `tool.execute.before` 在**每次**本适配器（`agentchat_*`）工具调用上**原地注入**当前 `sessionID`
+> 到入参键 `x-agentchat-session` → 桥**剥离该键**（Hub 绝不能看到，否则撞 MCP 入参校验）并转为请求头
+> `x-agentchat-session` → Hub 按会话节点 `task_ref`（=`session.id`）解析，身份 = **该会话节点**，
+> **忽略** `x-agent-id`。未命中（会话尚未注册）→ **省略身份、绝不回落容器**；无该头才用 `x-agent-id`。
 
-> **实例节点是分组容器，不是聊天对象。** 插件拉取积压（`POST /internal/wake`）的 `agentId`
-> **只**来自 `resolve(sessionID)`（会话节点），实例 id 仅用于 `register`/`dispose` 的上下线上报 ——
-> 因此**发往实例节点的消息不会被拉取、也不会被投递**（它是可见联系人，承载的是**历史实例级 DM**
-> 的归档留痕）；**会话节点才是聊天端点**。不实现「实例也 wake 并路由给最近活跃会话」（路由归属有歧义，
-> 由 controller 另行决策）；UI 把容器节点标记为不可 DM 同样属 controller 侧改造。
+> **实例节点只是抽象分组容器，不是聊天对象（服务端强约束）。** 插件拉取积压（`POST /internal/wake`）的
+> `agentId` **只**来自 `resolve(sessionID)`（会话节点），实例 id 仅用于 `register`/`dispose` 的上下线上报 ——
+> 因此**发往实例节点的消息不会被拉取、也不会被投递**；**会话节点才是聊天端点**。进一步，Hub 在
+> **核心发送路径**按 `role_tag === "container"` **拒绝**以容器为收件方的 DM（稳定错误码
+> `container_not_chat_target`；`POST /api/conversations` 返回 4xx），`shout` 收件方集合**排除容器**；
+> 内部系统消息（`kind === "system"`，投递失败通知/撤回提醒）**不受限**。容器仍保留在 roster 作
+> **分组标题**；聊天栏（会话列表）过滤与容器之间的会话，其未读也不算「有人找你」；历史实例 DM 仅归档留痕。
 
 **无需迁移**：升级后旧的 `session.created` 子节点/历史实例节点**保留无害**；新逻辑按下述规则
 新建实例节点并把会话收为其子节点，最多在 roster 里多出一个可读的实例分组节点。
@@ -209,7 +218,7 @@ export default { id: "agentchat", server: AgentChatPlugin }
 |---|---|---|
 | `hub_token` | `<AGENTCHAT_HOME>/hub_token` | Hub 传输门 token：**插件与 MCP 桥都自动读盘**（`HUB_TOKEN` 非空时覆盖插件侧） |
 | `join_token` | `<AGENTCHAT_HOME>/agents/opencode.token`（0600 尽力而为） | 重连认领**实例节点**（根；`register` 的 `join_token`） |
-| 实例节点 agent id | `<AGENTCHAT_HOME>/agents/opencode.id` | 桥逐请求读作 `x-agent-id`（**MCP 出站身份**；文件缺失仅省略该头，不影响启动） |
+| 实例节点 agent id | `<AGENTCHAT_HOME>/agents/opencode.id` | 桥逐请求读作 `x-agent-id`（**回退出站身份**：仅当无逐调用会话头 `x-agentchat-session` 时使用；文件缺失仅省略该头，不影响启动） |
 
 **陈旧自愈（已实现，无需人工）**：Hub DB 重置/切换后，`register` 返回 `invalid_join_token` →
 插件清空本地 `opencode.token` 后按「无 token 首次注册」重新注册为新**实例节点**（根）→ 写回新 token/id，日志给明确 warn。
@@ -229,6 +238,8 @@ export default { id: "agentchat", server: AgentChatPlugin }
 2. **启动 OpenCode**（进程环境里带 `HUB_TOKEN`，供**插件**注册/唤醒用）。首个会话建立时插件注册
    **实例节点**（名 `opencode@<主机名>`）并写 `<AGENTCHAT_HOME>/agents/opencode.id`；该会话同时登记为
    实例节点的**子节点**（名字=会话标题）。MCP 桥下次调用即读到该 id，**无需重启**。
+   会话内 LLM 调用 `agentchat_*` 工具时，插件注入 `x-agentchat-session`，故该处出站身份是**会话节点**
+   （桥剥离键 → 转请求头 → Hub 按 `task_ref` 解析）——回复从会话节点发出，不以容器身份出现。
 3. **核对节点现身**（`/api/roster` 为 UI 数据面，无需 Bearer）：
 
    ```bash
@@ -277,7 +288,8 @@ Get-Content -Wait "$HOME\.agentchat\logs\opencode-adapter.log"  # PowerShell（A
 | 回信似乎「开了新回合」 | 注入走 `client.session.promptAsync`，会开启新回合（符合「唤醒即续跑」语义） | 预期行为：busy 期间到达的消息会在**下一次 idle** 才被认领注入 |
 | 会话节点在 roster 中长期残留 | 退役依赖宿主发 `session.deleted` 事件 | 会话删除时插件调 `/internal/retire`（幂等；`404` 视为已退役）；**会话被归档**（`time.archived`）时插件同样退役该节点并停其轮询；若宿主版本两者都不发则节点留待下一次清理（已知限制，见 `adapters/opencode/README.md` 健壮性） |
 | 同标题的两个会话只出现一个 | `agents.name` 全局 UNIQUE，第二个注册撞 `name_taken` | 插件已带**稳定别名** `<标题> · <sessionid 前 4 位>` 自动重试一次（幂等），两个会话都会成为联系人；日志文件可见 `name taken; registered as …` |
-| 发给实例节点 `opencode@<host>` 的消息一直排队 | 实例节点是**分组容器**，`/internal/wake` 只按会话节点 id 发起 → 它不会被拉取 | 预期行为：把消息发给**会话节点**（聊天端点）；历史实例 DM 只是归档留痕。UI 屏蔽容器节点 DM 由 controller 实现 |
+| 发给实例节点 `opencode@<host>` 的消息一直排队 / 开私聊失败 | 实例节点是**分组容器**：`/internal/wake` 只按会话节点 id 发起（不会被拉取），且 Hub **拒绝**以容器为收件方的 DM（`container_not_chat_target`，`POST /api/conversations` 4xx） | 预期行为：把消息发给**会话节点**（聊天端点）；容器仅在通讯录作分组标题、不出现在聊天栏。历史实例 DM 只是归档留痕 |
+| 回复从 `opencode@<host>`（容器）发出 | 插件 `tool.execute.before` 未生效（宿主版本过旧）或桥未剥离/转发 `x-agentchat-session` | 升级到支持 `tool.execute.before` 的 OpenCode（实测 1.18.32）并同步安装器/桥；核对 `<AGENTCHAT_HOME>/logs/opencode-adapter.log`：桥侧应有该键剥离、Hub 侧会话未命中时会 warn `未解析到会话节点` |
 
 ## 约束
 

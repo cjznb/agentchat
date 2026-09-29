@@ -12,7 +12,7 @@
  * 服务端与 MCP roster 的 **agent 侧** `unread` 契约不动（本函数只在客户端派生展示值）。
  */
 import type { ConversationSummary, RosterNode } from "../../shared/contracts"
-import { buildRosterIndex, resolveOwner } from "./ownership"
+import { buildRosterIndex, hasContainerParticipant, resolveOwner } from "./ownership"
 
 /**
  * `agentId → 全子树 human 侧未读`。仅含 >0 的项（缺省即 0）。
@@ -30,6 +30,8 @@ export function aggregateUnread(
   const totals = new Map<string, number>()
   for (const conversation of conversations) {
     if (conversation.unread <= 0) continue
+    // 与容器之间的会话不是聊天实体：其未读不计入任何徽标（「不把容器的未读当有人找你」）。
+    if (hasContainerParticipant(conversation.key, index)) continue
     const owner = resolveOwner(conversation.key, index)
     if (owner === undefined) continue
     let current: string | undefined = owner.node.id

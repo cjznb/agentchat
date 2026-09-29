@@ -11,6 +11,7 @@ import { z } from "zod"
 import { rosterTree } from "../core/agents"
 import {
   addParticipant as gatedAddParticipant,
+  ContainerNotChatTargetError,
   createGroup as gatedCreateGroup,
   NotParticipantError,
   RecipientNotFound,
@@ -163,6 +164,8 @@ export function uiRoutes(db?: Db): Hono {
       if (target.vendor === "human") return c.json({ ok: false, error: "invalid_recipient" }, 400)
       // F3：退役节点不可开新 DM（灰显保留资料卡/历史，仅禁发消息）——明确错误码 + 409。
       if (target.status === "retired") return c.json({ ok: false, error: "recipient_retired" }, 409)
+      // M1：分组容器不是聊天对象，不可开 DM（与核心发送路径同一判定）——明确错误码 + 409。
+      if (target.roleTag === "container") return c.json({ ok: false, error: "container_not_chat_target" }, 409)
       const conversation = createDm(database, ensureHuman(database).id, target.id)
       return c.json({ ok: true, conversation })
     })
@@ -214,6 +217,9 @@ export function uiRoutes(db?: Db): Hono {
       } catch (error) {
         if (error instanceof RecipientNotFound) return c.json({ ok: false, error: error.code }, 404)
         if (error instanceof NotParticipantError) return c.json({ ok: false, error: error.code }, 403)
+        if (error instanceof ContainerNotChatTargetError) {
+          return c.json({ ok: false, error: error.code }, 409)
+        }
         throw error
       }
     })

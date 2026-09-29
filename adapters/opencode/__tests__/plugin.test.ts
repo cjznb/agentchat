@@ -704,6 +704,50 @@ describe("会话映射与状态归属", () => {
   })
 })
 
+// ── 逐调用会话归属（M2：tool.execute.before）─────────────────────────
+
+describe("tool.execute.before：逐调用会话归属（M2）", () => {
+  it("injects the session id into agentchat_* tool args in place", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    const hooks = await harness.hooks
+    // 关键：**原地**写（宿主丢弃返回值）；断言同一对象被改。
+    const args: Record<string, unknown> = { to: "peer", body: "hi" }
+    await hooks["tool.execute.before"]?.(
+      { tool: "agentchat_send", sessionID: "sess-1", callID: "call-1" },
+      { args },
+    )
+    expect(args["x-agentchat-session"]).toBe("sess-1")
+    expect(args["to"]).toBe("peer")
+  })
+
+  it("ignores other servers' tools, non-object args, and never throws on a failed write", async () => {
+    const home = tempHome()
+    const harness = setup({ home })
+    const hooks = await harness.hooks
+
+    const other: Record<string, unknown> = { a: 1 }
+    await hooks["tool.execute.before"]?.(
+      { tool: "other_server_tool", sessionID: "s", callID: "c" },
+      { args: other },
+    )
+    expect(other).toEqual({ a: 1 })
+
+    // `args` 非对象（数字）→ 跳过，不改不抛。
+    await hooks["tool.execute.before"]?.(
+      { tool: "agentchat_send", sessionID: "s", callID: "c" },
+      { args: 42 },
+    )
+
+    // 写入失败（冻结对象在严格模式下抛 TypeError）→ 只记日志，绝不抛断工具调用。
+    await hooks["tool.execute.before"]?.(
+      { tool: "agentchat_send", sessionID: "s", callID: "c" },
+      { args: Object.freeze({}) },
+    )
+    expect(harness.logs.some((line) => line.includes("tool.execute.before failed"))).toBe(true)
+  })
+})
+
 // ── 已存在/被恢复会话的收养（缺陷：未映射即跳过 → 历史会话永不出现在 AgentChat）──
 
 describe("会话收养（A 懒收养 / B 启动枚举）", () => {

@@ -21,6 +21,7 @@ function node(
     readonly kind?: "runtime" | "logical"
     readonly status?: AgentStatus
     readonly vendor?: string
+    readonly roleTag?: string
     readonly children?: readonly RosterNode[]
   } = {},
 ): RosterNode {
@@ -34,7 +35,7 @@ function node(
     status: opts.status ?? "online",
     status_text: null,
     purpose: null,
-    role_tag: null,
+    role_tag: opts.roleTag ?? null,
     remark: null,
     skills: [],
     unread: 0,
@@ -250,6 +251,35 @@ describe("foldConversations：同一根多会话零丢行（Important #1）", ()
     // 打开子会话标已读（human 未读 → 0）后，根徽标同步下降，展开前/后恒一致（纯函数无隐藏态）。
     const readChild = conversations.map((c) => (c.id === "c-child1" ? { ...c, unread: 0 } : c))
     expect(rootUnread(readChild)).toBe(2)
+  })
+})
+
+describe("分组容器（M1）：聊天栏过滤与容器分组", () => {
+  const roster: readonly RosterNode[] = [
+    node("human", { kind: "logical", vendor: "human" }),
+    node("ctr", { roleTag: "container", children: [node("ctr-child", { parent: "ctr" })] }),
+    node("real"),
+  ]
+
+  it("filters conversations with the container but keeps it as a grouping header for its children", () => {
+    const rows = foldConversations(
+      [
+        conv("c-ctr", "dm:ctr_human", { at: 50, unread: 3 }),
+        conv("c-session", "dm:ctr-child_human", { at: 40 }),
+        conv("c-real", "dm:human_real", { at: 10 }),
+      ],
+      roster,
+    )
+    // 与容器之间的会话不出现在聊天栏；其自身未读不算「有人找你」。
+    expect(allConversationIds(rows)).not.toContain("c-ctr")
+    expect(allConversationIds(rows)).toContain("c-session")
+    expect(allConversationIds(rows)).toContain("c-real")
+    // 容器仍作**分组标题**（无自有会话 → conversation=null）承载其下会话。
+    const ctr = rows.find((row) => row.id === "ctr")
+    expect(ctr?.kind).toBe("root")
+    expect(ctr?.conversation).toBeNull()
+    expect(ctr?.children.map((child) => child.conversation.id)).toEqual(["c-session"])
+    expect(ctr?.unread).toBe(0)
   })
 })
 

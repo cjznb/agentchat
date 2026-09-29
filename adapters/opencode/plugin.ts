@@ -5,7 +5,9 @@
  * join_token 认领）→ 会话节点（子，`task_ref=session.id`，名字=会话标题）→ 子代理会话节点**：
  * - 首次需要时 MCP `register` 认领**实例节点**（无 token 首注册并把返回的 `join_token`
  *   写 `<home>/agents/opencode.token`；有 token 重连认领）。实例 id 落 `<home>/agents/opencode.id`
- *   供本地 MCP 桥作**出站身份**（OpenCode 一进程只暴露一个 MCP server）。
+ *   供本地 MCP 桥作**回退出站身份**；实际出站身份**按会话**：`tool.execute.before` 把 `sessionID`
+ *   注入工具入参 → 桥剥离并转 `x-agentchat-session` 头 → Hub 按会话节点 `task_ref` 解析
+ *   （否则一进程一个 MCP 连接会让所有调用记在实例容器名下）。
  * - `session.created` / `session.updated`（根或子）→ MCP `register{parent_ref, task_ref, name}`
  *   收/改会话节点（根父=实例节点，子代理父=其所属会话节点）；标题变化才重注册（`adopt.ts`）。
  * - `session.status`（回合始/末）→ `POST /internal/state {busy|idle}`（**按会话节点 id**；
@@ -37,9 +39,21 @@ import { createFileLog } from "./log"
 import { IdlePoller, parsePollMs } from "./poll"
 import { agentIdPath, clearToken, readToken, tokenPath, writeToken } from "./token"
 import type { Hooks, OpencodeEvent, Plugin, PluginInput } from "./types"
-import { createBoundedSet, createTaskQueue, type BoundedSet, type TaskQueue } from "./util"
+import { createBoundedSet, createTaskQueue, isRecord, type BoundedSet, type TaskQueue } from "./util"
 
 export const ADAPTER_VENDOR = "opencode"
+
+/**
+ * 本适配器 MCP 工具在宿主里的全名前缀（server 名 `agentchat` + `_`）。
+ * 仅对这些工具的调用注入会话提示，不触碰用户其它 MCP server。
+ */
+const MCP_TOOL_PREFIX = "agentchat_"
+
+/**
+ * 逐调用会话提示键（插件注入 → 桥剥离并转请求头 `x-agentchat-session` → Hub 按会话节点
+ * `task_ref` 解析真实发送方）。Hub 绝不看到该键（桥负责剥离）。
+ */
+const SESSION_ARG = "x-agentchat-session"
 
 export interface PluginDeps {
   readonly env: Readonly<Record<string, string | undefined>>
@@ -322,6 +336,24 @@ function createRuntime(
   return {
     event: async ({ event }) => {
       queue.push(() => dispatch(event))
+    },
+    /**
+     * 出站身份按**会话**归属（M2）：OpenCode 一进程只暴露一个 MCP 连接，桥的 `x-agent-id`
+     * 只能表达**实例级**（容器）身份，故宿主直接触发的每次工具调用都会记在容器名下。本钩子
+     * 把**当前会话 id** 注入本适配器工具入参；桥剥离该键并转 `x-agentchat-session` 请求头，
+     * Hub 按会话节点 `task_ref` 解析出发送方 —— 否则所有回复都会冒名实例容器。
+     *
+     * 红线：**只原地改**（`output.args[k]=v`；宿主丢弃返回值，整体替换无效）；`args` 非对象即跳过；
+     * 整钩子 try/catch **绝不抛**（抛出会打断工具调用），失败写适配器日志。
+     */
+    "tool.execute.before": async (input, output) => {
+      try {
+        if (!input.tool.startsWith(MCP_TOOL_PREFIX)) return
+        if (!isRecord(output.args)) return
+        output.args[SESSION_ARG] = input.sessionID
+      } catch (error) {
+        log(`tool.execute.before failed: ${describe(error)}`)
+      }
     },
     dispose: async () => {
       for (const poller of state.pollers.values()) poller.stop()

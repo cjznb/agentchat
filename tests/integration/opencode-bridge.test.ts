@@ -414,6 +414,55 @@ describe("逐请求重读身份文件", () => {
   })
 })
 
+// ── 逐调用会话提示：剥离入参 + 转请求头（M2）─────────────────────────
+
+describe("逐调用会话提示（x-agentchat-session）", () => {
+  function toolReplyStub(request: StubRequest, index: number): StubReply {
+    const method = methodOf(request.body)
+    if (method === "initialize") return stubInitializeFor(request.body, "stub-s1")
+    if (index === 1) return { status: 202, body: "" }
+    return {
+      status: 200,
+      json: { jsonrpc: "2.0", id: idOf(request.body), result: { content: [{ type: "text", text: "{}" }] } },
+    }
+  }
+
+  it("strips the session arg from tools/call and forwards it as a request header", async () => {
+    const stub = await startStub(toolReplyStub)
+    const client = bridge({ AGENTCHAT_URL: stub.url })
+    await client.request("initialize", initializeParams())
+    client.notify("notifications/initialized", {})
+
+    const reply = await client.request("tools/call", {
+      name: "send",
+      arguments: { to: "peer", body: "hi", "x-agentchat-session": "sess-9" },
+    })
+    expect(reply.error).toBeUndefined()
+
+    const call = stub.requests.find((request) => methodOf(request.body) === "tools/call")
+    if (call === undefined) throw new Error("bridge never forwarded tools/call")
+    // ① 会话 id 作为请求头转发；② 入参里该键已被剥离（Hub 绝不能看到）。
+    expect(call.headers["x-agentchat-session"]).toBe("sess-9")
+    const params = isRecord(call.body) ? call.body["params"] : undefined
+    const args = isRecord(params) ? params["arguments"] : undefined
+    if (!isRecord(args)) throw new Error("tools/call had no arguments")
+    expect(args["x-agentchat-session"]).toBeUndefined()
+    expect(args["to"]).toBe("peer")
+  })
+
+  it("does not add the session header when the argument is absent", async () => {
+    const stub = await startStub(toolReplyStub)
+    const client = bridge({ AGENTCHAT_URL: stub.url })
+    await client.request("initialize", initializeParams())
+    client.notify("notifications/initialized", {})
+    await client.request("tools/call", { name: "send", arguments: { to: "peer", body: "hi" } })
+
+    const call = stub.requests.find((request) => methodOf(request.body) === "tools/call")
+    if (call === undefined) throw new Error("bridge never forwarded tools/call")
+    expect(call.headers["x-agentchat-session"]).toBeUndefined()
+  })
+})
+
 // ── ⑤ session_not_found 自愈 ────────────────────────────────────────
 
 describe("session_not_found 自愈", () => {

@@ -96,9 +96,20 @@ export interface PluginInput {
   readonly worktree: string
 }
 
-/** 插件钩子（`Hooks` 子集）：事件流 + 销毁。 */
+/**
+ * 工具执行前钩子（`@opencode-ai/plugin` `Hooks["tool.execute.before"]` 子集，实测 1.18.32）。
+ *
+ * 宿主围绕**每一次**工具调用触发（入参含调用所在 `sessionID`），并在发出前把它交给本钩子。
+ * **只支持原地修改**：调用点丢弃钩子返回值，故 `output.args["k"] = v` 生效、
+ * `output.args = {...}` 无效（`args` 因此声明为可变）。对 MCP 工具，`tool` 形如
+ * `<server>_<tool>`（本适配器为 `agentchat_*`）。
+ */
 export interface Hooks {
   event?(input: { readonly event: OpencodeEvent }): Promise<void>
+  "tool.execute.before"?(
+    input: { readonly tool: string; readonly sessionID: string; readonly callID: string },
+    output: { args: unknown },
+  ): Promise<void>
   dispose?(): Promise<void>
 }
 

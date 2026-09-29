@@ -69,3 +69,14 @@ export function resolveOwner(key: string, index: RosterIndex): NodeInfo | undefi
 export function isHumanDm(key: string, index: RosterIndex): boolean {
   return dmParticipants(key).some((id) => index.nodes.get(id)?.human === true)
 }
+
+/**
+ * 该 DM 是否含**分组容器**参与方（`role_tag === "container"`）。
+ *
+ * 容器只是抽象分组、不是聊天实体：会话列表（`fold.ts`）与未读聚合（`unread.ts`）据此过滤 ——
+ * 不把与容器之间的会话当作可聊对象（聊天栏不出现、其未读不算「有人找你」）。
+ * 通讯录（`treeFold.ts`）仍保留容器为可展开的分组标题。
+ */
+export function hasContainerParticipant(key: string, index: RosterIndex): boolean {
+  return dmParticipants(key).some((id) => index.nodes.get(id)?.node.role_tag === "container")
+}

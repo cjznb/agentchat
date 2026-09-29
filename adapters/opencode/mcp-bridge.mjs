@@ -30,9 +30,20 @@ import { createFileLog } from "./file-log.mjs"
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 const CLIENT_INFO = { name: "agentchat-opencode-bridge", version: "0.1.0" }
 
+/**
+ * 逐调用会话提示键（插件 `tool.execute.before` 注入到 `tools/call` 入参）：桥**剥离**它
+ * （Hub 绝不能看到，否则撞 MCP 入参校验）并转为请求头 `x-agentchat-session`，供 Hub 按
+ * 会话节点 `task_ref` 解析真实发送方（否则回复会冒名实例容器）。
+ */
+const SESSION_ARG = "x-agentchat-session"
+
 function env(name) {
   const value = process.env[name]
   return value === undefined || value === "" ? undefined : value
+}
+
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 function resolveHome() {
@@ -127,9 +138,23 @@ function requestTimeoutMs() {
   return Math.min(Math.max(parsed, 100), 600_000)
 }
 
+/**
+ * 取并**原地剥离** `tools/call` 入参里的会话提示：无该键返回 `undefined`；有则该键必被删除
+ * （Hub 绝不能看到），值为非空字符串时返回其值作转发请求头 `x-agentchat-session`。
+ */
+function takeSessionHint(message) {
+  if (message.method !== "tools/call" || !isRecord(message.params)) return undefined
+  const args = message.params.arguments
+  if (!isRecord(args)) return undefined
+  const value = args[SESSION_ARG]
+  delete args[SESSION_ARG]
+  return typeof value === "string" && value.trim() !== "" ? value : undefined
+}
+
 /** POST 一个 JSON-RPC 消息；返回 `{status, messages}`；确定性错误抛带诊断的 Error。 */
-async function post(message, includeSession) {
+async function post(message, includeSession, extraHeaders) {
   const headers = buildHeaders()
+  if (extraHeaders !== undefined) Object.assign(headers, extraHeaders)
   if (includeSession && sessionId !== undefined) headers["mcp-session-id"] = sessionId
   const url = hubMcpUrl()
   const timeoutMs = requestTimeoutMs()
@@ -203,11 +228,14 @@ async function forward(message) {
     // 宿主跳过 initialize（非标准）时自建会话，避免 Hub 把 tools/* 误当 initialize。
     await ensureSession()
   }
-  let result = await post(message, sessionId !== undefined)
+  // 会话提示只从 `tools/call` 入参取一次（首次取时已原地剥离）；会话自愈重试时沿用同一值。
+  const hint = takeSessionHint(message)
+  const extra = hint === undefined ? undefined : { [SESSION_ARG]: hint }
+  let result = await post(message, sessionId !== undefined, extra)
   if (result.status === 404 && result.sessionLost === true && sessionId !== undefined) {
     log("MCP 会话已失效（404 session_not_found），重新 initialize 后重试一次")
     await ensureSession()
-    result = await post(message, sessionId !== undefined)
+    result = await post(message, sessionId !== undefined, extra)
     if (result.status === 404) throw new Error("重新 initialize 后 Hub 仍返回 404 session_not_found")
   }
   for (const forwarded of result.messages) write(forwarded)

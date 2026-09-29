@@ -19,7 +19,9 @@ npm run build && npm start   # 构建前端 + 拉起生产入口 → 浏览器�
 （聊天流 + 四级回执 + 审批/批示卡、Agent 组织树 + 资料卡、通知中心、喊话投递汇总）。
 
 > **容器节点**：实例（root agent）注册时标记 `role_tag="container"`，显示为「容器」徽标，
-> 仅用于 Agent 层级分组，不可私聊（发消息与 `openDm` 均被拦截）。
+> 仅用于 Agent 层级分组，**不是聊天实体**：以容器为收件方的 DM 由服务端**拒绝**
+> （`container_not_chat_target`，`POST /api/conversations` 4xx；`shout` 收件方也不含容器），
+> 聊天栏（会话列表）过滤与容器之间的会话、其未读不计；通讯录仍保留为可展开的**分组标题**。
 
 开发热更（前端 Vite，`/api`、`/mcp`、`/internal` 代理到 Hub）：
 
@@ -111,6 +113,8 @@ OpenCode 插件在空闲期间还会**周期轮询**（`AGENTCHAT_POLL_MS`，默
 两安装器均**幂等**、改动前自动备份、支持 `--dry-run`（只打印不落盘）与 `--uninstall`（精确移除本适配器条目）。
 OpenCode 的 MCP 条目是**本地 stdio 桥**（`adapters/opencode/mcp-bridge.mjs`），配置里**不含 `{file:}` 引用
 与 token 明文** —— 身份与 token 由桥**逐请求**从磁盘读取；旧版会砖的 `{file:}` 结构会被安装器**自动迁移**。
+桥对每次 `tools/call` 会把插件（`tool.execute.before`）注入的 `x-agentchat-session` **剥离**并转请求头，
+使 Hub 按**会话节点**（`task_ref`）解析出站身份 —— 故会话回复不再从容器（实例节点）发出。
 
 > **Claude Code 有两个落点（务必区分）**：**hooks 落 `settings.json`**；**MCP 配置落 `~/.claude.json` 顶层
 > `mcpServers`**（或 `--mcp-config` 指向项目 `.mcp.json`；设 `CLAUDE_CONFIG_DIR` 时随其重定位）——**两个不同文件**。
@@ -149,6 +153,8 @@ MVP 是本机单用户模型，安全边界是「进程与本地文件系统」�
 - `HUB_TOKEN`（`$AGENTCHAT_HOME/hub_token`）只作**传输门**：`/mcp` 与 `/internal/*` 的 Bearer 校验；
   loopback 本机进程可读，故不构成对本地恶意进程的防护。
 - `x-agent-id` 是**建议性身份**：连接时声明、`register` 后可写，服务端不校验其与 `join_token` 的绑定。
+- `x-agentchat-session`（适配器逐调用注入的会话节点 `task_ref`）同属**建议性身份**：命中会话节点即以其为身份
+  （忽略 `x-agent-id`），未命中则省略身份（**绝不回落容器**）；同样不做与 `join_token` 的绑定校验。
 - **审批闸门（建群/拉人/喊话）不是安全边界**：它约束「谁以根 agent 名义发起受限动作」的产品语义，
   不抵御伪造 `x-agent-id` 的本地调用方。
 - LAN / Plan 2 将把 `join_token` **逐 agent 绑定**到连接凭证（真实身份认证），届时审批闸门与

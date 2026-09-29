@@ -13,6 +13,7 @@ function node(
     readonly kind?: "runtime" | "logical"
     readonly status?: AgentStatus
     readonly vendor?: string
+    readonly roleTag?: string
     readonly children?: readonly RosterNode[]
   } = {},
 ): RosterNode {
@@ -26,7 +27,7 @@ function node(
     status: opts.status ?? "online",
     status_text: null,
     purpose: null,
-    role_tag: null,
+    role_tag: opts.roleTag ?? null,
     remark: null,
     skills: [],
     unread: 0,
@@ -114,6 +115,17 @@ describe("aggregateUnread", () => {
     expect(after.get("root1")).toBe(3)
     expect(after.get("child1")).toBe(2)
     expect(after.get("grand1")).toBeUndefined()
+  })
+
+  it("分组容器（M1）：与容器之间的会话未读不计入任何徽标", () => {
+    const withContainer: readonly RosterNode[] = [
+      node("human", { kind: "logical", vendor: "human" }),
+      node("ctr", { roleTag: "container" }),
+    ]
+    const totals = aggregateUnread([conv("c-ctr", "dm:ctr_human", 9)], withContainer)
+    // 容器不是聊天实体：其（历史）会话未读不产生任何徽标项。
+    expect(totals.size).toBe(0)
+    expect(totals.get("ctr")).toBeUndefined()
   })
 
   it("不可归属（不在 roster / 段数异常）会话被跳过，零未读不建项", () => {

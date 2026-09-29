@@ -84,6 +84,25 @@ export class RecipientNotFound extends Error {
   }
 }
 
+/**
+ * 以**分组容器**（`role_tag === "container"`，如 `opencode@<host>` 实例节点）为收件方的 DM 被拒
+ * （`container_not_chat_target`）。容器只是抽象分组、不是聊天实体：其会话不得出现在聊天栏、
+ * 也不得作为回复来源。内部系统消息（`kind==='system'`）经 `store/messages.send` 直写，不经此守卫，
+ * 故投递失败/撤回提醒等不受限。
+ */
+export class ContainerNotChatTargetError extends Error {
+  readonly code = "container_not_chat_target"
+  constructor(readonly containerId: string) {
+    super(`container ${containerId} is a grouping container, not a chat target`)
+    this.name = "ContainerNotChatTargetError"
+  }
+}
+
+/** 分组容器判定（`role_tag === "container"`；adapter 注册实例节点时标记）。 */
+export function isContainer(agent: Agent): boolean {
+  return agent.roleTag === "container"
+}
+
 /** 非成员向既有会话发消息（成员表即授权边界，决议 1；human 豁免）。 */
 export class NotParticipantError extends Error {
   readonly code = "not_participant"
@@ -105,6 +124,18 @@ function shoutConversationId(db: Db): string {
   return getConversationByKey(db, SHOUT_KEY)?.id ?? ""
 }
 
+/**
+ * DM 收件方含分组容器 → 拒绝（容器只作分组，不是聊天实体）；群/喊话不在此限
+ * （喊话的收件方集合由 `recipientsOf` 主动排除容器）。
+ */
+function assertNoContainerTarget(db: Db, conversation: Conversation): void {
+  if (conversation.kind !== "dm") return
+  for (const participant of listParticipants(db, conversation.id)) {
+    const agent = getAgent(db, participant.agentId)
+    if (agent !== undefined && isContainer(agent)) throw new ContainerNotChatTargetError(agent.id)
+  }
+}
+
 /** `to` 解析：`*` → 喊话广播会话；既有会话直用（成员校验）；否则按 agent id 自动建/取 DM。 */
 function resolveConversation(db: Db, sender: Agent, to: string): Conversation {
   if (to === "*") return ensureShoutConversation(db, sender.id)
@@ -113,17 +144,25 @@ function resolveConversation(db: Db, sender: Agent, to: string): Conversation {
     if (!isHuman(sender) && !isParticipant(db, existing.id, sender.id)) {
       throw new NotParticipantError(sender.id, existing.id)
     }
+    assertNoContainerTarget(db, existing)
     return existing
   }
-  if (getAgent(db, to) === undefined) throw new RecipientNotFound(to)
+  const recipient = getAgent(db, to)
+  if (recipient === undefined) throw new RecipientNotFound(to)
+  if (isContainer(recipient)) throw new ContainerNotChatTargetError(recipient.id)
   return createDm(db, sender.id, to)
 }
 
-/** 收件方：DM/群 = 其余成员；喊话 = 全部节点（决议 3）。均不含发送者本人。 */
+/**
+ * 收件方：DM/群 = 其余成员；喊话 = 全部节点（决议 3）**但排除分组容器**
+ * （容器不是聊天实体，不应产生回执/唤醒任务）。均不含发送者本人。
+ */
 export function recipientsOf(db: Db, conversation: Conversation, senderId: string): readonly string[] {
   const ids =
     conversation.key === SHOUT_KEY
-      ? listAgents(db).map((agent) => agent.id)
+      ? listAgents(db)
+          .filter((agent) => !isContainer(agent))
+          .map((agent) => agent.id)
       : listParticipants(db, conversation.id).map((participant) => participant.agentId)
   return ids.filter((id) => id !== senderId)
 }
