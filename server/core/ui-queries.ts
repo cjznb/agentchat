@@ -26,7 +26,7 @@ import {
 import { findCardMessage, history, latestInConversation, type Message } from "../store/messages"
 import { listNotifications, type NotificationScope } from "../store/notifications"
 import { rosterTree, type RosterNode } from "./agents"
-import { ensureHuman, recipientsOf, unreadFor } from "./messaging"
+import { ensureHuman, unreadFor } from "./messaging"
 import { batchReceiptStates, type ReceiptStageMap } from "./publish"
 import { maskRevokedForReader } from "./revoke"
 
@@ -234,24 +234,22 @@ function bareMessage(message: Message): ChatMessage {
 function chatMessageView(
   message: Message,
   humanId: string,
-  recipients: readonly string[],
   receiptMap: ReceiptStageMap,
 ): ChatMessage {
   const base = bareMessage(message)
-  if (message.kind !== "text" || message.fromAgentId !== humanId || recipients.length === 0) {
+  if (message.kind !== "text" || message.fromAgentId !== humanId) {
     return base
   }
+  // 收件人集合 = 该消息 wake_jobs 行（spec §14.2）；无行 → 不加回执字段（既有语义）。
   const perAgent = receiptMap.get(message.seq)
   if (perAgent === undefined) return base
-  const receipts = recipients.map((agentId) => ({
-    agentId,
-    stage: perAgent.get(agentId) ?? "queued",
-  }))
-  const [first, ...rest] = receipts
+  const entries = [...perAgent.entries()]
+  const first = entries[0]
   if (first === undefined) return base
-  const receiptStage = rest.reduce<ReceiptStage>(
-    (laggard, view) => (stageRank(view.stage) < stageRank(laggard) ? view.stage : laggard),
-    first.stage,
+  const receipts = entries.map(([agentId, stage]) => ({ agentId, stage }))
+  const receiptStage = entries.slice(1).reduce<ReceiptStage>(
+    (laggard, entry) => (stageRank(entry[1]) < stageRank(laggard) ? entry[1] : laggard),
+    first[1],
   )
   return { ...base, receipts, receiptStage }
 }
@@ -276,7 +274,7 @@ export function conversationMessages(
   }).map((message) => maskRevokedForReader(db, message, humanId))
   const conversation = getConversation(db, conversationId)
   if (conversation === undefined) return messages.map(bareMessage)
-  const recipients = recipientsOf(db, conversation, humanId)
-  const receiptMap = batchReceiptStates(db, conversationId, messages, recipients)
-  return messages.map((message) => chatMessageView(message, humanId, recipients, receiptMap))
+  // 回执收件人集合 = 每条消息 wake_jobs 行（spec §14.2；不再按会话全员 recipientsOf 枚举）。
+  const receiptMap = batchReceiptStates(db, conversationId, messages)
+  return messages.map((message) => chatMessageView(message, humanId, receiptMap))
 }

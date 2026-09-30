@@ -341,7 +341,9 @@ function deliver(db: Db, input: SendMessageInput): SendMessageResult {
   publishMessage(db, conversation.id)
   // 发送即按 T 生成唤醒任务（Task 3/6；资格见 store/wake.enqueueWakeJobs：runtime+online/busy）。
   enqueueWakeJobs(db, { messageId: message.seq, recipientIds: route.wakeIds })
-  const receipts = recipientIds.map((agentId) => ({
+  // 回执收件人集合 = 同一 T 数组（spec §14.2）：与 enqueueWakeJobs 同源同一数组，
+  // 不再按 recipientsOf 全员枚举 —— 无任务成员恒 queued 会把「取最落后」聚合拖死。
+  const receipts = route.wakeIds.map((agentId) => ({
     agentId,
     stage: receiptState(db, message, agentId),
   }))

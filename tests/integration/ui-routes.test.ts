@@ -807,6 +807,45 @@ describe("GET /api/conversations/:id/messages（回执字段）", () => {
     expect(direct[rootId]).toBe("queued")
     expect(own?.receiptStage).toBe("queued")
   })
+
+  it("§14.2 P2 红证：被@群聊回执仅被@者，聚合 stage 不被无任务成员拖死", async () => {
+    const child = insertAgent(db, {
+      name: "p2-child",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      parentId: rootId,
+    })
+    const group = createGroup(db, {
+      name: "p2-group",
+      createdBy: humanId,
+      memberIds: [rootId, child.id],
+    })
+    if (!("approved" in group)) throw new Error("human group creation must execute immediately")
+    const gid = group.approved.id
+
+    // 仅 @root（结构化 id 前 8 位）→ T = {root}；child 无任务。
+    const sent = sendMessage(db, {
+      from: humanId,
+      to: gid,
+      body: "处理一下",
+      mentions: [rootId.slice(0, 8)],
+    })
+    // 改前 = 全员 {root, child}（child 恒 queued）→ 必红。
+    expect(sent.receipts).toEqual([{ agentId: rootId, stage: "queued" }])
+
+    // 有任务者推进到 accepted（派生 delivered）→ 聚合必须跟随推进。
+    db.prepare<[string, number, string], void>(
+      "UPDATE wake_jobs SET state = ? WHERE message_id = ? AND agent_id = ?",
+    ).run("accepted", sent.message.seq, rootId)
+    const page = messageHistorySchema.parse(
+      await (await app.request(`/api/conversations/${gid}/messages`)).json(),
+    )
+    const own = page.messages.find((message) => message.id === sent.message.id)
+    // 改前：无任务 child 恒 queued → 聚合取最落后 = queued（气泡永卡「排队中」）。
+    expect(stageMap(own)).toEqual({ [rootId]: "delivered" })
+    expect(own?.receiptStage).toBe("delivered")
+  })
 })
 
 // ── Plan 3 T6：确保 DM（POST /api/conversations） ─────────────────────

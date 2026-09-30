@@ -12,7 +12,8 @@ import {
   type McpToolName,
 } from "../../shared/contracts"
 import { registerChild, registerLogical, registerRoot, RegistrationError } from "../core/agents"
-import { ack, inbox, recipientsOf, receiptState, sendMessage, unreadFor } from "../core/messaging"
+import { ack, inbox, receiptState, sendMessage, unreadFor } from "../core/messaging"
+import { wakeRecipients } from "../core/publish"
 import { maskRevokedForReader } from "../core/revoke"
 import { getAgent, getAgentByName, setStatusText, type Agent } from "../store/agents"
 import { getConversation } from "../store/conversations"
@@ -178,7 +179,8 @@ function runMessageStatus(ctx: ToolContext, input: McpToolInput<"message_status"
     if (message === undefined || conversation === undefined) continue
     results.push({
       id,
-      receipts: recipientsOf(ctx.db, conversation, message.fromAgentId).map((agentId) => ({
+      // 回执收件人集合 = 该消息 wake_jobs 行（spec §14.2 唯一来源，不再全员枚举）。
+      receipts: wakeRecipients(ctx.db, message.seq).map((agentId) => ({
         agentId,
         stage: receiptState(ctx.db, message, agentId),
       })),

@@ -10,8 +10,6 @@
 import { z } from "zod"
 import type { ReceiptStage } from "../../shared/contracts"
 import type { Db } from "../db"
-import { listAgents } from "../store/agents"
-import { getConversation, listParticipants, SHOUT_KEY } from "../store/conversations"
 import { latestInConversation, type Message } from "../store/messages"
 import { getReadState } from "../store/read_states"
 import { emit } from "../ws"
@@ -54,13 +52,18 @@ export function receiptState(db: Db, message: Message, recipient: string): Recei
   return job === undefined ? "queued" : WAKE_STATE_STAGE[wakeStateSchema.parse(job.state)]
 }
 
-/** 收件方 id（喊话 = 全部节点；DM/群 = 其余成员），不含发送者本人（与 messaging.recipientsOf 同规则）。 */
-function recipientIdsOf(db: Db, conversationId: string, senderId: string): readonly string[] {
-  const ids =
-    getConversation(db, conversationId)?.key === SHOUT_KEY
-      ? listAgents(db).map((agent) => agent.id)
-      : listParticipants(db, conversationId).map((participant) => participant.agentId)
-  return ids.filter((id) => id !== senderId)
+/**
+ * 回执收件人集合（spec §14.2 唯一来源）：该消息 `wake_jobs` 行的 agent 集合（= T）。
+ * 读时一律以此为准（send 时已与 `enqueueWakeJobs` 同源同一数组）；无行 → 空集。
+ * DM / 喊话 / 人类不带@ 时 jobs 即原全员 → 行为逐字节不变；被@群聊只回执被@者。
+ */
+export function wakeRecipients(db: Db, messageId: number): readonly string[] {
+  return db
+    .prepare<[number], { agent_id: string }>(
+      "SELECT agent_id FROM wake_jobs WHERE message_id = ? ORDER BY rowid",
+    )
+    .all(messageId)
+    .map((row) => row.agent_id)
 }
 
 /**
@@ -94,7 +97,7 @@ export function publishReceipt(db: Db, conversationId: string): void {
     conversationId,
     messageId: message.id,
     seq: message.seq,
-    receipts: recipientIdsOf(db, conversationId, message.fromAgentId).map((agentId) => ({
+    receipts: wakeRecipients(db, message.seq).map((agentId) => ({
       agentId,
       stage: receiptState(db, message, agentId),
     })),
@@ -105,19 +108,19 @@ export function publishReceipt(db: Db, conversationId: string): void {
 export type ReceiptStageMap = ReadonlyMap<number, ReadonlyMap<string, ReceiptStage>>
 
 /**
- * 每请求一次批量回执派生（Plan 3 T5 复审 I3）：一次读该会话的 `read_states`，
- * 一次按「本页消息 seq × 收件方」读 `wake_jobs`，再内存映射。语义与逐条
+ * 每请求一次批量回执派生（Plan 3 T5 复审 I3 + spec §14.2 集合口径）：一次读该会话的
+ * `read_states`，一次按「本页消息 seq」读 `wake_jobs`，再内存映射。**收件人集合 =
+ * 各消息 wake_jobs 行**（唯一来源，不再由调用方传入全员枚举）；语义与逐条
  * `receiptState` 逐字一致（`read_states.last_read_seq ≥ seq → read`；否则 wake 映射；
- * 无行 → `queued`），仅把每个 own 消息的 O(M) 查询降为**每请求常数次**（O(N+M) 内存）。
+ * 无行 → 该收件方不在集合），仅把每个 own 消息的 O(M) 查询降为**每请求常数次**（O(N+M) 内存）。
  */
 export function batchReceiptStates(
   db: Db,
   conversationId: string,
   messages: readonly Message[],
-  recipients: readonly string[],
 ): ReceiptStageMap {
   const result = new Map<number, Map<string, ReceiptStage>>()
-  if (messages.length === 0 || recipients.length === 0) return result
+  if (messages.length === 0) return result
   const readRows = db
     .prepare<[string], { agent_id: string; last_read_seq: number }>(
       "SELECT agent_id, last_read_seq FROM read_states WHERE conversation_id = ?",
@@ -125,20 +128,23 @@ export function batchReceiptStates(
     .all(conversationId)
   const readByAgent = new Map(readRows.map((row) => [row.agent_id, row.last_read_seq] as const))
   const seqPlaceholders = messages.map(() => "?").join(", ")
-  const agentPlaceholders = recipients.map(() => "?").join(", ")
   const jobRows = db
     .prepare<unknown[], { messageId: number; agentId: string; state: string }>(
       `SELECT message_id AS messageId, agent_id AS agentId, state FROM wake_jobs
-       WHERE message_id IN (${seqPlaceholders}) AND agent_id IN (${agentPlaceholders})`,
+       WHERE message_id IN (${seqPlaceholders})`,
     )
-    .all(...messages.map((message) => message.seq), ...recipients)
+    .all(...messages.map((message) => message.seq))
   const jobStage = new Map<string, ReceiptStage>()
+  const agentsByMessage = new Map<number, string[]>()
   for (const row of jobRows) {
     jobStage.set(`${row.messageId}:${row.agentId}`, WAKE_STATE_STAGE[wakeStateSchema.parse(row.state)])
+    const agents = agentsByMessage.get(row.messageId)
+    if (agents === undefined) agentsByMessage.set(row.messageId, [row.agentId])
+    else if (!agents.includes(row.agentId)) agents.push(row.agentId)
   }
   for (const message of messages) {
     const perAgent = new Map<string, ReceiptStage>()
-    for (const agentId of recipients) {
+    for (const agentId of agentsByMessage.get(message.seq) ?? []) {
       const readSeq = readByAgent.get(agentId)
       const stage: ReceiptStage =
         readSeq !== undefined && readSeq >= message.seq

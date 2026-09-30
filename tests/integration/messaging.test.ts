@@ -158,19 +158,19 @@ describe("sendMessage DM", () => {
 })
 
 describe("group create/add", () => {
-  it("lets members send and receive after create/add, with a queued receipt each", () => {
+  it("lets members send and receive after create/add (agent 无@ → 回执集合 ∅，spec §14.2)", () => {
     const a = makeAgent("grp-a")
     const b = makeAgent("grp-b")
     const c = makeAgent("grp-c")
     const group = approved(createGroup(db, { name: "攻坚组", createdBy: a.id, memberIds: [b.id] }))
     addParticipant(db, { conversationId: group.id, agentId: c.id, invitedBy: a.id })
 
+    // spec §14.2：agent 群无@ → T=∅（0 wake_jobs）→ 回执收件人集合 = jobs 行集合 = ∅。
     const fromB = sendMessage(db, { from: b.id, to: group.id, body: "进度 50%" })
-    expect(new Set(fromB.receipts.map((r) => r.agentId))).toEqual(new Set([a.id, c.id]))
-    expect(fromB.receipts.every((r) => r.stage === "queued")).toBe(true)
+    expect(fromB.receipts).toEqual([])
 
     const fromC = sendMessage(db, { from: c.id, to: group.id, body: "收到" })
-    expect(new Set(fromC.receipts.map((r) => r.agentId))).toEqual(new Set([a.id, b.id]))
+    expect(fromC.receipts).toEqual([])
 
     expect(inbox(db, a.id).map((m) => m.id)).toEqual(
       expect.arrayContaining([fromB.message.id, fromC.message.id]),
@@ -290,25 +290,25 @@ describe("分组容器不是聊天实体（M1 服务端守卫）", () => {
 })
 
 describe("唤醒集合 T（spec §2，Task 3）", () => {
-  it("agent 发群消息无提及 → 0 条 wake_jobs（回执收件方口径不变 = 其余全员）", () => {
-    const { owner, zhang, li, group } = t3Group("t3-noat")
+  it("agent 发群消息无提及 → 0 条 wake_jobs，回执集合 = jobs 行 = ∅（spec §14.2）", () => {
+    const { owner, group } = t3Group("t3-noat")
 
     const sent = sendMessage(db, { from: owner.id, to: group.id, body: "进度同步" })
 
     expect(wakeAgentsOf(sent.message.seq)).toEqual([])
-    // 可见性/回执口径不变：回执仍列其余全员（wake 才按 T 过滤）。
-    expect(new Set(sent.receipts.map((r) => r.agentId))).toEqual(new Set([zhang.id, li.id]))
-    expect(sent.receipts.every((r) => r.stage === "queued")).toBe(true)
+    // §14.2 集合口径（改前：recipientsOf 全员 = {zhang,li}，无任务者恒 queued 拖死聚合）。
+    expect(sent.receipts).toEqual([])
   })
 
-  it("@张三 → 仅张三 1 条 wake_job", () => {
-    const { owner, zhang, li, group } = t3Group("t3-at")
+  it("@张三 → 仅张三 1 条 wake_job，回执集合 = 被@者（spec §14.2 授权变更）", () => {
+    const { owner, zhang, group } = t3Group("t3-at")
 
     const sent = sendMessage(db, { from: owner.id, to: group.id, body: "@张三 你跟进" })
 
     expect(wakeAgentsOf(sent.message.seq)).toEqual([zhang.id])
-    // 回执口径不变：仍列其余全员（仅 wake 按 T 过滤）。
-    expect(new Set(sent.receipts.map((r) => r.agentId))).toEqual(new Set([zhang.id, li.id]))
+    // 改前：recipientsOf 全员 = {zhang,li}（无任务的 li 恒 queued）；改后 = T = 仅被@者。
+    expect(sent.receipts.map((r) => r.agentId)).toEqual([zhang.id])
+    expect(sent.receipts.every((r) => r.stage === "queued")).toBe(true)
   })
 
   it("@所有人 → 除发送者外的全体参与者", () => {
@@ -476,7 +476,8 @@ describe("ack and receipts", () => {
     const c = makeAgent("rc-c")
     const group = approved(createGroup(db, { name: "回执群", createdBy: a.id, memberIds: [b.id, c.id] }))
 
-    const { message, receipts } = sendMessage(db, { from: a.id, to: group.id, body: "开工" })
+    // spec §14.2：回执集合 = T → agent 群需带@（@所有人 → {b,c}）才有回执成员。
+    const { message, receipts } = sendMessage(db, { from: a.id, to: group.id, body: "@所有人 开工" })
     expect(receipts).toHaveLength(2)
     expect(receipts.every((r) => r.stage === "queued")).toBe(true)
 
