@@ -66,6 +66,10 @@ describe("styles-controls.css 表单控件 baseline", () => {
     expect(css).toContain("background-position")
     expect(css).toContain("background-size")
     expect(css).toContain("background-repeat: no-repeat")
+    // 轮 3：正方形盒（45/135 绝对角 = 盒对角线）+ 两盒相邻 0.95 = 0.5 + 0.45 + 让位 1.55em
+    expect(css).toContain("background-size: 0.45em 0.45em, 0.45em 0.45em")
+    expect(css).toContain("background-position: right 0.95em center, right 0.5em center")
+    expect(css).toContain("padding-right: 1.55em")
     expect(css).not.toContain(".group-add-select::after")
     // 禁用态独立规则 —— 与启用态肉眼可辨
     expect(css).toContain(".group-add-select:disabled")
