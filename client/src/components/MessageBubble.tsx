@@ -28,6 +28,8 @@ export interface MessageBubbleProps {
   readonly revoking?: boolean
   /** 会话参与者（roster 视图映射）：`@` 高亮与提及 chip 用；缺省 = 不高亮、不出 chip。 */
   readonly participants?: readonly MentionTarget[]
+  /** `[子·根名]` 层级徽标渲染开关（缺省 = true，既有渲染点零变化）；私聊传 false 仅显身份行。 */
+  readonly showChildBadge?: boolean
 }
 
 /** `meta.mentions`（agentId 数组）类型收窄；无 meta / 非数组 / 非字符串元素 → 空。 */
@@ -54,6 +56,7 @@ export function MessageBubble({
   onRevoke,
   revoking = false,
   participants = [],
+  showChildBadge = true,
 }: MessageBubbleProps) {
   const highlightAttr = highlighted ? "true" : undefined
 
@@ -87,8 +90,11 @@ export function MessageBubble({
       ? receiptGlyph(message.receiptStage)
       : null
   const showIdentity = showSender && !own && sender !== undefined
-  // spec §11.4：子消息带 `[子·根名]` 徽标（不限群聊）；私聊亦显示，仅身份行（头像/名字/厂商）随 showSender。
-  const childBadge = !own && sender !== undefined && sender.rootName !== null ? sender.rootName : null
+  // spec §11.4 / §4.2：`[子·根名]` 徽标仅群聊（`showChildBadge`，缺省 true）；私聊只显身份行。
+  const childBadge =
+    !own && showChildBadge && sender !== undefined && sender.rootName !== null
+      ? sender.rootName
+      : null
   const revoked = revokeView(message, own)
   const showRevoke = canRevoke(message, own) && onRevoke !== undefined
   // Task 8：正文 `@` 分段高亮 + `meta.mentions` 中正文未书写的成员出 chip。
