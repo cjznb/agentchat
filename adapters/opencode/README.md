@@ -130,6 +130,7 @@ OpenCode **不会**为已存在/被恢复的会话补发 `session.created`，而
   路径；每次轮询都上报 `idle`（Hub 侧同态上报 = `touchAgent` 心跳，修复长时间空闲被判 offline）。
   轮询失败按指数退避拉长（上限 60s）、成功后回到基础间隔，Hub 不可达时不刷屏；定时器 `unref` 且
   `dispose` 清理，**不阻塞/不泄漏**。轮询与事件路径共用 `messageId` 有界去重，**绝不重复注入**。
+  启动枚举/懒收养**注册成功即开轮询**：新会话无需先跑回合即可被唤醒，首轮 flush 即心跳+认领（spec §14.1）。
 - token 写失败仅记录、不中断（尽力而为）。
 - **实例节点**注册成功后把其 agent id 落盘 `<home>/agents/opencode.id`（供本地 MCP 桥**逐请求**读作
   `x-agent-id`；为**回退**出站身份——仅当该次调用无逐调用会话头 `x-agentchat-session` 时使用）。

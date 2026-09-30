@@ -136,6 +136,9 @@ export interface AdoptDeps {
   /** 与事件处理共用的串行队列（避免同一会话并发注册两次）。 */
   readonly enqueue: (task: () => Promise<void>) => void
   readonly log: (message: string) => void
+  /** 注册成功（非归档、未退役）后回调：宿主据此**立即开空闲轮询**（spec §14.1）。
+   * A 懒收养与 B 启动枚举共用 `adoptSession` 入口 → 两条路径都被覆盖。 */
+  readonly onAdopted?: (sessionId: string, agentId: string) => void
 }
 
 export interface Adopter {
@@ -218,9 +221,15 @@ export function createAdopter(deps: AdoptDeps): Adopter {
       await deps.retire(session.id)
       return undefined
     }
-    if (mapped === undefined) return register(session)
+    // 注册成功即回调宿主（spec §14.1：收养成功 → 立即 ensurePolling，首轮 flush 即心跳+认领）。
+    const registered = async (): Promise<string | undefined> => {
+      const agentId = await register(session)
+      if (agentId !== undefined) deps.onAdopted?.(session.id, agentId)
+      return agentId
+    }
+    if (mapped === undefined) return registered()
     if (deps.state.getTitle(session.id) === sessionName(session)) return mapped
-    return register(session)
+    return registered()
   }
 
   const resolve = async (sessionID: string): Promise<string | undefined> => {

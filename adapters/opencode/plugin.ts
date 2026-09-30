@@ -270,6 +270,8 @@ function createRuntime(
     },
     ensureInstance: registerInstance, retire: retireSession,
     enqueue: (task) => queue.push(task), log,
+    // 收养成功即开轮询（spec §14.1）：新会话无需先跑回合即可被唤醒；busy 由既有 status→stopPolling 刹车。
+    onAdopted: (sid, aid) => ensurePolling(sid, aid),
   })
 
   const onStatus = async (sessionID: string, status: "idle" | "busy" | "retry"): Promise<void> => {

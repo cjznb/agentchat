@@ -1684,10 +1684,54 @@ describe("空闲轮询（idle 期间周期补拉）", () => {
     vi.useFakeTimers()
     const home = tempHome()
     const harness = setup({ home })
-    await emit(harness, rootCreated(), sessionIdle("ghost-sess"))
+    // root-sess 收养成功本会即开轮询（spec §14.1）→ 先 busy 刹车停掉，确保下方 wake==0 只隔离 ghost。
+    await emit(harness, rootCreated(), sessionStatus("root-sess", "busy"), sessionIdle("ghost-sess"))
     await vi.advanceTimersByTimeAsync(30_000)
     expect(wakeCalls(harness.kit)).toBe(0)
     expect(harness.logs.some((line) => line.includes("unmapped session"))).toBe(true)
+    await (await harness.hooks).dispose?.()
+  })
+
+  it("B/枚举收养成功即开轮询：首轮 flush 即 wake 认领（无需先跑回合，spec §14.1）", async () => {
+    vi.useFakeTimers()
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.listResult = [{ id: "r1", title: "枚举会话" }]
+    await harness.handle.flush() // 启动枚举（fire-and-forget）→ 收养 r1 → onAdopted → ensurePolling
+    expect(harness.client.listCalls).toHaveLength(1)
+    expect(harness.kit.toolCalls.length).toBeGreaterThanOrEqual(2) // 实例 + r1 均注册成功
+    expect(wakeCalls(harness.kit)).toBe(0) // 收养即开轮询，但首轮在基础间隔之后
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(wakeCalls(harness.kit)).toBe(1)
+    await (await harness.hooks).dispose?.()
+  })
+
+  it("A/懒收养成功即开轮询：恢复的旧会话无需先跑回合即可被唤醒（spec §14.1）", async () => {
+    vi.useFakeTimers()
+    const home = tempHome()
+    const harness = setup({ home })
+    harness.client.sessions.set("revived", { id: "revived", title: "被恢复的会话" })
+    // session.updated → adoptSession（未跑过任何回合，无 status/idle 事件可依）。
+    await emit(harness, { type: "session.updated", properties: { info: { id: "revived" } } })
+    expect(harness.kit.toolCalls.length).toBeGreaterThanOrEqual(2) // 实例 + 会话注册成功
+    expect(wakeCalls(harness.kit)).toBe(0)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(wakeCalls(harness.kit)).toBe(1)
+    await (await harness.hooks).dispose?.()
+  })
+
+  it("归档会话收养被拦下：不注册即不开轮询（无 wake，spec §14.1）", async () => {
+    vi.useFakeTimers()
+    const home = tempHome()
+    const harness = setup({ home })
+    // 归档且未映射 → adoptSession 跳过（不注册、不调 onAdopted）→ 永不轮询。
+    await emit(harness, {
+      type: "session.updated",
+      properties: { info: { id: "arch", title: "归档会话", time: { archived: 1 } } },
+    })
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(wakeCalls(harness.kit)).toBe(0)
+    expect(harness.logs.some((line) => line.includes("skipped: not adopted"))).toBe(true)
     await (await harness.hooks).dispose?.()
   })
 })
