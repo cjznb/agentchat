@@ -6,7 +6,7 @@
  * human 由 `foldTree` 完全过滤 → 天然不可选；退役节点灰显且 checkbox 禁用。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { loadExpanded, saveExpanded, toggleExpanded, type StorageLike } from "../accordion"
+import { loadExpanded, saveExpanded, toggleIndependent, type StorageLike } from "../accordion"
 import { vendorBadge } from "../chat"
 import { useStore } from "../store"
 import { foldTree, roleTone, statusGlyph, statusLabel, type TreeRow } from "../treeFold"
@@ -128,7 +128,7 @@ export function MemberPicker({ selected, onToggle }: MemberPickerProps) {
 
   // 展开态持久化移入 effect（F6）：updater 保持纯函数。
   const expand = useCallback((nodeId: string) => {
-    setExpanded((previous) => toggleExpanded(previous, nodeId))
+    setExpanded((previous) => toggleIndependent(previous, nodeId))
   }, [])
 
   // 值未变不重复持久化（StrictMode 双挂载同值幂等）。

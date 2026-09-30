@@ -56,3 +56,8 @@ export function saveExpanded(
 export function toggleExpanded(ids: readonly string[], id: string): readonly string[] {
   return ids.includes(id) ? [] : [id]
 }
+
+/** 独立开关：不在→加入；在→移除；绝不动其它 id（选人树用，非手风琴）。 */
+export function toggleIndependent(ids: readonly string[], id: string): readonly string[] {
+  return ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id]
+}
