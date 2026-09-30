@@ -33,6 +33,8 @@ type ParseCtx = {
   unmatched: string[]
   seen: Set<string>
   all: boolean
+  /** `scanAts` 侧信道：最近一次 `resolveAt` 的命中目标（未命中 = null/undefined）；`resolveMentions` 忽略。 */
+  lastHit?: MentionTarget | null
 }
 
 /** token 边界：空白 / Unicode 标点 / 符号（含中英文标点与 `-`，故 UUID 正好取到前 8 位）。 */
@@ -63,17 +65,21 @@ function addUnmatched(ctx: ParseCtx, token: string): void {
 
 /** 解析单个 `@` 之后的文本；返回消耗的字符数（供正文扫描游标前进）。 */
 function resolveAt(rest: string, participants: readonly MentionTarget[], ctx: ParseCtx): number {
+  ctx.lastHit = null
   // 1) 全体关键字先于名字：`@*` / `@所有人` / `@all`（后两者要求词边界）
   if (rest.startsWith("*")) {
     ctx.all = true
+    ctx.lastHit = { id: "*", name: "*" }
     return 1
   }
   if (rest.startsWith("所有人")) {
     ctx.all = true
+    ctx.lastHit = { id: "*", name: "所有人" }
     return "所有人".length
   }
   if (rest.slice(0, 3).toLowerCase() === "all" && !ASCII_WORD.test(rest.charAt(3))) {
     ctx.all = true
+    ctx.lastHit = { id: "*", name: rest.slice(0, 3) }
     return 3
   }
 
@@ -87,6 +93,7 @@ function resolveAt(rest: string, participants: readonly MentionTarget[], ctx: Pa
     }
   }
   if (best !== undefined) {
+    ctx.lastHit = best
     addMatch(ctx, best)
     return bestLen
   }
@@ -98,6 +105,7 @@ function resolveAt(rest: string, participants: readonly MentionTarget[], ctx: Pa
     (p) => p.id === token || (token.length >= 8 && p.id.startsWith(token)),
   )
   if (byId !== undefined) {
+    ctx.lastHit = byId
     addMatch(ctx, byId)
     return token.length
   }
@@ -105,14 +113,32 @@ function resolveAt(rest: string, participants: readonly MentionTarget[], ctx: Pa
   return token.length
 }
 
-/** 扫描正文中的每个 `@`（跳过左邻 ASCII 词字符的，如邮箱）。 */
-function scanBody(body: string, participants: readonly MentionTarget[], ctx: ParseCtx): void {
+/**
+ * 扫描正文中的每个 `@`（跳过左邻 ASCII 词字符的，如邮箱）——`resolveMentions`
+ * 与 `splitMentions` 共用的扫描核心。`onSegment` 在命中时收到
+ * `[命中起点, 命中终点(含 `@`), 命中目标]`；未命中 token 不回调（归入纯文本）。
+ */
+function scanAts(
+  body: string,
+  participants: readonly MentionTarget[],
+  ctx: ParseCtx,
+  onSegment?: (start: number, end: number, mention: MentionTarget) => void,
+): void {
   let from = 0
   let at = body.indexOf("@", from)
   while (at >= 0) {
-    from = at === 0 || !ASCII_WORD.test(body.charAt(at - 1))
-      ? at + 1 + resolveAt(body.slice(at + 1), participants, ctx)
-      : at + 1
+    if (at !== 0 && ASCII_WORD.test(body.charAt(at - 1))) {
+      from = at + 1
+    } else {
+      const consumed = resolveAt(body.slice(at + 1), participants, ctx)
+      if (consumed > 0) {
+        const hit = ctx.lastHit ?? null
+        if (hit !== null && onSegment !== undefined) onSegment(at, at + 1 + consumed, hit)
+        from = at + 1 + consumed
+      } else {
+        from = at + 1
+      }
+    }
     at = body.indexOf("@", from)
   }
 }
@@ -171,11 +197,38 @@ export function resolveMentions(input: {
 }): MentionsEcho {
   const ctx: ParseCtx = { matched: [], unmatched: [], seen: new Set(), all: false }
   for (const token of input.mentions ?? []) resolveStructured(token, input.participants, ctx)
-  scanBody(input.body, input.participants, ctx)
+  scanAts(input.body, input.participants, ctx)
 
   if (ctx.all || input.body.trim() === "*") {
     return { matched: allParticipants(input.participants), unmatched: ctx.unmatched, scope: "all" }
   }
   const scope = ctx.matched.length > 0 || ctx.unmatched.length > 0 ? "explicit" : "none"
   return { matched: ctx.matched, unmatched: ctx.unmatched, scope }
+}
+
+/** 正文分段：纯文本段与 `@` 命中段（Task 8 气泡高亮；`mention` 仅命中段携带）。 */
+export type MentionPart = { readonly text: string; readonly mention?: MentionTarget }
+
+/**
+ * 把正文切成「纯文本段 / `@` 命中段」序列——与 `resolveMentions` 共用同一套
+ * 扫描规则（名字最长前缀、全体关键字、左邻 ASCII 词字符跳过、尾随标点剔除）。
+ *
+ * - 各段按原文顺序首尾相接，拼接全部 `text` 还原原正文。
+ * - 未命中的 token 不成段，归入所在纯文本段。
+ * - 全体关键字（`@所有人`/`@all`/`@*`）命中段的 `mention.id` 为 `"*"`。
+ */
+export function splitMentions(
+  body: string,
+  participants: readonly MentionTarget[],
+): readonly MentionPart[] {
+  const parts: MentionPart[] = []
+  const ctx: ParseCtx = { matched: [], unmatched: [], seen: new Set(), all: false }
+  let plainStart = 0
+  scanAts(body, participants, ctx, (start, end, mention) => {
+    if (start > plainStart) parts.push({ text: body.slice(plainStart, start) })
+    parts.push({ text: body.slice(start, end), mention })
+    plainStart = end
+  })
+  if (plainStart < body.length) parts.push({ text: body.slice(plainStart) })
+  return parts
 }

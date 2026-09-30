@@ -1,8 +1,11 @@
 /**
  * 消息气泡（spec §11.4；Plan 3 T5）——己方右 / 对方左、系统消息居中、
  * 发送者头像 + 厂商徽标 + 子节点徽标、己方四级回执。纯展示，数据全由 props 注入。
+ * Task 8：正文 `@名字` 高亮（`splitMentions` 分段）+ `meta.mentions` 正文未写的提及 chip。
  */
+import { Fragment } from "react"
 import type { ChatMessage } from "../../../shared/contracts"
+import { splitMentions, type MentionTarget } from "../../../shared/mentions"
 import type { CardData } from "../cards"
 import { formatClock, initialOf, vendorBadge, type SenderView } from "../chat"
 import { receiptGlyph } from "../receipts"
@@ -23,6 +26,16 @@ export interface MessageBubbleProps {
   readonly onRevoke?: () => void
   /** 撤回请求进行中（按钮禁用）。 */
   readonly revoking?: boolean
+  /** 会话参与者（roster 视图映射）：`@` 高亮与提及 chip 用；缺省 = 不高亮、不出 chip。 */
+  readonly participants?: readonly MentionTarget[]
+}
+
+/** `meta.mentions`（agentId 数组）类型收窄；无 meta / 非数组 / 非字符串元素 → 空。 */
+function metaMentionIds(meta: ChatMessage["meta"]): readonly string[] {
+  if (meta === undefined) return []
+  const raw: unknown = meta["mentions"]
+  if (!Array.isArray(raw)) return []
+  return raw.filter((entry): entry is string => typeof entry === "string")
 }
 
 function rowClass(highlighted: boolean, extra?: string): string {
@@ -40,6 +53,7 @@ export function MessageBubble({
   card,
   onRevoke,
   revoking = false,
+  participants = [],
 }: MessageBubbleProps) {
   const highlightAttr = highlighted ? "true" : undefined
 
@@ -77,6 +91,20 @@ export function MessageBubble({
   const childBadge = !own && sender !== undefined && sender.rootName !== null ? sender.rootName : null
   const revoked = revokeView(message, own)
   const showRevoke = canRevoke(message, own) && onRevoke !== undefined
+  // Task 8：正文 `@` 分段高亮 + `meta.mentions` 中正文未书写的成员出 chip。
+  const parts = splitMentions(message.body, participants)
+  const chipNames: string[] = []
+  {
+    const seenIds = new Set<string>()
+    for (const id of metaMentionIds(message.meta)) {
+      if (seenIds.has(id)) continue
+      seenIds.add(id)
+      const target = participants.find((p) => p.id === id)
+      if (target === undefined) continue
+      if (message.body.includes("@" + target.name)) continue
+      chipNames.push(target.name)
+    }
+  }
 
   return (
     <li
@@ -114,7 +142,17 @@ export function MessageBubble({
             此消息已撤回
           </p>
         ) : (
-          <p className="bubble-body">{message.body}</p>
+          <p className="bubble-body">
+            {parts.map((part, index) =>
+              part.mention === undefined ? (
+                <Fragment key={index}>{part.text}</Fragment>
+              ) : (
+                <mark className="mention-hit" key={index}>
+                  {part.text}
+                </mark>
+              ),
+            )}
+          </p>
         )}
         <footer className="bubble-foot">
           <time className="bubble-time">{formatClock(message.createdAt)}</time>
@@ -123,6 +161,13 @@ export function MessageBubble({
               已撤回
             </span>
           ) : null}
+          {revoked === "placeholder"
+            ? null
+            : chipNames.map((name) => (
+                <span className="mention-chip" data-testid="mention-chip" key={name}>
+                  提及: {name}
+                </span>
+              ))}
           {receipt !== null ? (
             <span
               className="receipt"

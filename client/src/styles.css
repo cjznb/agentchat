@@ -1096,3 +1096,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .settings-input { min-height: var(--target-size); padding: var(--space-3); border: var(--line-thin) solid var(--color-hairline); border-radius: var(--radius-medium); color: var(--color-ink); background: var(--color-raised); }
 .settings-notice { margin: var(--space-3) 0 0; color: var(--color-jade); font-size: var(--text-body); }
 .settings-error { margin: var(--space-3) 0 0; color: var(--color-error); font-size: var(--text-body); }
+/* Task 8: mention highlight / chip / badge */
+.mention-hit { background: #ffe8a3; color: inherit; border-radius: 3px; padding: 0 2px; }
+.mention-chip { display: inline-block; margin-inline-start: 6px; padding: 0 6px; border-radius: 999px; background: rgba(59, 130, 246, 0.15); color: #2563eb; font-size: 11px; line-height: 16px; }
+.mention-badge { margin-inline-end: 6px; padding: 0 5px; border-radius: 999px; background: #2563eb; color: #fff; font-size: 11px; font-style: normal; }

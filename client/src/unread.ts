@@ -42,3 +42,30 @@ export function aggregateUnread(
   }
   return totals
 }
+
+/** 人类 id = roster 中 `vendor === "human"` 的节点（缺省 = 无人可被 @）。 */
+function humanIdOf(roster: readonly RosterNode[]): string | null {
+  const human = roster.find((node) => node.vendor === "human")
+  return human === undefined ? null : human.id
+}
+
+/**
+ * 会话「被 @」标记（Task 8；spec D4=选项 a）——最新消息 `meta.mentions`
+ * 含人类 id 即 true。**只派生布尔，未读计数口径一行不改。**
+ */
+export function conversationMentioned(
+  conversation: ConversationSummary,
+  roster: readonly RosterNode[],
+): boolean {
+  const humanId = humanIdOf(roster)
+  if (humanId === null) return false
+  // 预览 schema 仅声明 5 个字段、未含 meta（contracts 禁改）：对运行时回显的扩展
+  // 字段做 unknown 结构化收窄后读取；无 meta / 无 mentions → false。
+  const preview = conversation.lastMessage as unknown as {
+    readonly meta?: Record<string, unknown>
+  } | null
+  const meta = preview?.meta
+  if (meta === undefined) return false
+  const raw: unknown = meta["mentions"]
+  return Array.isArray(raw) && raw.includes(humanId)
+}

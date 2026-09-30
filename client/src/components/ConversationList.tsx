@@ -5,9 +5,10 @@
  * - 展开态持久化到 `localStorage`（键 `agentchat:expandedRoots`），坏 JSON 忽略
  * - 点击行：`openAndRead`（打开会话 + 按需载入消息 + `POST .../read` 标已读）
  * - 退役子行：灰显 + `disabled`（不可开聊），仍在原位
+ * - Task 8：会话行「被 @」标记（`conversationMentioned`，未读计数口径不变）
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import type { AgentStatus, ConversationSummary } from "../../../shared/contracts"
+import type { AgentStatus, ConversationSummary, RosterNode } from "../../../shared/contracts"
 import {
   foldConversations,
   loadExpandedRoots,
@@ -18,6 +19,7 @@ import {
   type StorageLike,
 } from "../fold"
 import { useStore } from "../store"
+import { conversationMentioned } from "../unread"
 
 const STATUS = {
   online: { glyph: "●", text: "在线" },
@@ -42,6 +44,15 @@ function Badge({ count }: { readonly count: number }) {
   return (
     <em className="unread-badge" data-testid="unread-badge" aria-label={`${count} 条未读`}>
       {count}
+    </em>
+  )
+}
+
+/** Task 8：最新消息 @到人类 → 会话行标记（与未读徽标并列，不参与计数）。 */
+function MentionBadge() {
+  return (
+    <em className="mention-badge" data-testid="mention-badge" aria-label="被提及">
+      @
     </em>
   )
 }
@@ -73,12 +84,15 @@ function ChildItem({
   child,
   activeId,
   onOpen,
+  roster,
 }: {
   readonly child: ChildRow
   readonly activeId: string | null
   readonly onOpen: (conversationId: string) => void
+  readonly roster: readonly RosterNode[]
 }) {
   const { conversation, node, retired } = child
+  const mentioned = conversationMentioned(conversation, roster)
   return (
     <li>
       <button
@@ -94,6 +108,7 @@ function ChildItem({
       >
         {node === undefined ? null : <StatusDot status={node.status} />}
         <Body name={node?.name ?? conversation.name ?? "私聊"} conversation={conversation} />
+        {mentioned ? <MentionBadge /> : null}
         <Badge count={conversation.unread} />
       </button>
     </li>
@@ -112,13 +127,16 @@ function FlatItem({
   row,
   activeId,
   onOpen,
+  roster,
 }: {
   readonly row: FoldedRow
   readonly activeId: string | null
   readonly onOpen: (conversationId: string) => void
+  readonly roster: readonly RosterNode[]
 }) {
   const conversation = row.conversation
   if (conversation === null) return null
+  const mentioned = conversationMentioned(conversation, roster)
   return (
     <li>
       <button
@@ -131,6 +149,7 @@ function FlatItem({
         type="button"
       >
         <Body name={flatName(row)} conversation={conversation} />
+        {mentioned ? <MentionBadge /> : null}
         <Badge count={row.unread} />
       </button>
     </li>
@@ -143,15 +162,18 @@ function RootItem({
   activeId,
   onToggle,
   onOpen,
+  roster,
 }: {
   readonly row: FoldedRow
   readonly expanded: boolean
   readonly activeId: string | null
   readonly onToggle: (rootId: string) => void
   readonly onOpen: (conversationId: string) => void
+  readonly roster: readonly RosterNode[]
 }) {
   const name = row.node?.name ?? "私聊"
   const conversation = row.conversation
+  const mentioned = conversation !== null && conversationMentioned(conversation, roster)
   return (
     <li className="fold-root" data-testid="root-row" data-root-id={row.id}>
       <div className="fold-head" data-expanded={expanded}>
@@ -182,6 +204,7 @@ function RootItem({
           type="button"
         >
           <Body name={name} conversation={conversation} />
+          {mentioned ? <MentionBadge /> : null}
         </button>
         <span className="fold-meta">
           {row.children.length > 0 ? (
@@ -195,7 +218,7 @@ function RootItem({
       {expanded && row.children.length > 0 ? (
         <ul className="fold-children">
           {row.children.map((child) => (
-            <ChildItem key={child.conversation.id} child={child} activeId={activeId} onOpen={onOpen} />
+            <ChildItem key={child.conversation.id} child={child} activeId={activeId} onOpen={onOpen} roster={roster} />
           ))}
         </ul>
       ) : null}
@@ -255,9 +278,10 @@ export function ConversationList({ onCreateGroup }: ConversationListProps = {}) 
               activeId={state.openConversationId}
               onToggle={toggle}
               onOpen={open}
+              roster={state.roster}
             />
           ) : (
-            <FlatItem key={row.id} row={row} activeId={state.openConversationId} onOpen={open} />
+            <FlatItem key={row.id} row={row} activeId={state.openConversationId} onOpen={open} roster={state.roster} />
           ),
         )
       )}
