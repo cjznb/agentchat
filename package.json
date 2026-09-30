@@ -16,7 +16,8 @@
     "dev": "vite --config client/vite.config.ts",
     "build": "vite build --config client/vite.config.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p client/tsconfig.json"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p client/tsconfig.json",
+    "visual": "playwright test --config playwright.visual.config.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
