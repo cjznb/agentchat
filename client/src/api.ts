@@ -83,8 +83,14 @@ function signalInit(signal: AbortSignal | undefined): RequestInit | undefined {
   return signal === undefined ? undefined : { signal }
 }
 
-export function loadRoster(signal?: AbortSignal): Promise<readonly RosterNode[]> {
-  return request("/api/roster", rosterTreeSchema, signalInit(signal))
+/** `conversation` 可选（T5 端点）：群会话按参与者过滤 roster；DM/shout/未知 id → `[]`。 */
+export function loadRoster(
+  signal?: AbortSignal,
+  conversation?: string,
+): Promise<readonly RosterNode[]> {
+  const query =
+    conversation === undefined ? "" : `?conversation=${encodeURIComponent(conversation)}`
+  return request(`/api/roster${query}`, rosterTreeSchema, signalInit(signal))
 }
 
 export function loadConversations(signal?: AbortSignal): Promise<ConversationList> {

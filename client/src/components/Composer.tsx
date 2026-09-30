@@ -18,6 +18,7 @@ import {
   type SyntheticEvent,
 } from "react"
 import type { RosterNode } from "../../../shared/contracts"
+import { loadRoster } from "../api"
 import { useStore } from "../store"
 import { isContainerNode } from "../treeFold"
 
@@ -87,10 +88,43 @@ export function Composer({ conversationId, onSent }: ComposerProps) {
   const [caret, setCaret] = useState(0)
   const [dismissed, setDismissed] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
+  // 群成员候选源（spec §4.1「该群成员名」）：按 conversationId 缓存，加载完成前/失败不出下拉。
+  const [members, setMembers] = useState<readonly RosterNode[] | null>(null)
+  const membersCacheRef = useRef(new Map<string, readonly RosterNode[]>())
   const canSend = draft.trim().length > 0 && !sending
 
+  const conversation = state.conversations.find((item) => item.id === conversationId)
+  const isGroupChat =
+    conversation !== undefined && conversation.kind === "group" && conversation.key !== "shout"
+
+  useEffect(() => {
+    if (!isGroupChat) {
+      setMembers(null)
+      return
+    }
+    const cached = membersCacheRef.current.get(conversationId)
+    if (cached !== undefined) {
+      setMembers(cached)
+      return
+    }
+    setMembers(null) // 新会话未就绪：先清空，防上个会话成员闪现
+    let alive = true
+    loadRoster(undefined, conversationId)
+      .then((roster) => {
+        membersCacheRef.current.set(conversationId, roster)
+        if (alive) setMembers(roster)
+      })
+      .catch(() => {
+        // 加载失败 → 不出下拉（安全侧）；不缓存失败，下次进入重试。
+        if (alive) setMembers(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [conversationId, isGroupChat])
+
   const segment = mentionSegment(draft, caret)
-  const candidates = mentionCandidates(state.roster)
+  const candidates = isGroupChat && members !== null ? mentionCandidates(members) : []
   const matched = segment === null || dismissed ? [] : matchCandidates(candidates, segment.fragment)
   const open = matched.length > 0
   const active = open ? ((activeIndex % matched.length) + matched.length) % matched.length : 0
