@@ -56,12 +56,17 @@ describe("styles-controls.css 表单控件 baseline", () => {
     expect(css).toContain("display: flex")
   })
 
-  it("Finding 1 回归锁：group-add-select 去原生箭头 + 自绘箭头 + 可辨禁用态", () => {
+  it("Finding 1 回归锁：group-add-select 去原生箭头 + 本体背景层自绘箭头 + 可辨禁用态", () => {
     // 去除 OS 原生下拉箭头
     expect(css).toContain("appearance")
-    // 自绘箭头（SVG 无颜色值，token 着色）+ 箭头定位
-    expect(css).toContain("mask-image: url(")
-    expect(css).toMatch(/mask-position/)
+    // select 本体两层渐变三角合成实心 ▾（替换型控件无伪元素 → 禁用 ::after 回退）
+    expect(css).toContain("background-image")
+    expect(css).toContain("linear-gradient(45deg")
+    expect(css).toContain("linear-gradient(135deg")
+    expect(css).toContain("background-position")
+    expect(css).toContain("background-size")
+    expect(css).toContain("background-repeat: no-repeat")
+    expect(css).not.toContain(".group-add-select::after")
     // 禁用态独立规则 —— 与启用态肉眼可辨
     expect(css).toContain(".group-add-select:disabled")
     // 为自绘箭头留位
