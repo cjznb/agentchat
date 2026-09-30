@@ -107,6 +107,31 @@
 **无需迁移**：升级后旧的 `session.created` 子节点/历史实例节点**保留无害**；新逻辑按下述规则
 新建实例节点并把会话收为其子节点，最多在 roster 里多出一个可读的实例分组节点。
 
+## 群聊 @ 与 ask 等待（工具入参 / 出参）
+
+**参数与回显**：`send`/`ask` 支持 `mentions?: string[]`（群内点名；出参回显 `mentions{matched,unmatched,scope}`）；
+`ask` 的 `wait.scope?: "all"|"any"`；`roster` 支持 `conversation?: string`（只取该会话参与者卡片，未知 id → **200 `[]`**，
+shout 会话同样 `[]`，与 messages 端点 404 风格不同系既有选择）；`group op:list` 出参含 `member_cards`。
+
+**@ 解析规则**：按**最长前缀**匹配（名字可含空格）、剔除**末尾中英文标点**、`@所有人`/`@all`/`*` 命中全体、
+`@<id前8位>` 按 id 兜底；`agents.name` **全局唯一**。
+
+**两句核心语义**：
+
+> **群消息只唤醒被 @ 者；人类在群里不带 @ 则唤醒全部，带 @ 只唤醒被 @ 者。**
+
+> **用户改名优先于系统默认名（展示名 = 用户名 ?? 系统名，agent 重注册/会话改标题不会覆盖）。**
+
+**群 ask 三形态等待（示例）**：
+
+1. **阻塞到全回**：`wait:{scope:"all", timeoutMs:60000}` —— 全回后返回；超时返回 `timedOut:true` + `replies` +
+   **`pending` 未回名单**。
+2. **异步（不传 `wait`）**：立即返回 ask 单，答复经既有 inbox/审批流转。
+3. **任一先回**：`wait:{scope:"any", timeoutMs:60000}` —— 任一被 @ 者答复即返回。
+
+**语义补记**：非人类对**喊话会话**发起群 `ask` → `not_participant` 拒绝（喊话会话无 participants 行，闸门
+fail-closed，与喊话需审批同向）。
+
 ## 安装
 
 安装器支持的目标配置解析顺序（依次）：

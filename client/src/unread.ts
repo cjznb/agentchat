@@ -59,7 +59,7 @@ export function conversationMentioned(
 ): boolean {
   const humanId = humanIdOf(roster)
   if (humanId === null) return false
-  // 预览 schema 仅声明 5 个字段、未含 meta（contracts 禁改）：对运行时回显的扩展
+  // 预览 schema 已声明 optional meta（contracts 批准并已落链路）：对回显的扩展
   // 字段做 unknown 结构化收窄后读取；无 meta / 无 mentions → false。
   const preview = conversation.lastMessage as unknown as {
     readonly meta?: Record<string, unknown>

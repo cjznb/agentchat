@@ -130,16 +130,16 @@ Agent 经 `POST /mcp`（Bearer `HUB_TOKEN` 传输门）调用 MCP 工具；根�
 
 | 工具 | 语义 |
 |---|---|
-| `send` | 向 agent_id / group_id / `*` 发消息；带 `wait` 时阻塞至回信，返回四级回执 |
+| `send` | 向 agent_id / group_id / `*` 发消息；群目标可带 `mentions?: string[]` 点名（出参回显 `mentions{matched,unmatched,scope}`）；带 `wait` 时阻塞至回信，返回四级回执 |
 | `inbox` | 拉取本节点可见消息页与未读数；`timeout` 阻塞等待新消息 |
 | `ack` | 按消息 id 显式已读 |
-| `roster` | 层级树 + 各节点卡片 |
+| `roster` | 层级树 + 各节点卡片；可带 `conversation?: string` 只返回该会话的参与者卡片 |
 | `conversation` | 会话历史分页（`before` / `limit`） |
-| `group` | 建群 / 拉人 / 群列表（仅根发起，经审批闸门） |
+| `group` | 建群 / 拉人 / 群列表（仅根发起，经审批闸门）；`op:list` 出参含 `member_cards` |
 | `shout` | 全员喊话（仅根发起，经审批闸门） |
 | `status` | 上报自定义状态文本 |
 | `message_status` | 查询指定消息的四级回执 |
-| `ask` | 请求批示：`to` 为 agent_id 或 `'human'`，带 `question`/`options`/`allow_custom`；带 `wait` 时挂起至答复，返回批示单 + `reply?{choice\|text, timedOut}` |
+| `ask` | 请求批示：`to` 为 agent_id / group_id / `'human'`，带 `question`/`options`/`allow_custom`，群目标可带 `mentions?: string[]`；带 `wait` 时挂起至答复（`wait.scope?: "all"\|"any"`，出参回显 `mentions{matched,unmatched,scope}`），返回批示单 + `replies` + `pending?` + `reply?{choice\|text, timedOut}` |
 | `respond_ask` | 答复请求批示：`ask_id` + `choice?` 或 `text?`（首答生效） |
 
 通知页数据面（用户侧 UI 消费）：
@@ -147,6 +147,39 @@ Agent 经 `POST /mcp`（Bearer `HUB_TOKEN` 传输门）调用 MCP 工具；根�
 - `GET /api/notifications?scope=actionable|all` — 通知列表（`actionable` = 待用户处理；`all` = 全部，含已决与 agent↔agent），每条带深链锚点 `cardMessageId` / `conversationId`。
 - `POST /api/asks/:id/respond` — 以用户身份答复某条批示（`{choice?|text?}`）。
 - `POST /api/notifications/:id/read` — 标记某条通知已读（幂等）。
+
+### 群聊 @ 与 ask 等待（mentions / scope / conversation）
+
+**工具参数（入参）与出参回显**：
+
+| 工具 | 参数 | 说明 |
+|---|---|---|
+| `send` | `mentions?: string[]` | 群内点名（名字 / `所有人` / id 前 8 位）；出参回显 `mentions{matched,unmatched,scope}` |
+| `ask` | `mentions?: string[]`、`wait.scope?: "all"\|"any"` | 群 ask 点名 + 等待形态（三形态见下）；出参同样回显 `mentions{matched,unmatched,scope}` |
+| `roster` | `conversation?: string` | 只返回该会话的参与者卡片；未知 id → **200 `[]`**（shout 会话同样 `[]`；与 messages 端点 404 风格不同，系既有选择） |
+| `group` | `op:list` 出参 `member_cards` | 群列表附带成员资料卡（展示名等） |
+
+**@ 解析规则**：按**最长前缀**匹配（名字可含空格）；剔除**末尾中英文标点**后再匹配；`@所有人` / `@all` / `*`
+命中全体；`@<id前8位>` 按 id 兜底；`agents.name` **全局唯一**，名字即身份。
+
+**两句核心语义**：
+
+> **群消息只唤醒被 @ 者；人类在群里不带 @ 则唤醒全部，带 @ 只唤醒被 @ 者。**
+
+> **用户改名优先于系统默认名（展示名 = 用户名 ?? 系统名，agent 重注册/会话改标题不会覆盖）。**
+
+**群 ask 三形态等待（示例）**：
+
+1. **阻塞到全回**：`ask{to:<群id>, question:"…", wait:{scope:"all", timeoutMs:60000}}` —— 全部被 @ 者答复后返回；
+   超时返回 `timedOut:true` + 已收 `replies` + **`pending` 未回名单**。
+2. **异步（不传 `wait`）**：立即返回 ask 单，答复经既有 inbox/审批流转。
+3. **任一先回**：`wait:{scope:"any", timeoutMs:60000}` —— 任一被 @ 者答复即返回。
+
+**语义补记（实现事实）**：
+
+- **喊话 fail-closed**：非人类对**喊话会话**发起群 `ask` → `not_participant` 拒绝（喊话会话无 participants 行，
+  闸门 fail-closed，与喊话需审批同向）。
+- **未知会话 id**：`GET /api/roster?conversation=<未知id>` → **200 `[]`**（shout 会话同样 `[]`）。
 
 ## 安全模型（MVP 本地信任）
 
