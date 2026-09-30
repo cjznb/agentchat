@@ -17,6 +17,7 @@ import {
   cardSubject,
   type CardData,
 } from "../cards"
+import { buildRosterView } from "../chat"
 import { useStore } from "../store"
 
 function errorStatus(error: unknown): number {
@@ -34,7 +35,7 @@ export interface CardActionsProps {
  * 显示已决态；服务端二次校验被拒（409）时保留原态并提示（不改本地已决态）。
  */
 export function CardActions({ card, entry }: CardActionsProps) {
-  const { decideApproval, respondAsk } = useStore()
+  const { state, decideApproval, respondAsk } = useStore()
   const [submitted, setSubmitted] = useState<ApprovalEntry | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -108,6 +109,24 @@ export function CardActions({ card, entry }: CardActionsProps) {
     const text = custom.trim()
     if (text === "" || outcome.ended) return
     respond({ text })
+  }
+
+  // P4/8（B 方案，仅 UI 收紧）：pending 批示只在 target=我（人类节点）时渲染答复控件；
+  // target 是其它 agent / 未知（条目缺失）→ 只读态，问题与选项纯展示（服务端权限不动）。
+  const humanId = buildRosterView(state.roster).humanId
+  const canRespond = entry !== undefined && humanId !== null && entry.target === humanId
+  if (!outcome.ended && !canRespond) {
+    return (
+      <div className="card-actions" data-kind="ask" data-state="readonly">
+        {card.options.length > 0 ? (
+          <ul className="card-choices" data-testid="card-choices-readonly">
+            {card.options.map((option) => (
+              <li key={option}>{option}</li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+    )
   }
 
   return (
