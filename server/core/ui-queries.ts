@@ -88,6 +88,7 @@ function previewOf(message: Message | undefined): ConversationPreview | null {
         from: message.fromAgentId,
         body: message.body,
         createdAt: message.createdAt,
+        ...(message.meta === undefined ? {} : { meta: message.meta }),
       }
 }
 

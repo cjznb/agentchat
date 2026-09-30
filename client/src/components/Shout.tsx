@@ -155,7 +155,8 @@ export function ShoutView({ conversationId }: ShoutViewProps) {
               <MessageBubble
                 key={message.id}
                 message={message}
-                own={rosterView.humanId !== null && message.fromAgentId === rosterView.humanId}
+                participants={Array.from(rosterView.byId.values(), ({ id, name }) => ({ id, name }))}
+              own={rosterView.humanId !== null && message.fromAgentId === rosterView.humanId}
                 sender={rosterView.byId.get(message.fromAgentId)}
                 showSender
                 highlighted={false}

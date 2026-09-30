@@ -6,9 +6,10 @@
  * - 点击行：`openAndRead`（打开会话 + 按需载入消息 + `POST .../read` 标已读）
  * - 退役子行：灰显 + `disabled`（不可开聊），仍在原位
  * - Task 8：会话行「被 @」标记（`conversationMentioned`，未读计数口径不变）
+ *   行原子组件抽至 `conversation-row.tsx`（C2：本文件回 ≤250 纯行）
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import type { AgentStatus, ConversationSummary, RosterNode } from "../../../shared/contracts"
+import type { RosterNode } from "../../../shared/contracts"
 import {
   foldConversations,
   loadExpandedRoots,
@@ -20,13 +21,7 @@ import {
 } from "../fold"
 import { useStore } from "../store"
 import { conversationMentioned } from "../unread"
-
-const STATUS = {
-  online: { glyph: "●", text: "在线" },
-  busy: { glyph: "◐", text: "忙碌" },
-  offline: { glyph: "○", text: "离线" },
-  retired: { glyph: "◌", text: "退役" },
-} as const satisfies Record<AgentStatus, { readonly glyph: string; readonly text: string }>
+import { Badge, Body, MentionBadge, StatusDot } from "./conversation-row"
 
 function safeStorage(): StorageLike | null {
   try {
@@ -34,50 +29,6 @@ function safeStorage(): StorageLike | null {
   } catch {
     return null // 隐私模式禁用存储：不持久化展开态
   }
-}
-function previewOf(conversation: ConversationSummary | null): string {
-  return conversation?.lastMessage?.body ?? "暂无消息"
-}
-
-function Badge({ count }: { readonly count: number }) {
-  if (count <= 0) return null
-  return (
-    <em className="unread-badge" data-testid="unread-badge" aria-label={`${count} 条未读`}>
-      {count}
-    </em>
-  )
-}
-
-/** Task 8：最新消息 @到人类 → 会话行标记（与未读徽标并列，不参与计数）。 */
-function MentionBadge() {
-  return (
-    <em className="mention-badge" data-testid="mention-badge" aria-label="被提及">
-      @
-    </em>
-  )
-}
-
-function StatusDot({ status }: { readonly status: AgentStatus }) {
-  return (
-    <i
-      className="status-dot"
-      data-status={status}
-      role="img"
-      aria-label={STATUS[status].text}
-      title={STATUS[status].text}
-    >
-      {STATUS[status].glyph}
-    </i>
-  )
-}
-
-function Body({ name, conversation }: { readonly name: string; readonly conversation: ConversationSummary | null }) {
-  return (
-    <span className="conversation-body">
-      <strong>{name}</strong>
-      <span>{previewOf(conversation)}</span>
-    </span>
-  )
 }
 
 function ChildItem({

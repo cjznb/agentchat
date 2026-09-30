@@ -590,6 +590,8 @@ export const conversationPreviewSchema = z.object({
   from: z.string(),
   body: z.string(),
   createdAt: z.number().int().nonnegative(),
+  /** Task 8 I1（controller 专项批准）：预览携带消息 meta（被@标记读取）；老端省略即 undefined。 */
+  meta: z.record(z.string(), z.unknown()).optional(),
 })
 export type ConversationPreview = z.infer<typeof conversationPreviewSchema>
 

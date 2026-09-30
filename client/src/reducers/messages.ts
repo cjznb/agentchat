@@ -31,6 +31,7 @@ export function updatePreview(
     from: chat.fromAgentId,
     body: chat.body,
     createdAt: chat.createdAt,
+    ...(chat.meta === undefined ? {} : { meta: chat.meta }),
   }
   return sortConversations(
     conversations.map((conversation) =>
@@ -105,7 +106,14 @@ export function revertPreview(
   const preview: ConversationPreview | null =
     last === null
       ? null
-      : { id: last.id, seq: last.seq, from: last.fromAgentId, body: last.body, createdAt: last.createdAt }
+      : {
+          id: last.id,
+          seq: last.seq,
+          from: last.fromAgentId,
+          body: last.body,
+          createdAt: last.createdAt,
+          ...(last.meta === undefined ? {} : { meta: last.meta }),
+        }
   return sortConversations(
     conversations.map((conversation) =>
       conversation.id === conversationId ? { ...conversation, lastMessage: preview } : conversation,
