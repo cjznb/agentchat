@@ -56,6 +56,18 @@ describe("styles-controls.css 表单控件 baseline", () => {
     expect(css).toContain("display: flex")
   })
 
+  it("Finding 1 回归锁：group-add-select 去原生箭头 + 自绘箭头 + 可辨禁用态", () => {
+    // 去除 OS 原生下拉箭头
+    expect(css).toContain("appearance")
+    // 自绘箭头（SVG 无颜色值，token 着色）+ 箭头定位
+    expect(css).toContain("mask-image: url(")
+    expect(css).toMatch(/mask-position/)
+    // 禁用态独立规则 —— 与启用态肉眼可辨
+    expect(css).toContain(".group-add-select:disabled")
+    // 为自绘箭头留位
+    expect(css).toContain("padding-right")
+  })
+
   it("仅使用既有 token — 无硬编码 hex 颜色", () => {
     // styles-controls.css 不应引入新的 hex 颜色值（排除注释中的十六进制引用）
     const body = css.replace(/\/\*[^*]*\*\//g, "")
