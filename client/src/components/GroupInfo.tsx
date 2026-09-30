@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useState } from "react"
 import type { GroupEntry } from "../../../shared/contracts"
 import { addGroupMember, listGroups } from "../api"
+import { useRenameEditor } from "../actions"
 import { vendorBadge } from "../chat"
 import { addableMembers, groupMembers } from "../groups"
 import { useStore } from "../store"
@@ -24,6 +25,7 @@ export function GroupInfo({ conversationId, onClose }: GroupInfoProps) {
   const [pick, setPick] = useState("")
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
+  const rename = useRenameEditor()
 
   const refresh = useCallback(() => {
     setLoading(true)
@@ -108,7 +110,7 @@ export function GroupInfo({ conversationId, onClose }: GroupInfoProps) {
                 >
                   {member.kind === "logical" ? "◆" : vendorBadge(member.vendor)}
                 </span>
-                <span className="member-name">{member.name}</span>
+                <span className="member-name">{rename.renamed(member.id) ?? member.name}</span>
                 <i
                   className="node-dot"
                   role="img"
@@ -117,6 +119,50 @@ export function GroupInfo({ conversationId, onClose }: GroupInfoProps) {
                 >
                   {statusGlyph(member.status)}
                 </i>
+                {rename.targetId === member.id ? (
+                  <form className="member-rename-form" data-testid="member-rename-form" onSubmit={rename.submit}>
+                    <input
+                      className="member-rename-input"
+                      data-testid="member-rename-input"
+                      aria-label="新展示名"
+                      value={rename.draft}
+                      onChange={(event) => rename.setDraft(event.target.value)}
+                    />
+                    <button
+                      className="member-rename-submit"
+                      data-testid="member-rename-submit"
+                      type="submit"
+                      disabled={rename.busy || rename.draft.trim() === ""}
+                    >
+                      保存
+                    </button>
+                    <button
+                      className="member-rename-cancel"
+                      data-testid="member-rename-cancel"
+                      type="button"
+                      disabled={rename.busy}
+                      onClick={rename.cancel}
+                    >
+                      取消
+                    </button>
+                    {rename.error !== null ? (
+                      <p className="group-info-error" role="alert" data-testid="member-rename-error">
+                        {rename.error}
+                      </p>
+                    ) : null}
+                  </form>
+                ) : (
+                  <button
+                    className="member-rename"
+                    data-testid="member-rename"
+                    aria-label="修改展示名"
+                    title="修改展示名"
+                    onClick={() => rename.start(member.id, rename.renamed(member.id) ?? member.name)}
+                    type="button"
+                  >
+                    ✎
+                  </button>
+                )}
               </li>
             ))}
           </ul>

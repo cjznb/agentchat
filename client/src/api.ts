@@ -179,6 +179,47 @@ export function loadAgentCard(id: string, signal?: AbortSignal): Promise<AgentCa
   return request(`/api/agents/${encodeURIComponent(id)}`, agentCardSchema, signalInit(signal))
 }
 
+/** 改名错误码（`PATCH /api/agents/:id` 的 400/404/409，可判别）。 */
+export type RenameAgentErrorCode = "invalid_body" | "agent_not_found" | "name_taken"
+
+/** 改名结果（成功后服务端广播既有 `agent` 事件，前端经既有链路刷新）。 */
+export interface RenameAgentResult {
+  readonly ok: true
+  readonly name: string
+}
+
+function renameErrorCode(status: number, payload: unknown): RenameAgentErrorCode {
+  if (payload !== null && typeof payload === "object" && "error" in payload) {
+    const raw: unknown = payload.error
+    if (raw === "name_taken" || raw === "agent_not_found" || raw === "invalid_body") return raw
+  }
+  return status === 404 ? "agent_not_found" : status === 409 ? "name_taken" : "invalid_body"
+}
+
+/** 行内改名（私聊页与群成员列表两入口共用；请求体 `{name}`）。非 2xx 抛 `ApiError`。 */
+export async function renameAgent(id: string, name: string): Promise<RenameAgentResult> {
+  const path = `/api/agents/${encodeURIComponent(id)}`
+  const response = await fetch(path, {
+    method: "PATCH",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ name }),
+  })
+  const payload: unknown = await response.json().catch(() => null)
+  if (!response.ok) throw new ApiError(path, response.status, renameErrorCode(response.status, payload))
+  if (payload === null || typeof payload !== "object" || !("name" in payload) || typeof payload.name !== "string") {
+    throw new ApiError(path, response.status, "invalid_body")
+  }
+  return { ok: true, name: payload.name }
+}
+
+/** 改名错误码 → 用户可辨识文案（两入口共用；未知码给通用失败提示）。 */
+export function renameErrorMessage(code: string | undefined): string {
+  if (code === "name_taken") return "该名称已被占用，请换一个。"
+  if (code === "agent_not_found") return "该节点不存在。"
+  if (code === "invalid_body") return "名称无效：需 1–64 字且不含控制字符。"
+  return "改名失败，请重试。"
+}
+
 /** 确保 human↔节点 DM（取或建，幂等）——资料卡「发消息」用。 */
 export function ensureDm(to: string): Promise<EnsureDmResult> {
   return request("/api/conversations", ensureDmResultSchema, postInit({ to }))

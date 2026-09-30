@@ -6,14 +6,17 @@
  * 真乐观插入（F4）：`sendMessage` 先以临时 id 入桶（即时气泡），成功后 `reconcile` 按服务端 id
  * 对账去重，失败 `rollback` 移除临时气泡（草稿由调用方保留）。
  */
-import type { Dispatch, MutableRefObject } from "react"
+import { useCallback, useState, type Dispatch, type FormEvent, type MutableRefObject } from "react"
 import {
+  ApiError,
   ensureDm,
   loadMessages,
   markConversationRead as postConversationRead,
   markNotificationRead as postNotificationRead,
   respondAsk as postRespondAsk,
   decideApproval as postDecision,
+  renameAgent,
+  renameErrorMessage,
   revokeMessage as postRevoke,
   sendMessage as postMessage,
   shout as postShout,
@@ -194,4 +197,69 @@ export function createActions({ dispatch, reload, stateRef }: ActionDeps): Store
     respondAsk,
     markNotificationRead,
   }
+}
+
+// ── 行内改名编辑器（Task 9：私聊资料卡与群成员行两入口共用） ─────────────
+
+/** 改名编辑器出面：编辑态 + 输入草稿 + 乐观展示名覆盖 + 错误文案。 */
+export interface RenameEditor {
+  /** 正在改名的目标 id（`null` = 未在编辑）。 */
+  readonly targetId: string | null
+  readonly draft: string
+  readonly busy: boolean
+  readonly error: string | null
+  /** 改名成功后的本地乐观展示名（`null` = 用 store 原名）。 */
+  readonly renamed: (id: string) => string | null
+  readonly start: (id: string, current: string) => void
+  readonly cancel: () => void
+  readonly setDraft: (value: string) => void
+  readonly submit: (event: FormEvent) => void
+}
+
+/**
+ * 行内改名（两入口共用同一 `renameAgent` → `PATCH /api/agents/:id`，请求体 `{name}`）。
+ * 成功策略：本地乐观更新展示名（服务端既有 `agent` 事件随后回填 store）；
+ * 409 `name_taken` / 404 / 400 映射为可辨识错误文案（`renameErrorMessage`）。
+ */
+export function useRenameEditor(): RenameEditor {
+  const [targetId, setTargetId] = useState<string | null>(null)
+  const [draft, setDraft] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [renames, setRenames] = useState<Readonly<Record<string, string>>>({})
+
+  const start = useCallback((id: string, current: string): void => {
+    setTargetId(id)
+    setDraft(current)
+    setError(null)
+  }, [])
+
+  const cancel = useCallback((): void => {
+    setTargetId(null)
+    setError(null)
+  }, [])
+
+  const submit = useCallback(
+    (event: FormEvent): void => {
+      event.preventDefault()
+      if (targetId === null || busy) return
+      const trimmed = draft.trim()
+      if (trimmed === "") return
+      setBusy(true)
+      setError(null)
+      renameAgent(targetId, trimmed)
+        .then((result) => {
+          setRenames((prev) => ({ ...prev, [targetId]: result.name }))
+          setTargetId(null)
+        })
+        .catch((cause: unknown) => {
+          setError(renameErrorMessage(cause instanceof ApiError ? cause.code : undefined))
+        })
+        .finally(() => setBusy(false))
+    },
+    [targetId, draft, busy],
+  )
+
+  const renamed = useCallback((id: string): string | null => renames[id] ?? null, [renames])
+  return { targetId, draft, busy, error, renamed, start, cancel, setDraft, submit }
 }

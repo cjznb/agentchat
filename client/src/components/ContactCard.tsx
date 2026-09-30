@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useState } from "react"
 import type { AgentCard, RosterNode } from "../../../shared/contracts"
 import { loadAgentCard } from "../api"
+import { useRenameEditor } from "../actions"
 import { initialOf } from "../chat"
 import { isContainerNode, roleTone, statusGlyph, statusLabel } from "../treeFold"
 
@@ -78,6 +79,10 @@ export function ContactCard({
   const isContainer = isContainerNode(node)
   const role = roleTone(node.role_tag)
   const skills = node.skills
+  // 展示名：改名成功后本地乐观更新（服务端既有 `agent` 事件随后回填 store）。
+  const rename = useRenameEditor()
+  const name = rename.renamed(node.id) ?? node.name
+  const editing = rename.targetId === node.id
 
   return (
     <aside
@@ -86,16 +91,21 @@ export function ContactCard({
       data-node-id={node.id}
       data-vendor={node.vendor}
       data-retired={retired}
-      aria-label={`${node.name} 资料卡`}
+      aria-label={`${name} 资料卡`}
     >
       <header className="contact-head">
         <span className="contact-avatar" data-vendor={node.vendor} aria-hidden="true">
-          {initialOf(node.name)}
+          {initialOf(name)}
         </span>
         <div className="contact-ident">
           <p className="contact-kind">{node.kind === "logical" ? "逻辑节点" : "运行时节点"}</p>
-          <h2 data-testid="contact-name">{node.name}</h2>
+          <h2 data-testid="contact-name">{name}</h2>
         </div>
+        {editing ? null : (
+          <button className="contact-rename" data-testid="contact-rename" aria-label="修改展示名" title="修改展示名" onClick={() => rename.start(node.id, name)} type="button">
+            ✎
+          </button>
+        )}
         <button
           className="contact-close"
           data-testid="contact-close"
@@ -106,6 +116,19 @@ export function ContactCard({
           ×
         </button>
       </header>
+
+      {editing ? (
+        <form className="contact-rename-form" data-testid="contact-rename-form" onSubmit={rename.submit}>
+          <input className="contact-rename-input" data-testid="contact-rename-input" aria-label="新展示名" value={rename.draft} onChange={(event) => rename.setDraft(event.target.value)} />
+          <button className="contact-rename-submit" data-testid="contact-rename-submit" type="submit" disabled={rename.busy || rename.draft.trim() === ""}>
+            保存
+          </button>
+          <button className="contact-rename-cancel" data-testid="contact-rename-cancel" type="button" disabled={rename.busy} onClick={rename.cancel}>
+            取消
+          </button>
+          {rename.error !== null ? <p className="contact-error" role="alert" data-testid="contact-rename-error">{rename.error}</p> : null}
+        </form>
+      ) : null}
 
       <p className="contact-sub">
         <span className="vendor-badge" data-testid="contact-vendor">
