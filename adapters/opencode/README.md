@@ -124,6 +124,7 @@ OpenCode **不会**为已存在/被恢复的会话补发 `session.created`，而
   401/404 等确定性错误不重试，记录并降级。
 - **传输门 token 解析**：`env.HUB_TOKEN`（非空优先）→ `<AGENTCHAT_HOME>/hub_token`（trim）→ 空；
   两处皆空时打明确 warn、调用按既有 401 路径失败（无需手动 `export HUB_TOKEN`）。
+- **401 自愈（spec §14.3）**：任一 Hub 调用返回 401 → 重读 `hub_token` 一次，有新值则原地更新共享 bearer 并**仅重试这一次**（值未变或仍 401 走既有确定性错误路径，不循环、不退避），heal 记一条不含 token 值的日志；`/internal/*` 四方法与 MCP register 同点覆盖。
 - 所有事件处理入队即返回（fire-and-forget，串行保序），网络重试在后台推进，**不阻塞宿主事件循环**。
 - **空闲轮询（缺陷 A 修复）**：仅靠 `session.idle`/`session.status(idle)` **事件**时，消息若在 agent
   **已经 idle 之后**到达则没有触发者，永久停在「排队中」。故 idle 时启动周期轮询（默认 10s）走同一拉取

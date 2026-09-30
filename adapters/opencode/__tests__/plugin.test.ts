@@ -30,6 +30,8 @@ interface FetchOverrides {
   readonly toolsCall?: (args: unknown, index: number) => Response
   /** 覆盖 `/internal/*`；返回 `undefined` 走默认成功响应。抛错 = 模拟网络故障。 */
   readonly internal?: (path: string, body: unknown, index: number) => Response | undefined
+  /** 覆盖 `/mcp` 任意 JSON-RPC 请求（返回 `undefined` 走默认分派）；用于 401 自愈用例。 */
+  readonly mcp?: (json: unknown) => Response | undefined
 }
 
 interface FetchKit {
@@ -81,6 +83,8 @@ function buildFetch(overrides: FetchOverrides = {}): FetchKit {
     calls.push({ url, method: init?.method ?? "GET", headers, json })
     const path = new URL(url).pathname
     if (path === "/mcp") {
+      const mcpCustom = overrides.mcp?.(json)
+      if (mcpCustom !== undefined) return mcpCustom
       const method = isRecord(json) ? json["method"] : undefined
       if (method === "initialize") return sseResponse({ jsonrpc: "2.0", id: 1, result: {} }, "sess-1")
       if (method === "notifications/initialized") return new Response("", { status: 202 })
@@ -1292,6 +1296,133 @@ describe("网络健壮性", () => {
     expect(attempts).toBe(4)
     expect(harness.logs.some((line) => line.includes("wake failed"))).toBe(true)
     expect(harness.kit.internalCalls.some((call) => call.path === "/internal/result")).toBe(false)
+  })
+})
+
+// ── 传输门 token 401 自愈（spec §14.3）──────────────────────────────
+
+describe("传输门 token 401 自愈", () => {
+  /** 无 `HUB_TOKEN` 覆盖：token 只能来自 `<home>/hub_token` 文件（与真机轮换现场一致）。 */
+  const fileOnlyEnv = (home: string): Record<string, string | undefined> => ({
+    AGENTCHAT_HOME: home,
+    AGENTCHAT_URL: "http://hub.test",
+  })
+  const stateAuths = (kit: FetchKit): string[] =>
+    kit.calls
+      .filter((call) => new URL(call.url).pathname === "/internal/state")
+      .map((call) => call.headers["authorization"] ?? "")
+  const healLines = (logs: string[]): string[] => logs.filter((line) => line.includes("已轮换"))
+
+  it("401 → 重读到新 token → 原地更新 bearer → 仅重试一次成功（第二次请求头带新值）", async () => {
+    const home = tempHome()
+    writeFileSync(join(home, "hub_token"), "old-token")
+    let stateCount = 0
+    const harness = setup({
+      home,
+      deps: { env: fileOnlyEnv(home) },
+      overrides: {
+        internal: (path) => {
+          if (path !== "/internal/state") return undefined
+          stateCount += 1
+          return stateCount === 1 ? jsonResponse({ ok: false, error: "unauthorized" }, 401) : undefined
+        },
+      },
+    })
+    // 客户端已以旧 token 构造；此处轮换文件（真机现场：hub_token 被轮换而宿主进程仍持旧值）。
+    writeFileSync(join(home, "hub_token"), "new-token")
+    await emit(harness, rootCreated(), sessionStatus("root-sess", "busy"))
+    // 会话 busy：旧 401 → 新成功（恰好一次重试）；实例同态：新值成功。
+    expect(stateAuths(harness.kit)).toEqual([
+      "Bearer old-token",
+      "Bearer new-token",
+      "Bearer new-token",
+    ])
+    expect(stateCount).toBe(3)
+    // heal 日志恰好一条，且全文绝不含任何 token 值。
+    expect(healLines(harness.logs)).toHaveLength(1)
+    expect(harness.logs.every((line) => !line.includes("old-token") && !line.includes("new-token"))).toBe(true)
+  })
+
+  it("重读后仍 401 → 走既有确定性错误路径抛出，无第三次请求（防循环）", async () => {
+    const home = tempHome()
+    writeFileSync(join(home, "hub_token"), "old-token")
+    const harness = setup({
+      home,
+      deps: { env: fileOnlyEnv(home) },
+      overrides: {
+        internal: (path) =>
+          path === "/internal/state" ? jsonResponse({ ok: false, error: "unauthorized" }, 401) : undefined,
+      },
+    })
+    writeFileSync(join(home, "hub_token"), "new-token")
+    await emit(harness, rootCreated(), sessionStatus("root-sess", "busy"))
+    // 会话 busy：旧 401 → heal → 新 401 → 抛（2 发，绝无第三发）；实例：新值未变 → 不重试（1 发）。
+    expect(stateAuths(harness.kit)).toEqual([
+      "Bearer old-token",
+      "Bearer new-token",
+      "Bearer new-token",
+    ])
+    expect(healLines(harness.logs)).toHaveLength(1)
+    expect(harness.logs.some((line) => line.includes("state busy failed"))).toBe(true)
+  })
+
+  it("重读值与当前相同 → 不重试（单次请求后即抛，避免无意义双请求）", async () => {
+    const home = tempHome()
+    writeFileSync(join(home, "hub_token"), "same-token")
+    const harness = setup({
+      home,
+      deps: { env: fileOnlyEnv(home) },
+      overrides: {
+        internal: (path) =>
+          path === "/internal/state" ? jsonResponse({ ok: false, error: "unauthorized" }, 401) : undefined,
+      },
+    })
+    await emit(harness, rootCreated(), sessionStatus("root-sess", "busy"))
+    // 会话 1 发 + 实例 1 发 = 2 发（各恰好一发，不翻倍），无 heal 日志。
+    expect(stateAuths(harness.kit)).toEqual(["Bearer same-token", "Bearer same-token"])
+    expect(healLines(harness.logs)).toHaveLength(0)
+    expect(harness.logs.some((line) => line.includes("state busy failed"))).toBe(true)
+  })
+
+  it("register 路径同受保护：initialize 401 → heal → 重试一次成功（共享同一 bearer）", async () => {
+    const home = tempHome()
+    writeFileSync(join(home, "hub_token"), "old-token")
+    let initializations = 0
+    const harness = setup({
+      home,
+      deps: { env: fileOnlyEnv(home) },
+      overrides: {
+        mcp: (json) => {
+          if (!isRecord(json) || json["method"] !== "initialize") return undefined
+          initializations += 1
+          return initializations === 1
+            ? jsonResponse({ ok: false, error: "unauthorized" }, 401)
+            : sseResponse({ jsonrpc: "2.0", id: 1, result: {} }, "sess-1")
+        },
+      },
+    })
+    writeFileSync(join(home, "hub_token"), "new-token")
+    await emit(harness, rootCreated())
+    const initAuths = harness.kit.calls
+      .filter(
+        (call) =>
+          new URL(call.url).pathname === "/mcp" &&
+          isRecord(call.json) &&
+          call.json["method"] === "initialize",
+      )
+      .map((call) => call.headers["authorization"] ?? "")
+    // 第一发旧 401 → heal 后全部新值（重试 + 后续会话注册的 initialize）。
+    expect(initAuths[0]).toBe("Bearer old-token")
+    expect(initAuths.length).toBeGreaterThanOrEqual(2)
+    expect(initAuths.slice(1).every((auth) => auth === "Bearer new-token")).toBe(true)
+    expect(initializations).toBe(initAuths.length)
+    // 注册未被 401 打断：实例 + 会话节点均成功。
+    expect(harness.kit.toolCalls).toEqual([
+      instanceArgs(),
+      sessionArgs({ id: "root-sess", title: "根会话标题" }, "agent-1"),
+    ])
+    expect(healLines(harness.logs)).toHaveLength(1)
+    expect(harness.logs.every((line) => !line.includes("old-token") && !line.includes("new-token"))).toBe(true)
   })
 })
 

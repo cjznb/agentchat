@@ -78,7 +78,7 @@ function parseWake(text: string): WakeResult {
 /** 建 Hub 客户端；确定性 4xx 经 `expectStatus` 抛 `HubError("http")` 供调用方降级。 */
 export function createHubClient(options: HubClientOptions): Hub {
   const transport: HttpTransport = createHttpTransport(options)
-  const token = resolveHubToken(options.env)
+  let token = resolveHubToken(options.env)
   if (token === "") {
     options.log?.(
       `传输门 token 未解析到：未设 HUB_TOKEN 且 ${hubTokenPath(options.env)} 不存在或为空；` +
@@ -89,19 +89,38 @@ export function createHubClient(options: HubClientOptions): Hub {
     authorization: `Bearer ${token}`,
     "content-type": "application/json",
   }
+  /**
+   * 401 自愈（spec §14.3）：任一 Hub 调用返回 401 → 重读 `resolveHubToken(env)` 一次；
+   * 有**新值且不同**则原地更新共享 bearer 并**仅重试这一次**（仍 401 交回既有确定性错误路径；
+   * 重读值相同则不重试）。**绝不循环、绝不退避**。`/internal/*` 与 MCP register（同一 bearer
+   * 对象、多请求）共用本包装 —— 全仓唯一 heal 点。
+   */
+  const send: HttpTransport["send"] = async (path, body, headers) => {
+    const first = await transport.send(path, body, headers)
+    if (first.status !== 401) return first
+    const fresh = resolveHubToken(options.env)
+    if (fresh === "" || fresh === token) return first
+    token = fresh
+    // 原地更新共享 bearer（mcp.ts 以 `{...bearer}` 拷贝构造头，故 bearer 与本次 headers 都要写）。
+    bearer["authorization"] = `Bearer ${fresh}`
+    headers["authorization"] = `Bearer ${fresh}`
+    options.log?.(`传输门 token 已轮换：401 后重读到新值，更新 bearer 并仅重试一次 ${path}`)
+    return transport.send(path, body, headers)
+  }
+  const healedTransport: HttpTransport = { send }
   return {
-    register: (args) => mcpRegister(transport, bearer, args),
+    register: (args) => mcpRegister(healedTransport, bearer, args),
     async reportState(agentId, state) {
-      expectStatus(200, await transport.send("/internal/state", { agentId, state }, bearer), "POST /internal/state")
+      expectStatus(200, await send("/internal/state", { agentId, state }, bearer), "POST /internal/state")
     },
     async wake(agentId) {
-      return parseWake(expectStatus(200, await transport.send("/internal/wake", { agentId }, bearer), "POST /internal/wake"))
+      return parseWake(expectStatus(200, await send("/internal/wake", { agentId }, bearer), "POST /internal/wake"))
     },
     async reportResult(agentId, items) {
-      expectStatus(200, await transport.send("/internal/result", { agentId, items }, bearer), "POST /internal/result")
+      expectStatus(200, await send("/internal/result", { agentId, items }, bearer), "POST /internal/result")
     },
     async retire(agentId) {
-      const result = await transport.send("/internal/retire", { agentId }, bearer)
+      const result = await send("/internal/retire", { agentId }, bearer)
       // 幂等：`404 agent_not_found` 视为已退役/不存在，不重试也不报错（确定性错误）。
       if (result.status === 404) return
       expectStatus(200, result, "POST /internal/retire")
