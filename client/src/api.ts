@@ -179,8 +179,8 @@ export function loadAgentCard(id: string, signal?: AbortSignal): Promise<AgentCa
   return request(`/api/agents/${encodeURIComponent(id)}`, agentCardSchema, signalInit(signal))
 }
 
-/** 改名错误码（`PATCH /api/agents/:id` 的 400/404/409，可判别）。 */
-export type RenameAgentErrorCode = "invalid_body" | "agent_not_found" | "name_taken"
+/** 改名错误码（`PATCH /api/agents/:id`：400/404/409 业务码 + 通用失败码 `rename_failed`）。 */
+export type RenameAgentErrorCode = "invalid_body" | "agent_not_found" | "name_taken" | "rename_failed"
 
 /** 改名结果（成功后服务端广播既有 `agent` 事件，前端经既有链路刷新）。 */
 export interface RenameAgentResult {
@@ -189,6 +189,8 @@ export interface RenameAgentResult {
 }
 
 function renameErrorCode(status: number, payload: unknown): RenameAgentErrorCode {
+  // 仅 400/404/409 属可判别业务码；500/502 等其余（含网络失败兜底）一律通用失败码。
+  if (status !== 400 && status !== 404 && status !== 409) return "rename_failed"
   if (payload !== null && typeof payload === "object" && "error" in payload) {
     const raw: unknown = payload.error
     if (raw === "name_taken" || raw === "agent_not_found" || raw === "invalid_body") return raw

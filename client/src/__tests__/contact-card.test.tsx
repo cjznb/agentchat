@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { createRoot, type Root } from "react-dom/client"
 import type { RosterNode } from "../../../shared/contracts"
 import { ContactCard } from "../components/ContactCard"
+import { ApiError, renameAgent, renameErrorMessage } from "../api"
 import { GroupInfo } from "../components/GroupInfo"
 
 // React 19 依 globalThis 标志识别「测试 act 环境」；缺省会打印 act 警告。
@@ -227,6 +228,28 @@ describe("改名入口（私聊页 ContactCard）", () => {
     submitForm(el, "contact-rename-form")
     await flush()
     expect(find(el, "contact-rename-error")?.textContent).toContain("不存在")
+  })
+
+  it("500 服务端错误 → 通用 rename_failed 码（非 invalid_body），文案为「改名失败…」", async () => {
+    stubFetch(() => jsonResponse(500, { ok: false, error: "internal" }))
+    const cause: unknown = await renameAgent("n1", "任意").catch((error: unknown) => error)
+    expect(cause).toBeInstanceOf(ApiError)
+    expect(cause instanceof ApiError ? cause.code : null).toBe("rename_failed")
+    expect(renameErrorMessage(cause instanceof ApiError ? cause.code : undefined)).toBe(
+      "改名失败，请重试。",
+    )
+  })
+
+  it("500 → UI 展示「改名失败」而非「名称无效」", async () => {
+    stubFetch(() => jsonResponse(500, { ok: false, error: "internal" }))
+    const el = renderCard(makeNode("执行者"))
+    clickAt(find(el, "contact-rename"))
+    setInputValue(el, "contact-rename-input", "改名")
+    submitForm(el, "contact-rename-form")
+    await flush()
+    const err = find(el, "contact-rename-error")
+    expect(err?.textContent).toContain("改名失败")
+    expect(err?.textContent).not.toContain("名称无效")
   })
 })
 
