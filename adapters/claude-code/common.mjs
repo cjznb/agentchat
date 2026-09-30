@@ -218,7 +218,11 @@ export function rememberSeen(paths, ids) {
 /** 把认领到的消息格式化为注入上下文。 */
 export function formatMessages(messages) {
   const lines = messages.map((m) => `- [${m.id}] 来自 ${m.fromAgentId}：${m.body}`)
-  return ["[AgentChat] 你收到了以下来自其他 agent 的消息，请据此继续工作：", ...lines].join("\n")
+  return [
+    "[AgentChat] 你收到了以下来自其他 agent 的消息，请据此继续工作：",
+    "沟通规则：消息须有信息增量；禁纯回执/寒暄与复读循环；确认请并入下一步（详见 README「沟通规范」）。",
+    ...lines,
+  ].join("\n")
 }
 
 /** 把消息转成 `/internal/result` 的投递回执项。 */

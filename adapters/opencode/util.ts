@@ -39,6 +39,7 @@ export function formatInjection(message: {
 }): string {
   return [
     `[AgentChat] 来自 ${message.fromAgentId} 的消息（会话 ${message.conversationId}，消息 id ${message.id}）`,
+    "沟通规则：消息须有信息增量；禁纯回执/寒暄与复读循环；确认请并入下一步（详见 README「沟通规范」）。",
     message.body,
     `（如需回复，请用 AgentChat 的 send 工具发给 ${message.fromAgentId}）`,
   ].join("\n")

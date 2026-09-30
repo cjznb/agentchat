@@ -289,6 +289,13 @@ describe("tools/list 与十二工具金样例端到端（DoD ①，Important #1�
       // 真正的联合校验由下面 `op:"create"` 正向 + 非法 `op` 反向调用端到端证明。
       expect(Object.keys(byName.get("group")?.inputSchema.properties ?? {})).toEqual([])
 
+      // 反寒暄规则进工具描述（spec §15.5 落点 ②）：send / shout 描述须含规则关键词。
+      for (const name of ["send", "shout"] as const) {
+        const description = byName.get(name)?.description ?? ""
+        expect({ name, keyword: description.includes("信息增量") }).toEqual({ name, keyword: true })
+        expect(description).toContain("禁纯回执")
+      }
+
       // 逐一用金样例真调：任一 schema 接线错误或工具未执行都会在此暴露；
       // 出参一律过 `MCP_TOOL_OUTPUTS`（spec §13.5：出参契约集中在 shared/contracts）。
       for (const name of MCP_TOOLS) {
