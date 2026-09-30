@@ -31,10 +31,11 @@ import { OFFLINE_AFTER_MS, registerRoot, retire, rosterTree } from "../../server
 import { DISPATCHER_INTERVAL_MS, Dispatcher } from "../../server/core/dispatcher"
 import { createGroup, ensureHuman, inbox, receiptState, sendMessage, shout } from "../../server/core/messaging"
 import type { Gated } from "../../server/core/permissions"
+import { wakeRecipients } from "../../server/core/publish"
 import { createApp } from "../../server/index"
-import { applyAgentState, ensureHubToken } from "../../server/routes/internal"
+import { applyAgentState, claimWakeBacklog, ensureHubToken } from "../../server/routes/internal"
 import { getAgent, insertAgent, type Agent } from "../../server/store/agents"
-import type { Message } from "../../server/store/messages"
+import { send as storeSend, type Message } from "../../server/store/messages"
 import {
   backoffMs,
   applyDeliveryResult,
@@ -198,7 +199,7 @@ describe("idle handoff chain (DoD)", () => {
 })
 
 describe("offline root reconnect", () => {
-  it("queues pending(offline), never expires it, redelivers on reconnect and pulls the rest via /internal/wake", async () => {
+  it("queues pending(offline), never expires it, redelivers every materialized row on reconnect (spec §14.4)", async () => {
     const sender = makeAgent("reconnect-sender")
     const { agent: root, joinToken } = registerRoot(db, home, {
       name: "reconnect-root",
@@ -215,35 +216,42 @@ describe("offline root reconnect", () => {
       attempts: 1,
     })
 
-    // 离线期间发送：offline 收件方不生成 job（纯收件箱，待重连拉取）
+    // 离线期间发送：offline 的 T 收件方发送即有 pending 行（§14.4 materialize；reason=null）
     const whileOffline = sendMessage(db, { from: sender.id, to: root.id, body: "积压二" }).message
-    expect(getWakeJob(db, whileOffline.seq, root.id)).toBeUndefined()
+    expect(getWakeJob(db, whileOffline.seq, root.id)).toMatchObject({
+      state: "pending",
+      pendingReason: null,
+      attempts: 0,
+    })
 
-    // offline 不过期：48h 后仍是 pending(offline)
+    // offline 不过期：48h 后两条仍是 pending(offline)（dispatcher 按 offline 退避）
     await dispatcher.tick(t1 + 48 * 3_600_000)
     expect(expectJob(backlog.seq, root.id)).toMatchObject({
       state: "pending",
       pendingReason: "offline",
     })
+    expect(expectJob(whileOffline.seq, root.id)).toMatchObject({
+      state: "pending",
+      pendingReason: "offline",
+    })
 
-    // 根重连（join_token 认领）→ pending(offline) 积压立即到期补投
+    // 根重连（join_token 认领）→ 全部 pending 立即到期补投（含离线期间 materialize 的行）
     const again = registerRoot(db, home, { joinToken, name: "reconnect-root", vendor: "opencode" })
     expect(again.agent.id).toBe(root.id)
     expect(again.agent.status).toBe("online")
     await dispatcher.tick(Date.now())
-    expect(fake.injections).toHaveLength(1)
-    expect(fake.injections[0]?.msgs.map((m) => m.body)).toEqual(["积压一"])
+    expect(fake.injections.map((entry) => entry.msgs.map((m) => m.body))).toEqual([
+      ["积压一"],
+      ["积压二"],
+    ])
     expect(expectJob(backlog.seq, root.id).state).toBe("accepted")
+    expect(expectJob(whileOffline.seq, root.id).state).toBe("accepted")
+    expect(receiptState(db, whileOffline, root.id)).toBe("delivered")
 
-    // 适配器 SessionStart 拉取积压：已投递的不重复认领，无 job 的补建 sending 租约
+    // 台账一致性（§14.4）：全部 accepted → /internal/wake 无积压，不再有「无行靠 inbox 补件」
     const res = await post("/internal/wake", { agentId: root.id })
     expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({
-      messages: [expect.objectContaining({ id: whileOffline.id })],
-      receipts: [{ messageId: whileOffline.id, stage: "sending" }],
-    })
-    expect(expectJob(whileOffline.seq, root.id).state).toBe("sending")
-    expect(receiptState(db, whileOffline, root.id)).toBe("sending")
+    expect(await res.json()).toMatchObject({ messages: [], receipts: [] })
   })
 })
 
@@ -728,5 +736,96 @@ describe("group mention wake routing (Task 3, spec §2)", () => {
     expect(new Set(fake.injections.map((entry) => entry.nodeId))).toEqual(
       new Set([owner.id, zhang.id, li.id]),
     )
+  })
+})
+
+// ── P6：G1 投递层闸门 —— jobs 即投递台账（spec §14.4） ──────────────
+describe("G1 delivery gate: jobs are the ledger (spec §14.4)", () => {
+  /** owner（创建者）+ 张三 + 李四，三个 runtime 成员的群。 */
+  function groupOf(prefix: string) {
+    const owner = makeAgent(`${prefix}-owner`)
+    const zhang = makeAgent("张三")
+    const li = makeAgent("李四")
+    const group = approved(
+      createGroup(db, { name: `${prefix} 群`, createdBy: owner.id, memberIds: [zhang.id, li.id] }),
+    )
+    return { owner, zhang, li, group }
+  }
+
+  it("agent group message without mentions is NOT pulled by participants (red: inbox used to bypass jobs)", () => {
+    const { owner, zhang, li, group } = groupOf("g1-none")
+    const { message } = sendMessage(db, { from: owner.id, to: group.id, body: "周报汇总" })
+
+    const forZhang = claimWakeBacklog(db, { agentId: zhang.id })
+    expect(forZhang.messages.filter((m) => m.kind !== "system")).toEqual([]) // 改前 inbox 必回该消息 → 红
+    expect(forZhang.messages.map((m) => m.id)).not.toContain(message.id)
+    expect(forZhang.receipts).toEqual([])
+    expect(getWakeJob(db, message.seq, zhang.id)).toBeUndefined() // 门控不补建
+
+    const forLi = claimWakeBacklog(db, { agentId: li.id })
+    expect(forLi.messages.map((m) => m.id)).not.toContain(message.id)
+    expect(getWakeJob(db, message.seq, li.id)).toBeUndefined()
+  })
+
+  it("@张三 reaches only 张三: 李四 (same-group runtime) pulls nothing", () => {
+    const human = ensureHuman(db)
+    const { zhang, li, group } = groupOf("g1-at")
+    const { message } = sendMessage(db, { from: human.id, to: group.id, body: "@张三 处理故障" })
+
+    expect(claimWakeBacklog(db, { agentId: zhang.id }).messages.map((m) => m.id)).toContain(
+      message.id,
+    )
+    expect(getWakeJob(db, message.seq, zhang.id)).toBeDefined()
+
+    const forLi = claimWakeBacklog(db, { agentId: li.id })
+    expect(forLi.messages.filter((m) => m.kind !== "system")).toEqual([]) // 改前李四经 inbox 收到 → 红
+    expect(forLi.messages.map((m) => m.id)).not.toContain(message.id)
+    expect(getWakeJob(db, message.seq, li.id)).toBeUndefined()
+  })
+
+  it("materializes pending rows for offline/busy T members at send time (human no-@ group = 全员)", () => {
+    const human = ensureHuman(db)
+    const { owner, zhang, li, group } = groupOf("g1-mat")
+    db.prepare<[string], void>("UPDATE agents SET status = 'offline' WHERE id = ?").run(li.id)
+    expect(applyAgentState(db, { agentId: zhang.id, state: "busy" })).toEqual({ ok: true })
+
+    const { message } = sendMessage(db, { from: human.id, to: group.id, body: "全体集合" })
+
+    // 改前 offline 成员无行（靠 inbox 补件、回执被排除）→ 红；改后发送即 pending、reason=null（不新增枚举值）
+    expect(getWakeJob(db, message.seq, li.id)).toMatchObject({
+      state: "pending",
+      pendingReason: null,
+      attempts: 0,
+    })
+    expect(getWakeJob(db, message.seq, zhang.id)).toMatchObject({
+      state: "pending",
+      pendingReason: "busy",
+    })
+    expect(getWakeJob(db, message.seq, owner.id)).toMatchObject({ state: "pending" })
+  })
+
+  it("system messages (join notice / ask card) with zero job rows are still pulled (exempt)", () => {
+    const { owner, zhang, group } = groupOf("g1-sys")
+    const notice = storeSend(db, {
+      conversationId: group.id,
+      fromAgentId: owner.id,
+      kind: "system",
+      body: "你被拉入群「g1-sys 群」。成员：张三",
+    })
+    expect(wakeRecipients(db, notice.seq)).toEqual([]) // system 不建行
+
+    const pulled = claimWakeBacklog(db, { agentId: zhang.id })
+    expect(pulled.messages.map((m) => m.id)).toContain(notice.id) // 豁免：无 job 仍投递
+    expect(getWakeJob(db, notice.seq, zhang.id)).toBeDefined() // 原路径：认领补建 sending 租约
+  })
+
+  it("wakeRecipients member set (shared source of WS receipt & message_status): @group = 被@者, agent no-@ group = ∅", () => {
+    const { owner, zhang, group } = groupOf("g1-rec")
+
+    const at = sendMessage(db, { from: owner.id, to: group.id, body: "@张三 处理故障" }).message
+    expect(wakeRecipients(db, at.seq)).toEqual([zhang.id])
+
+    const none = sendMessage(db, { from: owner.id, to: group.id, body: "周报汇总" }).message
+    expect(wakeRecipients(db, none.seq)).toEqual([])
   })
 })

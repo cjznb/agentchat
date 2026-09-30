@@ -32,7 +32,7 @@ import { openDb, type Db } from "../db"
 import { AgentNotFoundError, getAgent, touchAgent } from "../store/agents"
 import { getConversationByKey, SHOUT_KEY } from "../store/conversations"
 import { DEFAULT_INBOX_LIMIT, getById, inboxMessages, type Message } from "../store/messages"
-import { applyDeliveryResult, makeJobsDue } from "../store/wake"
+import { applyDeliveryResult, getWakeJob, makeJobsDue } from "../store/wake"
 import { claimWakeBacklogJob } from "../store/wake-claims"
 
 // 生产缺省连接（同 routes/ui 模式）：首个 /internal 请求时按 config 打开并复用。
@@ -118,11 +118,14 @@ export interface WakeBacklogResult {
 }
 
 /**
- * 认领积压（pull 在途租约）：收件箱中回执未 delivered/read 的消息；runtime 收件方
- * 认领即置 `sending` + `CLAIM_TIMEOUT_MS` 租约（**不是** `accepted`——`accepted`
- * 只由 `/internal/result {delivered}` 派生）；job 缺失时补建为 `sending`，崩溃未回执
- * 则租约过期后下一次 wake 重投。已终态或在途租约仍有效的 `sending` 不重复认领。
- * logical（含 human）只取件不建 job。回执 stage 因此为 `sending`。
+ * 认领积压（pull 在途租约）：候选来自收件箱（按参与+未读），但 **runtime 分支以
+ * `wake_jobs` 行为投递台账（spec §14.4）**——非 system 消息无该 (message,agent) job 行
+ * 即跳过（不注入、不补建），@ 闸门由此在投递层生效；`kind === "system"` 豁免走原
+ * inbox 路径（ask 卡 / 入群通知必须达）。logical（含 human）只取件不建 job、不门控。
+ * runtime 认领即置 `sending` + `CLAIM_TIMEOUT_MS` 租约（**不是** `accepted`——`accepted`
+ * 只由 `/internal/result {delivered}` 派生）；有行时经 `claimWakeBacklogJob` 认领，
+ * 崩溃未回执则租约过期后下一次 wake 重投。已终态或在途租约仍有效的 `sending` 不重复认领。
+ * 回执 stage 因此为 `sending`。
  * **已撤回消息一律跳过**（`revoked_at != null`）：不进 `messages`、不补建 job，从投递入口封死原文。
  */
 export function claimWakeBacklog(
@@ -150,6 +153,11 @@ export function claimWakeBacklog(
     const stage = receiptState(db, message, input.agentId)
     if (stage === "delivered" || stage === "read") continue
     if (agent.kind === "runtime") {
+      // G1 投递门（§14.4）：非 system 消息无 job 行 → 跳过（不注入、不补建）。
+      // system 豁免（ask 卡/入群通知必须达）；撤回跳过已在最前，不会走到这里补建。
+      if (message.kind !== "system" && getWakeJob(db, message.seq, input.agentId) === undefined) {
+        continue
+      }
       const claimed = claimWakeBacklogJob(db, {
         messageSeq: message.seq,
         agentId: input.agentId,

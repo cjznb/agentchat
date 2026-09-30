@@ -200,7 +200,7 @@ describe("POST /api/conversations/:id/messages/:messageId/revoke", () => {
 })
 
 describe("Critical: 撤回封死未投递收件方的投递路径", () => {
-  it("offline recipient (no job at send): revoke then wake never delivers the original nor rebuilds a deliverable job", () => {
+  it("offline recipient (materialized pending row at send): revoke cancels it; wake never delivers the original nor revives a deliverable job", () => {
     const offline = insertAgent(db, {
       name: "revoke-offline",
       kind: "runtime",
@@ -208,8 +208,11 @@ describe("Critical: 撤回封死未投递收件方的投递路径", () => {
       vendor: "opencode",
     })
     const sent = sendMessage(db, { from: humanId, to: offline.id, body: "不应送达的原文" })
-    // 发送时 offline → 无 job（这正是原缺陷的入口）。
-    expect(getWakeJob(db, sent.message.seq, offline.id)).toBeUndefined()
+    // §14.4 资格更新：offline 的 T 收件方发送即有 pending 行（改前断言「无 job」）。
+    expect(getWakeJob(db, sent.message.seq, offline.id)).toMatchObject({
+      state: "pending",
+      pendingReason: null,
+    })
     expect(receiptState(db, getById(db, sent.message.id) ?? throwMissing(), offline.id)).toBe("queued")
 
     revokeMessage(db, {
@@ -222,9 +225,8 @@ describe("Critical: 撤回封死未投递收件方的投递路径", () => {
     const backlog = claimWakeBacklog(db, { agentId: offline.id, now: 200 })
     expect(backlog.messages.some((m) => m.id === sent.message.id)).toBe(false)
     expect(backlog.messages.map((m) => m.body)).not.toContain("不应送达的原文")
-    // job 不得被补建为可投递态（应为无 / cancelled）。
-    const job = getWakeJob(db, sent.message.seq, offline.id)
-    expect(job === undefined || job.state === "cancelled").toBe(true)
+    // job 不得处于可投递态：撤回已取消 materialize 的行（cancelled，而非复活为 pending/sending）。
+    expect(getWakeJob(db, sent.message.seq, offline.id)?.state).toBe("cancelled")
   })
 
   it("revoked sending lease is never requeued as deliverable", () => {
@@ -464,7 +466,8 @@ describe("修复 C: claimWakeBacklogJob 自身撤回守卫（纵深防御）", (
       actorId: humanId,
       now: 100,
     })
-    expect(getWakeJob(db, sent.message.seq, offline.id)).toBeUndefined()
+    // §14.4 资格更新：offline 收件方发送即有 pending 行，撤回将其取消（改前断言「无 job」）。
+    expect(getWakeJob(db, sent.message.seq, offline.id)?.state).toBe("cancelled")
 
     const claimed = claimWakeBacklogJob(db, {
       messageSeq: sent.message.seq,
@@ -472,7 +475,8 @@ describe("修复 C: claimWakeBacklogJob 自身撤回守卫（纵深防御）", (
       now: 200,
     })
     expect(claimed).toBeUndefined()
-    expect(getWakeJob(db, sent.message.seq, offline.id)).toBeUndefined()
+    // 纵深防御：不复活——cancelled 行保持 cancelled。
+    expect(getWakeJob(db, sent.message.seq, offline.id)?.state).toBe("cancelled")
   })
 })
 

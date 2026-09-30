@@ -13,8 +13,10 @@
  *   pull 认领（`store/wake-claims.ts` 的 `claimWakeBacklogJob`）只置 `sending` 在途租约，
  *   绝不直接 `accepted`
  *
- * 生成规则（binding）：仅 `kind='runtime' AND status IN (online,busy)` 收件方建 job，
- * `logical`（含 human）与 offline/retired 收件方纯收件箱。
+ * 生成规则（binding，spec §14.4）：`kind='runtime' AND status != 'retired'` 的收件方
+ * 一律建 job（busy → `pending_reason='busy'`，offline/online → `pending_reason=null`，
+ * 上线后自然被认领）——**不再按 status 资格过滤**，jobs 即唯一投递台账；
+ * `logical`（含 human）不建 job、纯收件箱。回执与投递从此同源同集合。
  * **不**再要求该 vendor 已注册适配器（Plan 5 修复 2）：无论推送通道存否，发送时一律为
  * 合格收件方建 job，使回执阶段从此真实（`pending → queued`，而非「无 job 也 queued」）；
  * pull 适配器在 `/internal/wake` 认领、dispatcher 对无适配器 vendor 退避跳过（绝不误注入）。
@@ -150,9 +152,10 @@ export interface EnqueueInput {
 }
 
 /**
- * 发送即生成唤醒任务（spec §7）：`INSERT OR IGNORE` 幂等（幂等重发安全）；
- * `retry_at = now + backoff(0)`；`status='busy'` 落 `pending_reason='busy'`。
- * 仅 runtime + online/busy 的收件方建 job（**不**看 vendor 是否已注册适配器；见文件头规则）。
+ * 发送即生成唤醒任务（spec §7/§14.4）：`INSERT OR IGNORE` 幂等（幂等重发安全）；
+ * `retry_at = now + backoff(0)`；`status='busy'` 落 `pending_reason='busy'`，
+ * online/offline 落 `pending_reason=null`（不新增枚举值）。
+ * 候选 = runtime 且非 retired 的收件方**全员**（去掉 status 资格过滤，见文件头规则）。
  */
 export function enqueueWakeJobs(db: Db, input: EnqueueInput): number {
   if (input.recipientIds.length === 0) return 0
@@ -161,7 +164,7 @@ export function enqueueWakeJobs(db: Db, input: EnqueueInput): number {
   const candidates = db
     .prepare<string[], { id: string; status: string }>(
       `SELECT id, status FROM agents
-        WHERE kind = 'runtime' AND status IN ('online','busy') AND id IN (${placeholders})`,
+        WHERE kind = 'runtime' AND status != 'retired' AND id IN (${placeholders})`,
     )
     .all(...input.recipientIds)
   const insert = db.prepare<[number, string, number, string | null, number], { changes: number }>(
@@ -280,7 +283,8 @@ export function applyDeliveryResult(
   const conversationId = getBySeq(db, input.messageSeq)?.conversationId
   let job = getWakeJob(db, input.messageSeq, input.agentId)
   if (job === undefined) {
-    // 结果先于 job 到达（发送时收件方 offline 无 job）：补建行再进状态机。
+    // 结果先于 job 到达的兜底（§14.4 保留）：如 logical 收件方上报结果、历史无行数据。
+    // 常规路径 T 全员发送即建行，此处仅防御性补建，再进状态机。
     db.prepare<[number, string, number, number], void>(
       `INSERT INTO wake_jobs (message_id, agent_id, state, attempts, retry_at, pending_reason, detail, created_at)
        VALUES (?, ?, 'pending', 0, ?, NULL, '', ?)`,
