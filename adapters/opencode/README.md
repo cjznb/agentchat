@@ -75,16 +75,19 @@
 
 ### 群聊 @ 与 ask 等待（MCP 入参 / 出参）
 
-- **参数与回显**：`send`/`ask` 支持 `mentions?: string[]`（群内点名，出参回显 `mentions{matched,unmatched,scope}`）；
-  `ask` 的 `wait.scope?: "all"|"any"`；`roster` 支持 `conversation?: string`（未知会话 id → **200 `[]`**，
-  shout 会话同样 `[]`）；`group op:list` 出参含 `member_cards`。
+- **参数与回显**：`send` 支持 `mentions?: string[]`（群内点名）并**宽容回显** `mentions{matched,unmatched,scope}`；
+  `ask` 群问**必填** `mentions`（**无回显、严格报错**：未给 → `mentions_required`；有未命中 → `mention_not_found`（含
+  未命中名单）；被@者是真实节点但非群成员 → `mention_not_participant`），`wait.scope?: "all"|"any"`（**缺省 `"all"`**）；
+  `roster` 支持 `conversation?: string`（**MCP 侧**未知/非成员会话 id → `not_participant`；**200 `[]`** 仅属
+  `GET /api/roster`（human）与 shout 会话）；`group op:list` 出参含 `member_cards`。
 - **@ 解析**：最长前缀匹配（名字可含空格）、剔除末尾中英文标点、`@所有人`/`@all`/`*` 全体、`@<id前8位>` 兜底；
   `agents.name` 全局唯一。
 - **两句核心语义**：**群消息只唤醒被 @ 者；人类在群里不带 @ 则唤醒全部，带 @ 只唤醒被 @ 者。**
   **用户改名优先于系统默认名（展示名 = 用户名 ?? 系统名，agent 重注册/会话改标题不会覆盖）。**
-- **群 ask 三形态**：① `wait:{scope:"all", timeoutMs}` 阻塞到全回，超时回 `timedOut:true` + `replies` +
-  **`pending` 未回名单**；② **不传 `wait` = 异步**（答复经既有 inbox/审批流转）；
-  ③ `scope:"any"` 任一先回即返回。
+- **群 ask 三形态**（群问均**必填** `mentions`）：① `ask{to:<群id>, mentions:["张三"], wait:{scope:"all", timeoutMs}}`
+  阻塞到全回，超时回 `reply:{timedOut:true, replies:[…], pending:[未回名单]}`；② `ask{to:<群id>, mentions:["张三"]}`
+  **不传 `wait` = 异步**（答复经既有 inbox/审批流转）；③ `ask{to:<群id>, mentions:["张三"], wait:{scope:"any", timeoutMs}}`
+  任一先回即返回。
 - **喊话 fail-closed**：非人类对**喊话会话**发起群 `ask` → `not_participant` 拒绝（无 participants 行，闸门 fail-closed）。
 
 ### 已存在/被恢复会话的收养（缺陷修复）

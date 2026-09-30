@@ -109,9 +109,11 @@
 
 ## 群聊 @ 与 ask 等待（工具入参 / 出参）
 
-**参数与回显**：`send`/`ask` 支持 `mentions?: string[]`（群内点名；出参回显 `mentions{matched,unmatched,scope}`）；
-`ask` 的 `wait.scope?: "all"|"any"`；`roster` 支持 `conversation?: string`（只取该会话参与者卡片，未知 id → **200 `[]`**，
-shout 会话同样 `[]`，与 messages 端点 404 风格不同系既有选择）；`group op:list` 出参含 `member_cards`。
+**参数与回显**：`send` 支持 `mentions?: string[]`（群内点名）并**宽容回显** `mentions{matched,unmatched,scope}`；`ask` 群问
+**必填** `mentions?: string[]`（**无回显、严格报错**：未给 → `mentions_required`；有未命中 → `mention_not_found`（含未命中
+名单）；被@者是真实节点但非群成员 → `mention_not_participant`），`wait.scope?: "all"|"any"`（**缺省 `"all"`**）；`roster` 支持
+`conversation?: string`（**MCP 侧**未知/非成员会话 id → `not_participant`；**200 `[]`** 仅属 `GET /api/roster`（human）与
+shout 会话，与 messages 端点 404 风格不同系既有选择）；`group op:list` 出参含 `member_cards`。
 
 **@ 解析规则**：按**最长前缀**匹配（名字可含空格）、剔除**末尾中英文标点**、`@所有人`/`@all`/`*` 命中全体、
 `@<id前8位>` 按 id 兜底；`agents.name` **全局唯一**。
@@ -124,10 +126,10 @@ shout 会话同样 `[]`，与 messages 端点 404 风格不同系既有选择）
 
 **群 ask 三形态等待（示例）**：
 
-1. **阻塞到全回**：`wait:{scope:"all", timeoutMs:60000}` —— 全回后返回；超时返回 `timedOut:true` + `replies` +
-   **`pending` 未回名单**。
-2. **异步（不传 `wait`）**：立即返回 ask 单，答复经既有 inbox/审批流转。
-3. **任一先回**：`wait:{scope:"any", timeoutMs:60000}` —— 任一被 @ 者答复即返回。
+1. **阻塞到全回**：`ask{to:<群id>, question:"…", mentions:["张三"], wait:{scope:"all", timeoutMs:60000}}` —— 全回后返回；
+   超时返回 `reply:{timedOut:true, replies:[…], pending:[未回名单]}`。
+2. **异步（不传 `wait`）**：`ask{to:<群id>, question:"…", mentions:["张三"]}` 立即返回 ask 单，答复经既有 inbox/审批流转。
+3. **任一先回**：`ask{to:<群id>, question:"…", mentions:["张三"], wait:{scope:"any", timeoutMs:60000}}` —— 任一被 @ 者答复即返回。
 
 **语义补记**：非人类对**喊话会话**发起群 `ask` → `not_participant` 拒绝（喊话会话无 participants 行，闸门
 fail-closed，与喊话需审批同向）。

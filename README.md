@@ -139,7 +139,7 @@ Agent 经 `POST /mcp`（Bearer `HUB_TOKEN` 传输门）调用 MCP 工具；根�
 | `shout` | 全员喊话（仅根发起，经审批闸门） |
 | `status` | 上报自定义状态文本 |
 | `message_status` | 查询指定消息的四级回执 |
-| `ask` | 请求批示：`to` 为 agent_id / group_id / `'human'`，带 `question`/`options`/`allow_custom`，群目标可带 `mentions?: string[]`；带 `wait` 时挂起至答复（`wait.scope?: "all"\|"any"`，出参回显 `mentions{matched,unmatched,scope}`），返回批示单 + `replies` + `pending?` + `reply?{choice\|text, timedOut}` |
+| `ask` | 请求批示：`to` 为 agent_id / `'human'` → DM 单问 `{ask, reply?{choice\|text, timedOut}}`；`to` 为群 id → **`mentions?: string[]` 必填**（未给 → `mentions_required`；有未命中 → `mention_not_found`，含未命中名单；被@者是真实节点但非群成员 → `mention_not_participant`），带 `wait` 时挂起至答复（`wait.scope?: "all"\|"any"`，**缺省 `"all"`**），群问出参 `{asks, reply?: {timedOut, replies, pending}}`（`pending` 在 `reply` 内、非可选 = 未回名单）；**ask 不回显 mentions**（回显仅 `send`） |
 | `respond_ask` | 答复请求批示：`ask_id` + `choice?` 或 `text?`（首答生效） |
 
 通知页数据面（用户侧 UI 消费）：
@@ -154,9 +154,9 @@ Agent 经 `POST /mcp`（Bearer `HUB_TOKEN` 传输门）调用 MCP 工具；根�
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `send` | `mentions?: string[]` | 群内点名（名字 / `所有人` / id 前 8 位）；出参回显 `mentions{matched,unmatched,scope}` |
-| `ask` | `mentions?: string[]`、`wait.scope?: "all"\|"any"` | 群 ask 点名 + 等待形态（三形态见下）；出参同样回显 `mentions{matched,unmatched,scope}` |
-| `roster` | `conversation?: string` | 只返回该会话的参与者卡片；未知 id → **200 `[]`**（shout 会话同样 `[]`；与 messages 端点 404 风格不同，系既有选择） |
+| `send` | `mentions?: string[]` | 群内点名（名字 / `所有人` / id 前 8 位）；**send 宽容回显** `mentions{matched,unmatched,scope}` |
+| `ask` | `mentions?: string[]`（**群问必填**）、`wait.scope?: "all"\|"any"`（**缺省 `"all"`**） | 群 ask 点名 + 等待形态（三形态见下）；**ask 不回显、严格报错**：未给 → `mentions_required`；有未命中 → `mention_not_found`（含未命中名单）；被@者是真实节点但非群成员 → `mention_not_participant` |
+| `roster` | `conversation?: string` | 只返回该会话的参与者卡片；**MCP 侧**未知/非成员会话 id → `not_participant`；**200 `[]`** 仅属 `GET /api/roster`（human）与 shout 会话（与 messages 端点 404 风格不同，系既有选择） |
 | `group` | `op:list` 出参 `member_cards` | 群列表附带成员资料卡（展示名等） |
 
 **@ 解析规则**：按**最长前缀**匹配（名字可含空格）；剔除**末尾中英文标点**后再匹配；`@所有人` / `@all` / `*`
@@ -170,10 +170,10 @@ Agent 经 `POST /mcp`（Bearer `HUB_TOKEN` 传输门）调用 MCP 工具；根�
 
 **群 ask 三形态等待（示例）**：
 
-1. **阻塞到全回**：`ask{to:<群id>, question:"…", wait:{scope:"all", timeoutMs:60000}}` —— 全部被 @ 者答复后返回；
-   超时返回 `timedOut:true` + 已收 `replies` + **`pending` 未回名单**。
-2. **异步（不传 `wait`）**：立即返回 ask 单，答复经既有 inbox/审批流转。
-3. **任一先回**：`wait:{scope:"any", timeoutMs:60000}` —— 任一被 @ 者答复即返回。
+1. **阻塞到全回**：`ask{to:<群id>, question:"…", mentions:["张三","李四"], wait:{scope:"all", timeoutMs:60000}}` —— 全部被 @ 者答复后返回；
+   超时返回 `reply:{timedOut:true, replies:[…], pending:[未回名单]}`（`pending` 在 `reply` 内、非可选）。
+2. **异步（不传 `wait`）**：`ask{to:<群id>, question:"…", mentions:["张三"]}` 立即返回 ask 单，答复经既有 inbox/审批流转。
+3. **任一先回**：`ask{to:<群id>, question:"…", mentions:["张三","李四"], wait:{scope:"any", timeoutMs:60000}}` —— 任一被 @ 者答复即返回。
 
 **语义补记（实现事实）**：
 
