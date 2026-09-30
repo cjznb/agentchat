@@ -1,0 +1,139 @@
+/* Task S1（样式轮）：表单控件 baseline。
+   覆盖 styles.css 尚未接纳设计体系的原生表单控件 —— 仅使用既有 token，
+   不改任何 class / data-testid / DOM 结构 / 组件逻辑。 */
+
+/* ── rename 表单容器（ContactCard / GroupInfo 行内编辑器） ────────── */
+.contact-rename-form,
+.member-rename-form {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* ── 编辑触发按钮（✎ glyph） — 同 .contact-close 沉默图标按钮 ---------- */
+.contact-rename,
+.member-rename {
+  display: inline-grid;
+  place-items: center;
+  width: var(--target-size);
+  height: var(--target-size);
+  border: 0;
+  border-radius: var(--radius-small);
+  color: var(--color-muted);
+  background: transparent;
+  font-size: var(--text-heading);
+  cursor: pointer;
+  transition: color var(--duration-micro) var(--ease-standard),
+    background-color var(--duration-micro) var(--ease-standard);
+}
+.contact-rename:hover,
+.member-rename:hover {
+  color: var(--color-ink);
+  background: color-mix(in srgb, var(--color-muted) 10%, transparent);
+}
+.contact-rename:active,
+.member-rename:active {
+  transform: translateY(var(--line-thin));
+}
+.contact-rename:focus-visible,
+.member-rename:focus-visible {
+  outline: var(--line-signal) solid var(--color-jade);
+  outline-offset: calc(var(--space-1) * -1);
+}
+
+/* ── rename 输入框 — 同 .card-custom-input / .settings-input ---------- */
+.contact-rename-input,
+.member-rename-input {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--target-size);
+  padding: var(--space-2) var(--space-3);
+  border: var(--line-thin) solid var(--color-hairline);
+  border-radius: var(--radius-medium);
+  color: var(--color-ink);
+  background: var(--color-raised);
+  font: var(--text-body)/1.4 var(--font-ui);
+}
+.contact-rename-input::placeholder,
+.member-rename-input::placeholder {
+  color: var(--color-muted);
+  opacity: 1;
+}
+.contact-rename-input:focus-visible,
+.member-rename-input:focus-visible {
+  outline: var(--line-signal) solid var(--color-jade);
+  outline-offset: calc(var(--space-1) * -1);
+}
+
+/* ── 提交按钮（保存） — 同 .group-submit / .composer-send ------------- */
+.contact-rename-submit,
+.member-rename-submit {
+  min-width: 4rem;
+  min-height: var(--target-size);
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--radius-medium);
+  color: var(--color-raised);
+  background: var(--color-jade);
+  font: 700 var(--text-label)/1 var(--font-utility);
+  cursor: pointer;
+  transition: opacity var(--duration-micro) var(--ease-standard);
+}
+.contact-rename-submit:hover,
+.member-rename-submit:hover {
+  opacity: 0.9;
+}
+.contact-rename-submit:active,
+.member-rename-submit:active {
+  transform: translateY(var(--line-thin));
+}
+.contact-rename-submit:focus-visible,
+.member-rename-submit:focus-visible {
+  outline: var(--line-signal) solid var(--color-jade);
+  outline-offset: var(--space-1);
+}
+.contact-rename-submit:disabled,
+.member-rename-submit:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.contact-rename-submit:disabled:active,
+.member-rename-submit:disabled:active {
+  transform: none;
+}
+
+/* ── 取消按钮（取消） — 同 .group-cancel ----------------------------- */
+.contact-rename-cancel,
+.member-rename-cancel {
+  min-height: var(--target-size);
+  padding: 0 var(--space-4);
+  border: var(--line-thin) solid var(--color-hairline);
+  border-radius: var(--radius-medium);
+  color: var(--color-ink);
+  background: var(--color-list);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--duration-micro) var(--ease-standard);
+}
+.contact-rename-cancel:hover,
+.member-rename-cancel:hover {
+  background: color-mix(in srgb, var(--color-muted) 8%, var(--color-list));
+}
+.contact-rename-cancel:active,
+.member-rename-cancel:active {
+  transform: translateY(var(--line-thin));
+}
+.contact-rename-cancel:focus-visible,
+.member-rename-cancel:focus-visible {
+  outline: var(--line-signal) solid var(--color-jade);
+  outline-offset: var(--space-1);
+}
+.contact-rename-cancel:disabled,
+.member-rename-cancel:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.contact-rename-cancel:disabled:active,
+.member-rename-cancel:disabled:active {
+  transform: none;
+}
