@@ -108,7 +108,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .rail-button::after {
   position: absolute;
   inset-block: var(--space-2);
-  right: calc(var(--space-2) * -1);
+  right: 0;
   width: var(--line-signal);
   border-radius: var(--radius-small) 0 0 var(--radius-small);
   background: transparent;
@@ -424,7 +424,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   place-items: center;
   font-size: var(--text-body);
   font-style: normal;
-  line-height: 1;
+  line-height: 1.2;
 }
 .node-status-text {
   max-width: 7rem;
@@ -755,12 +755,12 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .group-info-note { margin: 0; color: var(--color-muted); font-size: var(--text-label); }
 .group-info-error { margin: 0; color: var(--color-error); font-size: var(--text-label); }
 
-.member-group { display: grid; gap: var(--space-1); padding-left: var(--space-3); border-left: var(--line-signal) solid var(--color-jade); }
+.member-group { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-1); padding-left: var(--space-3); border-left: var(--line-signal) solid var(--color-jade); }
 .member-group-head { margin: 0 0 var(--space-1); padding-left: var(--space-2); color: var(--color-muted); font: 600 var(--text-label)/1 var(--font-utility); letter-spacing: 0.04em; }
-.member-list { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
+.member-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 .member-item {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
   min-height: var(--target-size);
@@ -781,7 +781,11 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .member-icon[data-vendor="opencode"] { background: var(--color-rail); }
 .member-icon[data-vendor="claude-code"] { background: var(--color-amber); }
 .member-icon.is-logical { color: var(--color-jade); background: color-mix(in srgb, var(--color-jade) 18%, transparent); }
-.member-name { overflow: hidden; font-size: var(--text-body); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.member-name { flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; font-size: var(--text-body); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; scrollbar-width: none; }
+.member-name::-webkit-scrollbar { display: none; }
+.member-rename-form { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.member-rename-input { flex: 1 1 auto; min-width: 0; }
+.member-rename-submit, .member-rename-cancel { flex: 0 0 auto; }
 .group-add { display: grid; gap: var(--space-2); margin-top: auto; padding-top: var(--space-3); border-top: var(--line-thin) solid var(--color-hairline); }
 .group-add-field { display: grid; gap: var(--space-1); }
 .group-add-field span { color: var(--color-muted); font: 600 var(--text-label)/1 var(--font-utility); }
