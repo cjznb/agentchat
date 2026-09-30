@@ -215,7 +215,7 @@ export function App() {
         ) : activeMode === "notifications" ? (
           <NotificationAside />
         ) : (
-          <div className="list-empty"><span aria-hidden="true">—</span><p>{list.detail}</p><small>数据接入将在后续任务完成</small></div>
+          <div className="list-empty"><span aria-hidden="true">—</span><p>{list.detail}</p></div>
         )}
       </aside>
 
