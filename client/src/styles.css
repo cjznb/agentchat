@@ -324,7 +324,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   outline-offset: var(--space-1);
 }
 
-.composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); padding: var(--space-4) var(--space-6); border-top: var(--line-thin) solid var(--color-hairline); background: var(--color-view); }
+.composer { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); padding: var(--space-4) var(--space-6); border-top: var(--line-thin) solid var(--color-hairline); background: var(--color-view); }
 .composer-input { min-height: var(--target-size); max-height: 8rem; padding: var(--space-3); border: var(--line-thin) solid var(--color-hairline); border-radius: var(--radius-medium); color: var(--color-ink); background: var(--color-raised); font: var(--text-body)/1.5 var(--font-ui); resize: none; }
 .composer-input:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: calc(var(--space-1) * -1); }
 .composer-input::placeholder { color: var(--color-muted); opacity: 1; }
@@ -332,6 +332,9 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .composer-send:disabled { cursor: default; opacity: 0.45; }
 .composer-send:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: var(--space-1); }
 .composer-error { grid-column: 1 / -1; margin: 0; color: var(--color-error); font-size: var(--text-label); }
+.composer-mention { position: absolute; right: var(--space-6); bottom: 100%; left: var(--space-6); z-index: 20; max-height: 224px; overflow-y: auto; margin: 0; padding: var(--space-1) 0; border: var(--line-thin) solid var(--color-hairline); border-radius: var(--radius-medium); background: var(--color-raised); box-shadow: var(--shadow-overlay); list-style: none; }
+.composer-mention-item { padding: var(--space-2) var(--space-4); color: var(--color-ink); font: var(--text-body)/1.5 var(--font-ui); cursor: pointer; }
+.composer-mention-item[data-active="true"] { background: color-mix(in srgb, var(--color-jade) 14%, transparent); }
 .chat-revoke-error { margin: 0; padding: var(--space-2) var(--space-6); color: var(--color-error); font-size: var(--text-label); }
 
 /* ── 通讯录 · 组织树 + 节点资料卡（spec §11.2；Plan 3 T6） ─────────── */

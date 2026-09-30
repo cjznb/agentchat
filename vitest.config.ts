@@ -9,6 +9,8 @@ export default defineConfig({
       "client/**/*.test.tsx",
     ],
     environment: "node",
+    // T7：让 `import css from "*.css?raw"` 返回真实文本（默认 css:false 时 ?raw 恒为空串）。
+    css: true,
     // 全局隔离：把 AGENTCHAT_HOME 指向一次性临时目录（见 tests/setup/isolate-home.ts），
     // 避免开发机真实 ~/.agentchat/config.json 渗进用例，也避免用例触碰真实数据目录。
     setupFiles: ["./tests/setup/isolate-home.ts"],
