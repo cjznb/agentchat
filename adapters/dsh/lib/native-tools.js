@@ -64,8 +64,8 @@ export function toolDefinition(tool, run) {
  *
  * @param {{ctx: {get?: (name: string) => unknown}, hub: {mcp(): {list(): Promise<unknown[]>, call(name: string, args: unknown, taskRef?: string): Promise<string>}},
  *   sessions: Map<string, {nodeId: string}>, log: (message: string) => void,
- *   register?: (definition: Record<string, unknown>) => () => void}} options
- *   `register` 缺省取 `ctx.get("tools").register`（测试可注入）
+ *   service?: {register?(definition: Record<string, unknown>): (() => void) | undefined}}} options
+ *   `service` 缺省取 `ctx.get("tools")`（测试可注入）；**必须以方法形式调用** `register`（内部用 `this`）
  * @returns {{registerAll: () => Promise<number>, dispose: () => void, definitions: Record<string, unknown>[]}}
  */
 export function createNativeTools(options) {
@@ -98,12 +98,12 @@ export function createNativeTools(options) {
   async function registerAll() {
     let service
     try {
-      service = options.register ?? options.ctx.get?.("tools")?.["register"]
+      service = options.service ?? options.ctx.get?.("tools")
     } catch (error) {
       options.log(`取 tools 服务失败（忽略）：${String(error)}`)
       return 0
     }
-    if (typeof service !== "function") {
+    if (typeof service?.register !== "function") {
       options.log("tools 服务不可用：跳过原生工具面（不影响 MCP 桥与消息投递）")
       return 0
     }
@@ -116,7 +116,9 @@ export function createNativeTools(options) {
         run,
       )
       try {
-        const disposer = service(definition)
+        // **必须以方法形式调用**（`service.register(...)`）：注册表内部用到 `this`
+        // （真机事故：解构成裸函数后调用 → `this` undefined → TypeError: reading 'layers' → 12 个工具全部注册失败）。
+        const disposer = service.register(definition)
         registered.push(typeof disposer === "function" ? disposer : () => {})
         definitions.push(definition)
         count += 1

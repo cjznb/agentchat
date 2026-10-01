@@ -69,9 +69,14 @@ function setup(tools: unknown[] = defaultTools) {
     hub: { mcp: () => client(transport.send) },
     sessions,
     log: (message) => void logs.push(message),
-    register: (definition) => {
-      registered.push(definition)
-      return () => void unregistered.push(String(definition["name"]))
+    service: {
+      register(this: unknown, definition: Record<string, unknown>) {
+        // 真机事故：把 `service.register` 解构成裸函数调用 → `this` 丢失 →
+        // TypeError: Cannot read properties of undefined (reading 'layers') → 12 个工具全部注册失败。
+        if (this === undefined) throw new Error("注册表入口丢失 this（宿主注册表内部依赖 this）")
+        registered.push(definition)
+        return () => void unregistered.push(String(definition["name"]))
+      },
     },
   })
   return { native, transport, registered, unregistered, logs }
@@ -160,9 +165,11 @@ describe("原生工具面（逐调用身份）", () => {
       hub: { mcp: () => client(transport.send) },
       sessions: new Map(),
       log: (m) => void logs.push(m),
-      register: (definition) => {
-        if (String(definition["name"]).endsWith("send")) throw new Error("schema 不受支持")
-        return () => {}
+      service: {
+        register(definition: Record<string, unknown>) {
+          if (String(definition["name"]).endsWith("send")) throw new Error("schema 不受支持")
+          return () => {}
+        },
       },
     })
     expect(await partial.registerAll()).toBe(1)
