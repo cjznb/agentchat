@@ -147,9 +147,10 @@ export function createHttpTransport(options) {
      * @param {string} path 以 `/` 开头的路径
      * @param {unknown} body JSON 化后作为请求体
      * @param {Record<string, string>} headers 完整请求头
+     * @param {string} [method] HTTP 方法（默认 POST；`PATCH /api/agents/:id` 用）
      * @returns {Promise<{status: number, text: string, sessionId: string | undefined}>}
      */
-    async send(path, body, headers) {
+    async send(path, body, headers, method = "POST") {
       const url = `${config.baseUrl}${path}`
       let lastStatus
       for (let attempt = 0; attempt < retry.maxAttempts; attempt += 1) {
@@ -157,7 +158,7 @@ export function createHttpTransport(options) {
         const timer = setTimeout(() => controller.abort(), retry.timeoutMs)
         try {
           const response = await options.fetch(url, {
-            method: "POST",
+            method,
             headers,
             body: JSON.stringify(body),
             signal: controller.signal,

@@ -94,3 +94,22 @@ export function describe(error) {
   }
   return String(error)
 }
+
+/**
+ * 建"fire-and-forget + 吞错"守卫：把事件处理任务丢到后台，同步/异步异常都只记日志。
+ *
+ * 为什么需要统一入口：本适配器所有宿主回调（事件监听、定时器、卸载清理）都**不得**把异常抛回宿主，
+ * 也不得产生未处理拒绝；这条纪律散落在各处时最容易漏。调用方只需 `guard(somePromise)`。
+ *
+ * @param {(message: string) => void} log 诊断（写文件日志，绝不抛）
+ * @returns {(task: unknown) => void}
+ */
+export function createGuard(log) {
+  return (task) => {
+    try {
+      void Promise.resolve(task).catch((error) => log(`事件处理失败：${describe(error)}`))
+    } catch (error) {
+      log(`事件处理同步失败：${describe(error)}`)
+    }
+  }
+}

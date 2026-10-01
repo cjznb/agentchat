@@ -45,6 +45,7 @@ export const DELIVERY_RESULTS = /** @type {const} */ (["delivered", "refused"])
  *   wake(agentId: string): Promise<Array<{id: string, fromAgentId: string, body: string}>>,
  *   reportResult(agentId: string, items: ReadonlyArray<{messageId: string, result: string}>): Promise<void>,
  *   retire(agentId: string): Promise<void>,
+ *   renameAgent(agentId: string, name: string): Promise<void>,
  * }}
  */
 export function createHubClient(options) {
@@ -61,8 +62,8 @@ export function createHubClient(options) {
     "content-type": "application/json",
   }
   /** 401 自愈包装：见模块头（重读一次 token，仅在有新值且不同时重试一次）。 */
-  const send = async (path, body, headers) => {
-    const first = await transport.send(path, body, headers)
+  const send = async (path, body, headers, method) => {
+    const first = await transport.send(path, body, headers, method)
     if (first.status !== 401) return first
     const fresh = resolveHubConfig(options.env).token
     if (fresh === "" || fresh === token) return first
@@ -71,7 +72,7 @@ export function createHubClient(options) {
     bearer["authorization"] = `Bearer ${fresh}`
     headers["authorization"] = `Bearer ${fresh}`
     options.log?.("传输门 token 已轮换：401 后重读到新值，更新 bearer 并仅重试一次 " + path)
-    return transport.send(path, body, headers)
+    return transport.send(path, body, headers, method)
   }
 
   /** `/internal/*` 的纯 JSON 端点：断言 200 后返回文本。 */
@@ -95,6 +96,16 @@ export function createHubClient(options) {
       // 幂等：`404 agent_not_found` 视为已退役/不存在，不重试也不报错（确定性错误）。
       if (result.status === 404) return
       expectStatus(200, result, "POST /internal/retire")
+    },
+    /**
+     * 改**展示名**（`custom_name`；`name` 不变，故唯一性与 `task_ref` 收养不受影响）。
+     * `PATCH /api/agents/:id`：400 `invalid_body`（空/超 64 字/控制字符）、404 未知 id、
+     * 409 `name_taken`（展示名唯一索引冲突）——**确定性错误原样抛出**，由 `lib/title.js` 退化重试。
+     */
+    async renameAgent(agentId, displayName) {
+      const path = `/api/agents/${encodeURIComponent(agentId)}`
+      const result = await send(path, { name: displayName }, bearer, "PATCH")
+      expectStatus(200, result, `PATCH ${path}`)
     },
   }
 }

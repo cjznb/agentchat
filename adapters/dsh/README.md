@@ -79,6 +79,13 @@ bundle 行 `config`（写进 `cordis.patch.yml`）：
 |---|---|---|
 | `pollMs` | `AGENTCHAT_POLL_MS` → `10000` | 空闲轮询间隔（毫秒）；消息在「已经 idle 之后」到达时靠它补拉 |
 | `name` | `dsh@<host>` | 实例节点可读名；同一台机器跑多个不同 `AGENTCHAT_HOME` 的实例时用它避重名（`agents.name` 有唯一索引） |
+| `titleAsName` | `true` | 把 **DSH 会话标题**写进 Hub **展示名**（`custom_name`）；设 `false` 则始终显示机器唯一名 |
+
+**节点名与展示名（两件事）**：`agents.name` 是机器唯一名（`<目录名>-<会话 id 短标识>`，保证唯一与 `task_ref` 收养稳定），
+Hub 里**显示**的是 `COALESCE(custom_name, name)`。适配器默认为每个会话把 DSH 标题
+（`ctx.sessionTitle.get(session)`，即你在 DSH 里看到的那句，如"为 agentchat 编写 DSH 适配器"）写进 `custom_name`，
+于是 Hub 里一眼可认；标题是首轮之后才生成的，适配器订阅 `session/title` 修订并跟着更新。
+展示名有唯一索引：撞名（409）时退化为「标题 · 会话短标识」只重试一次；`sessionTitle` 服务缺失则保持机器唯一名。
 
 环境变量（与其它适配器一致）：`AGENTCHAT_URL` / `AGENTCHAT_PORT`（默认 `127.0.0.1:4646`）、
 `HUB_TOKEN`（缺省回退 `<AGENTCHAT_HOME>/hub_token`）、`AGENTCHAT_HOME`（默认 `~/.agentchat`）、

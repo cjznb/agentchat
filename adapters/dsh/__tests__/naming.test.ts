@@ -12,6 +12,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { HubToolError } from "../lib/hub.js"
+import { alternateTitle, normalizeTitle, TITLE_MAX_CHARS } from "../lib/title.js"
 import { createMessageBuilder, MESSAGE_SOURCE, messageFactoryCandidates } from "../lib/message.js"
 import { registerWithNameRetry } from "../lib/register.js"
 import { createSessionHint, idSuffix, sessionName } from "../lib/session-hint.js"
@@ -165,5 +166,30 @@ describe("注入消息工厂", () => {
     expect(MESSAGE_SOURCE.kind).not.toBe("plugin")
     expect((MESSAGE_SOURCE as Record<string, unknown>)["plugin"]).toBeUndefined()
     expect(MESSAGE_SOURCE.kind).toMatch(/^plugin:/)
+  })
+})
+
+describe("会话标题 → 展示名（Hub 展示名 = custom_name）", () => {
+  it("归一化：去控制字符、折叠空白、去首尾空白；空/非字符串 → undefined", () => {
+    expect(normalizeTitle("  为 agentchat\u0007 编写  DSH 适配器 ")).toBe("为 agentchat 编写 DSH 适配器")
+    expect(normalizeTitle("多行\n标题\t带制表")).toBe("多行 标题 带制表")
+    expect(normalizeTitle("   ")).toBeUndefined()
+    expect(normalizeTitle(undefined)).toBeUndefined()
+    expect(normalizeTitle(42)).toBeUndefined()
+  })
+
+  it("按**码点**截断到 64（Hub `agentRenameSchema` 上限），不会截断成半个代理对", () => {
+    expect([...(normalizeTitle("字".repeat(80)) ?? "")].length).toBe(TITLE_MAX_CHARS)
+    const emoji = normalizeTitle("🙂".repeat(80)) ?? ""
+    expect([...emoji].length).toBe(TITLE_MAX_CHARS)
+    expect(emoji).not.toContain("\uFFFD")
+  })
+
+  it("撞名退化名 = 「标题·会话短标识」，且仍不超过 64", () => {
+    const alt = alternateTitle("为 agentchat 编写 DSH 适配器", "session-91fa2fb6-fbce-4b44-9853-4b5f738677b2")
+    expect(alt).toBe("为 agentchat 编写 DSH 适配器·91fa2fb6")
+    const longAlt = alternateTitle("字".repeat(80), "session-91fa2fb6-x") ?? ""
+    expect([...longAlt].length).toBeLessThanOrEqual(TITLE_MAX_CHARS)
+    expect(longAlt.endsWith("·91fa2fb6")).toBe(true)
   })
 })

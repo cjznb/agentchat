@@ -59,12 +59,20 @@ AgentChat Hub ──HTTP(/internal/*)+MCP──> adapters/dsh/index.js（Host �
 | 层 | 注册参数 | 说明 |
 |---|---|---|
 | 实例节点 | `role_tag=container`、`purpose=coding-agent`、`name=dsh@<host>`、`join_token`（续连认领） | **懒注册**：第一个 `agent/created` 时建立；`config.name` 可改名 |
-| 会话节点 | `parent_ref=<实例节点 id>`（或父会话节点）、`task_ref=<session.header.id>`、`purpose=coding-agent` | 名字 `<cwd 目录名>-<会话 id 前 8 位>`；无 `cwd` 回退 `dsh-<id8>` |
+| 会话节点 | `parent_ref=<实例节点 id>`（或父会话节点）、`task_ref=<session.header.id>`、`purpose=coding-agent` | 机器唯一名 `<cwd 目录名>-<会话 id 短标识>`（先剥 `session-` 前缀再截断）；无 `cwd` 回退 `dsh-<短标识>`。**Hub 里显示的是展示名**（见下） |
 | 子代理会话节点 | 同上，`purpose=subagent`，父 = `header.parentSession` 已注册时的该节点 | 判据是 `header.origin === 'subagent'` |
 
+> **机器唯一名 vs 展示名**：`agents.name` 是唯一名（保证注册与 `task_ref` 收养稳定，**永不变**），
+> Hub 里**显示**的是 `COALESCE(custom_name, name)`。适配器默认把 **DSH 会话标题**
+> （`ctx.sessionTitle.get(session)`，即你在 DSH 里看到的那句，如"为 agentchat 编写 DSH 适配器"）
+> 写进 `custom_name`（`PATCH /api/agents/:id`）——机器名不好认，标题才一眼可认。
+> 标题常在第一轮之后才由模型生成/改写，故适配器订阅 `session/event` 的 `session/title` 修订并跟随更新；
+> 展示名有唯一索引，撞名（409）时退化为「标题·会话短标识」只重试一次；`ctx.sessionTitle` 不可用时
+> 保持机器唯一名（功能不受影响）。关掉用 `config.titleAsName: false`。
+>
 > **名字必须唯一**：Hub 的 `agents.name`（与展示名）都有唯一索引。同一目录下多开会话时纯目录名会撞键，
-> 故会话节点一律带会话 id 短后缀；标题由 DSH 侧的会话标题插件掌握，适配器**不猜也不跟随**（避免与
-> 唯一索引反复冲突）。同一台机器跑多个不同 `AGENTCHAT_HOME` 的实例时，用 `config.name` 区分实例节点。
+> 故会话节点一律带会话 id 短后缀（先剥宿主 id 的固定前缀，否则会恒得同一个名字）。
+> 同一台机器跑多个不同 `AGENTCHAT_HOME` 的实例时，用 `config.name` 区分实例节点。
 
 ### 扩展点 → 适配器动作
 

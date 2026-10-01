@@ -39,9 +39,10 @@ import { createMessageBuilder } from "./lib/message.js"
 import { IdlePoller, parsePollMs } from "./lib/poll.js"
 import { registerWithNameRetry } from "./lib/register.js"
 import { createRegistrationRetry } from "./lib/retry.js"
+import { createTitleSync } from "./lib/title.js"
 import { ADAPTER_VENDOR, createSessionHint, instanceName, sessionName } from "./lib/session-hint.js"
 import { agentIdPath, clearToken, readToken, tokenPath, writeToken } from "./lib/token.js"
-import { createBoundedSet, describe, isRecord } from "./lib/util.js"
+import { createBoundedSet, createGuard, describe, isRecord } from "./lib/util.js"
 
 /** 插件名（DSH bundle 行与日志前缀）。 */
 export const name = "agentchat"
@@ -202,6 +203,9 @@ export function apply(ctx, config) {
     await reportInstance("idle", true)
   }
 
+  /** 会话标题 → Hub 展示名（`custom_name`；`name` 不动）：见 `lib/title.js`。`config.titleAsName: false` 可关。 */
+  const syncTitle = createTitleSync({ ctx, hub, log: warn, enabled: cfg["titleAsName"] !== false })
+
   /** 注入消息工厂（宿主 `createUserMessage` → profile 农场绝对路径 → 最小 UserMessage 兜底）。 */
   const buildMessage = createMessageBuilder(env, warn)
 
@@ -299,6 +303,8 @@ export function apply(ctx, config) {
         // （`agent/created`/加载期回填/补注册重试都不带 idle 跳变），若只由 `agent/status=idle` 启动轮询，
         // 空闲期到达的消息将**永远无人认领**——真机症状：AgentChat 里一直「排队中」。
         ensurePolling(sessionId, entry.nodeId)
+        // 展示名 = DSH 会话标题（可读）；`name` 仍是机器唯一名。失败只记日志。
+        guard(syncTitle(sessionId, agent, entry.nodeId))
         return entry
       } catch (error) {
         warn(`会话节点注册失败（${sessionId}）：${describe(error)}`)
@@ -310,12 +316,6 @@ export function apply(ctx, config) {
     })()
     pending.set(sessionId, { agent, promise: task })
     return task
-  }
-
-  async function onCreated(payload) {
-    const sessionId = payload?.agent?.session?.header?.id
-    if (typeof sessionId === "string") hint.noteReopened(sessionId)
-    await ensureSession(payload?.agent)
   }
 
   /**
@@ -367,14 +367,8 @@ export function apply(ctx, config) {
     log(`会话 ${sessionId} 的 agent 已释放，停止跟踪（节点保留，待 Hub 判 offline）`)
   }
 
-  /** 事件入口：**fire-and-forget**，异常在各自处理函数内消化，绝不冒泡到宿主。 */
-  const guard = (task) => {
-    try {
-      void Promise.resolve(task).catch((error) => warn(`事件处理失败：${describe(error)}`))
-    } catch (error) {
-      warn(`事件处理同步失败：${describe(error)}`)
-    }
-  }
+  /** 事件入口：**fire-and-forget**，异常在各自处理函数内消化，绝不冒泡到宿主（见 `lib/util.js`）。 */
+  const guard = createGuard(warn)
 
   // 加载期回填 + 加载日志（见 lib/backfill.js）：运行中安装/HMR 时，已存在的会话没有 created 事件。
   log(`插件已加载（轮询间隔 ${pollMs}ms，Hub ${resolveHubConfig(env).baseUrl}）`)
@@ -386,7 +380,12 @@ export function apply(ctx, config) {
     ctx, known, sessions, ensure: ensureSession, log: warn, limit: SEEN_LIMIT,
   })
 
-  ctx.on("agent/created", (payload) => guard(onCreated(payload)))
+  // `agent/created`：先记「重开」（清除 disposed 标记），再走与懒收养同一条注册路径。
+  ctx.on("agent/created", (payload) => {
+    const sessionId = payload?.agent?.session?.header?.id
+    if (typeof sessionId === "string") hint.noteReopened(sessionId)
+    guard(ensureSession(payload?.agent))
+  })
   ctx.on("agent/status", (payload) => guard(onStatus(payload)))
   ctx.on("agent/disposed", (payload) => guard(onDisposed(payload)))
 

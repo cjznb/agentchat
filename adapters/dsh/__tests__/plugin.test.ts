@@ -32,6 +32,8 @@ interface FakeContext {
   readonly warnings: string[]
   /** 设置 `ctx.get('agents')` 的返回值（加载期回填用例在 `apply` **之前**调用）。 */
   readonly setRegistry: (value: unknown) => void
+  /** 设置 `ctx.get('sessionTitle')` 的返回值（标题→展示名用例在 `apply` **之前**调用）。 */
+  readonly setTitleService: (value: unknown) => void
   ctx: {
     on: (name: string, listener: Listener) => void
     effect: (callback: () => () => void, label?: string) => void
@@ -47,23 +49,26 @@ function fakeContext(): FakeContext {
   const warnings: string[] = []
   const record = <T>(box: T[]) => (value: T) => void box.push(value)
   let registry: unknown
+  let titleService: unknown
   return {
     listeners,
     disposers,
     disposeResults,
     warnings,
     setRegistry: (value) => void (registry = value),
+    setTitleService: (value) => void (titleService = value),
     ctx: {
       on: (name, listener) => void listeners.set(name, listener),
       effect: (callback) => void disposers.push(callback()),
       logger: { warn: record(warnings) },
-      get: (name) => (name === "agents" ? registry : undefined),
+      get: (name) => (name === "agents" ? registry : name === "sessionTitle" ? titleService : undefined),
     },
   }
 }
 
 interface RequestRecord {
   readonly path: string
+  readonly method: string
   readonly body: Json
   readonly headers: Record<string, string>
 }
@@ -82,6 +87,8 @@ interface HubKit {
   onInternal: (path: string, body: Json, index: number) => unknown
   /** 为 `true` 时所有请求返回 HTTP 500（可重试退避路径）。 */
   failAll: boolean
+  /** 按路径/方法强制状态码（如改名接口的 409 `name_taken`）；`undefined` 走默认。 */
+  statusFor?: (path: string, method: string, index: number) => number | undefined
 }
 
 function responseLike(status: number, text: string, sessionId?: string): Response {
@@ -103,12 +110,15 @@ function defaultRegisterText(index: number): string {
 function fakeHub(): HubKit {
   const kit: HubKit = { requests: [], toolArgs: [], onToolCall: () => undefined, onInternal: () => undefined, failAll: false }
   let internalIndex = 0
-  const impl = async (input: unknown, init?: { readonly body?: unknown; readonly headers?: unknown }) => {
+  const impl = async (input: unknown, init?: { readonly body?: unknown; readonly headers?: unknown; readonly method?: unknown }) => {
     const path = new URL(String(input)).pathname
+    const method = typeof init?.method === "string" ? init.method : "POST"
     const body: Json = typeof init?.body === "string" ? JSON.parse(init.body) : {}
     // 插件把 `globalThis.fetch` 交给 hub 客户端，故此处记录即等价于 Hub 收到的请求。
-    kit.requests.push({ path, body, headers: (init?.headers ?? {}) as Record<string, string> })
+    kit.requests.push({ path, method, body, headers: (init?.headers ?? {}) as Record<string, string> })
     if (kit.failAll) return responseLike(500, "hub down")
+    const forced = kit.statusFor?.(path, method, kit.requests.length - 1)
+    if (forced !== undefined) return responseLike(forced, JSON.stringify({ ok: false, error: "name_taken" }))
     if (path !== "/mcp") {
       const custom = kit.onInternal(path, body, internalIndex)
       internalIndex += 1
@@ -225,8 +235,11 @@ interface Harness {
   /** 运行 `ctx.effect` 的清理函数（等价于 Cordis 卸载插件）。 */
   dispose: () => void
 }
-/** 建假 ctx + 假 Hub（+ 临时 home / env）并 `apply()` 插件；`agents` = 加载期就已存在的 agent（回填用例）。 */
-async function setup(config?: Json, agents?: readonly unknown[]): Promise<Harness> {
+/**
+ * 建假 ctx + 假 Hub（+ 临时 home / env）并 `apply()` 插件。
+ * `agents` = 加载期就已存在的 agent（回填用例）；`titleService` = `ctx.get('sessionTitle')`（标题用例）。
+ */
+async function setup(config?: Json, agents?: readonly unknown[], titleService?: unknown): Promise<Harness> {
   const home = tempHome()
   process.env["AGENTCHAT_HOME"] = home
   process.env["HUB_TOKEN"] = "hub-token"
@@ -235,6 +248,7 @@ async function setup(config?: Json, agents?: readonly unknown[]): Promise<Harnes
   const kit = fakeHub()
   const fake = fakeContext()
   if (agents !== undefined) fake.setRegistry({ list: () => [...agents] })
+  if (titleService !== undefined) fake.setTitleService(titleService)
   const mod = (await import("../index.js")) as { apply(ctx: unknown, config?: unknown): void }
   mod.apply(fake.ctx, config ?? { pollMs: POLL_MS })
   const on = (name: string): Listener => {
@@ -747,6 +761,75 @@ describe("登记即开轮询", () => {
     expect(pathBodies(h.kit, "/internal/wake").length).toBeGreaterThan(0)
     const text = (agent.followups[0]!).content[0]?.text ?? ""
     expect(text).toContain("[m-idle]")
+    h.dispose()
+  })
+})
+
+// ── 会话标题 → Hub 展示名（真机反馈：机器名 default-workspace-xxxx 一眼认不出）──────────
+
+describe("会话标题 → 展示名", () => {
+  const title = "为 agentchat 编写 DSH 适配器"
+  const patches = (h: Harness) => h.kit.requests.filter((request) => request.method === "PATCH")
+  /** `session/event` 监听器按 `(session, event)` **位置参数**调用；脚手架的单参 `Listener` 需放宽。 */
+  const fireTitle = (h: Harness, session: unknown): void =>
+    (h.on("session/event") as unknown as (s: unknown, e: unknown) => void)(session, { type: "session/title" })
+
+  it("agent/created 时把 DSH 会话标题写进展示名（PATCH /api/agents/:id，body 只有 name）", async () => {
+    const h = await setup({ pollMs: 1000 }, undefined, { get: () => ({ title }) })
+    h.on("agent/created")({ agent: fakeAgent(sessionHeader("sess-title")) })
+    expect(await waitUntil(() => registered(h.kit, "sess-title"))).toBe(true)
+    expect(await waitUntil(() => patches(h).length === 1)).toBe(true)
+    expect(patches(h)[0]?.path).toBe("/api/agents/agent-2") // 根=agent-1，会话子节点=agent-2
+    expect(patches(h)[0]?.body).toEqual({ name: title })
+    expect(logText(h.home)).toContain("展示名已更新")
+    h.dispose()
+  })
+
+  it("标题随后被改写（session/title 修订）→ 展示名跟着更新；同值不重复请求", async () => {
+    let current: unknown = { title: "第一版标题" }
+    const h = await setup({ pollMs: 1000 }, undefined, { get: () => current })
+    const agent = fakeAgent(sessionHeader("sess-title2"))
+    h.on("agent/created")({ agent })
+    expect(await waitUntil(() => patches(h).length === 1)).toBe(true)
+    current = { title: "第二版标题" }
+    fireTitle(h, agent.session)
+    expect(await waitUntil(() => patches(h).length === 2)).toBe(true)
+    expect(patches(h)[1]?.body).toEqual({ name: "第二版标题" })
+    fireTitle(h, agent.session) // 同值
+    await settle(300)
+    expect(patches(h)).toHaveLength(2)
+    h.dispose()
+  })
+
+  it("展示名撞唯一索引（409 name_taken）→ 退化为「标题·会话短标识」只重试一次", async () => {
+    const h = await setup({ pollMs: 1000 }, undefined, { get: () => ({ title }) })
+    h.kit.statusFor = (path, method) => (method === "PATCH" && path.startsWith("/api/agents/") ? 409 : undefined)
+    h.on("agent/created")({
+      agent: fakeAgent(sessionHeader("session-91fa2fb6-fbce-4b44-9853-4b5f738677b2")),
+    })
+    expect(await waitUntil(() => patches(h).length === 2)).toBe(true)
+    expect(patches(h)[0]?.body).toEqual({ name: title })
+    expect(patches(h)[1]?.body).toEqual({ name: `${title}·91fa2fb6` })
+    expect(logText(h.home)).toContain("展示名同步失败")
+    h.dispose()
+  })
+
+  it("config.titleAsName:false → 完全不请求改名（机器唯一名保留）", async () => {
+    const h = await setup({ pollMs: 1000, titleAsName: false }, undefined, { get: () => ({ title }) })
+    h.on("agent/created")({ agent: fakeAgent(sessionHeader("sess-off")) })
+    expect(await waitUntil(() => registered(h.kit, "sess-off"))).toBe(true)
+    await settle(300)
+    expect(patches(h)).toHaveLength(0)
+    h.dispose()
+  })
+
+  it("sessionTitle 服务缺失 → 不报错、不改名（保持机器唯一名）", async () => {
+    const h = await setup({ pollMs: 1000 })
+    h.on("agent/created")({ agent: fakeAgent(sessionHeader("sess-notitle")) })
+    expect(await waitUntil(() => registered(h.kit, "sess-notitle"))).toBe(true)
+    await settle(300)
+    expect(patches(h)).toHaveLength(0)
+    expect(logText(h.home)).toContain("sessionTitle 服务不可用")
     h.dispose()
   })
 })
