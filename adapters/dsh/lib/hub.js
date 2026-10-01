@@ -46,6 +46,7 @@ export const DELIVERY_RESULTS = /** @type {const} */ (["delivered", "refused"])
  *   reportResult(agentId: string, items: ReadonlyArray<{messageId: string, result: string}>): Promise<void>,
  *   retire(agentId: string): Promise<void>,
  *   renameAgent(agentId: string, name: string): Promise<void>,
+ *   mcp(): {list(): Promise<unknown[]>, call(name: string, args: unknown, taskRef?: string): Promise<string>, reset(): void},
  * }}
  */
 export function createHubClient(options) {
@@ -110,7 +111,9 @@ export function createHubClient(options) {
     /**
      * **原生工具面**用：通用 MCP 客户端（一次握手后可反复 `list()`/`call()`；逐调用身份经
      * `x-agentchat-session`，见 `lib/mcp.js`）。`lib/native-tools.js` 用它按调用者会话记账。
+     * 注意：`createMcpClient` 收的是**传输对象**（`{send}`），不是裸 `send` 函数
+     * （真机事故：传裸函数 → `transport.send is not a function`，整条原生工具面静默失效）。
      */
-    mcp: () => createMcpClient(send, bearer),
+    mcp: () => createMcpClient({ send }, bearer),
   }
 }

@@ -6,7 +6,11 @@
  * 另覆盖：拿不到调用者会话时**拒发**（不猜、不回落容器）、工具定义由 `tools/list` 动态生成、
  * Hub 报错转文本不抛、卸载反注册。
  */
-import { describe, expect, it } from "vitest"
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { describe, expect, it, vi } from "vitest"
+import { createHubClient } from "../lib/hub.js"
 import { createMcpClient } from "../lib/mcp.js"
 import { createNativeTools, NO_SESSION_TEXT, toolDefinition, TOOL_PREFIX } from "../lib/native-tools.js"
 
@@ -177,5 +181,35 @@ describe("原生工具面（逐调用身份）", () => {
     const definition = toolDefinition({ name: "roster" }, async () => "x")
     expect(definition["description"]).toContain("roster")
     expect(definition["parameters"]).toEqual({ type: "object", properties: {} })
+  })
+})
+
+// ── 生产接线回归（真机事故：hub.mcp() 传了裸 send 函数）──────────────────────────────
+
+describe("hub.mcp() 接线", () => {
+  it("返回的客户端可直接 list()（真机事故：transport.send is not a function → 原生工具面整体静默失效）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agentchat-hubmcp-"))
+    const env = { ...process.env, AGENTCHAT_HOME: home, HUB_TOKEN: "t", AGENTCHAT_URL: "http://hub.test" }
+    const methods: string[] = []
+    const reply = (status: number, text: string, sessionId?: string) => ({
+      status,
+      text: async () => text,
+      headers: { get: (name: string) => (name === "mcp-session-id" ? (sessionId ?? null) : null) },
+    })
+    vi.stubGlobal("fetch", async (_url: unknown, init: { readonly body?: string }) => {
+      const body = JSON.parse(String(init?.body)) as { readonly method: string }
+      methods.push(body.method)
+      if (body.method === "initialize") return reply(200, "{}", "sess-1")
+      if (body.method === "notifications/initialized") return reply(202, "")
+      return reply(
+        200,
+        `data: ${JSON.stringify({ jsonrpc: "2.0", id: 2, result: { tools: [{ name: "roster", inputSchema: { type: "object", properties: {} } }] } })}\n\n`,
+      )
+    })
+    const hub = createHubClient({ env, fetch: globalThis.fetch })
+    const tools = await hub.mcp().list()
+    expect(tools).toEqual([{ name: "roster", inputSchema: { type: "object", properties: {} } }])
+    expect(methods).toEqual(["initialize", "notifications/initialized", "tools/list"])
+    vi.unstubAllGlobals()
   })
 })
