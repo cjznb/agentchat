@@ -2,6 +2,22 @@
 
 本项目遵循语义化版本，重大变更记录于此。首个公开版本基线：`v0.1.0`。
 
+## [Unreleased]
+
+### 新增
+
+- **消息 Markdown 渲染**：react-markdown + GFM + rehype-sanitize + rehype-highlight 管线；设置页「消息渲染」范围三选（全部默认 / 仅 AI 回复 / 关闭，即时生效）；普通气泡逐条「看原文 / 看排版」切换与「复制」按钮；mention 高亮在 MD 视图内递归注入；系统消息/批示卡不参与。
+- **DSH 原生工具面**：`ctx.tools.register` 逐调用按会话注入身份；出站身份 fail-closed（删除「最近 running」启发式，修真机身份冒用）；发布提示前校验磁盘现值可自愈；`tools.register` 方法形式调用修复（12 个原生工具注册失败）。
+
+### 修复
+
+- **自发消息优雅拒绝**：`self_send` 稳定错误码 + 干净 JSON 载荷 + 服务端日志（HTTP 409 / MCP 映射），不再把驱动层 `SqliteError` 原样透出。
+- **MCP 错误映射审计**：`AgentNotFoundError` / `SqliteError` / `ZodError` 归一映射（`mcp/context.ts` errorResult），杜绝 raw 错误泄漏。
+
+### 测试
+
+- 台账 Minor 补锁 4 项（键独立 / busy 分支 / 红 JSON 另存 / prune 500 注入）。
+
 ## [0.1.0] - 2026-10-01
 
 首个公开发布：聚合「群聊 @提及」功能主线（12 任务 + 6 项真机反馈修复 + 样式/视觉工程化）与 DSH 桌面端适配器，共 37 个提交（`9877825d..v0.1.0`）。
