@@ -202,8 +202,12 @@ adapters/<vendor>/
    ⚠️ **切勿**在"多于一个"时按"最近进入 running"等启发式猜身份：那是跨会话 last-writer-wins 全局指针，
    等于把"谁的回合最后开始"当成"谁在说话"——真机已发生**身份冒用**（A 的消息挂到 B 名下，归属/回执/ask 授权全错）。
    宁可显式失败，不可静默冒名。
-3. **原生工具面**（终极解，未实现）：宿主插件用 `ctx.tools.register()` 自己代理 Hub 工具面 →
-   每次调用天然带调用者 agent 上下文 → 任意并发都精确，且**不再需要 MCP 桥**。
+3. **原生工具面**（根治解，**DSH 已实现**，`config.nativeTools: true`）：宿主插件用 `ctx.tools.register()`
+   自己代理 Hub 工具面 → 工具执行上下文自带**调用方 agent**（DSH：`execute(args, exec)` 的 `exec.agent`，
+   见 `@deepseek-ai/dsh-tools` 的 `ToolExecutionInput.agent`）→ 每次调用解析**自己的**会话并把
+   `x-agentchat-session` 作为**逐请求**身份发出 → 任意并发都精确，且**不再需要 MCP 桥与共享状态文件**。
+   落地纪律：调用集从 Hub `tools/list` **动态生成**（别硬编码 schema）；拿不到调用者会话就**拒发**（不猜）；
+   注册失败逐工具跳过并记日志；Hub 侧会话失效（400/404）丢弃缓存会话自愈。
 
 > 无论哪条：**Hub 只在 initialize 认 `x-agent-id`**，身份变化必须重建会话（坑 7）。
 

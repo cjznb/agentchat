@@ -36,6 +36,7 @@ import { resolveHome } from "./lib/home.js"
 import { createHubClient, HubToolError, resolveHubConfig } from "./lib/hub.js"
 import { createFileLog } from "./lib/log.js"
 import { createMessageBuilder } from "./lib/message.js"
+import { createNativeTools } from "./lib/native-tools.js"
 import { IdlePoller, parsePollMs } from "./lib/poll.js"
 import { registerWithNameRetry } from "./lib/register.js"
 import { createRegistrationRetry } from "./lib/retry.js"
@@ -205,6 +206,9 @@ export function apply(ctx, config) {
 
   /** 会话标题 → Hub 展示名（`custom_name`；`name` 不动）：见 `lib/title.js`。`config.titleAsName: false` 可关。 */
   const syncTitle = createTitleSync({ ctx, hub, log: warn, enabled: cfg["titleAsName"] !== false })
+
+  /** 原生工具面（可选，`config.nativeTools: true`）：逐调用按调用者会话注入身份，见 `lib/native-tools.js`。 */
+  const nativeTools = cfg["nativeTools"] === true ? createNativeTools({ ctx, hub, sessions, log: warn }) : undefined
 
   /** 注入消息工厂（宿主 `createUserMessage` → profile 农场绝对路径 → 最小 UserMessage 兜底）。 */
   const buildMessage = createMessageBuilder(env, warn)
@@ -386,10 +390,12 @@ export function apply(ctx, config) {
   })
   ctx.on("agent/status", (payload) => guard(onStatus(payload)))
   ctx.on("agent/disposed", (payload) => guard(onDisposed(payload)))
+  guard(nativeTools?.registerAll())
 
   ctx.effect(
     () => () => {
       stopRetry()
+      nativeTools?.dispose()
       for (const poller of pollers.values()) poller.stop()
       pollers.clear()
       sessions.clear()

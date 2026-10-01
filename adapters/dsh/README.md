@@ -80,6 +80,7 @@ bundle 行 `config`（写进 `cordis.patch.yml`）：
 | `pollMs` | `AGENTCHAT_POLL_MS` → `10000` | 空闲轮询间隔（毫秒）；消息在「已经 idle 之后」到达时靠它补拉 |
 | `name` | `dsh@<host>` | 实例节点可读名；同一台机器跑多个不同 `AGENTCHAT_HOME` 的实例时用它避重名（`agents.name` 有唯一索引） |
 | `titleAsName` | `true` | 把 **DSH 会话标题**写进 Hub **展示名**（`custom_name`）；设 `false` 则始终显示机器唯一名 |
+| `nativeTools` | `false` | 开启 DSH **原生工具面**（`ctx.tools.register`）：**逐调用**按调用者会话注入身份，多会话并发也精确；开启后建议去掉 MCP 行（否则模型会看到两套工具） |
 
 **节点名与展示名（两件事）**：`agents.name` 是机器唯一名（`<目录名>-<会话 id 短标识>`，保证唯一与 `task_ref` 收养稳定），
 Hub 里**显示**的是 `COALESCE(custom_name, name)`。适配器默认为每个会话把 DSH 标题
@@ -124,10 +125,21 @@ Hub 的 `send`/`ask` 等工具按调用方身份记账（MCP `initialize` 的 `x
 | 0 个或 ≥2 个上层会话并存 | **实例容器节点**（`dsh@<host>`） | ❌ 不能：Hub 拒绝「以分组容器为收件方」的 DM（`container_not_chat_target`），对端会拿到明确错误而不是静默失败 |
 
 **收件（唤醒/注入）始终按会话节点进行，与上表无关**；受限的只是「由本 DSH 会话发起的 MCP 出站记账」。
-彻底修法是在本插件里用 `ctx.tools.register()` 以原生工具（而非 MCP 桥）代理 Hub 工具面：原生工具能拿到
-调用它的 agent 上下文，即可按会话精确归属，且天然支持多会话并发。本版本为对齐已验证的 OpenCode 结构
-（原生插件 + MCP 桥）保留桥方案，并在 `mcp-bridge.mjs` 里保留了 `x-agentchat-session` 头/入参剥离逻辑，
-待原生工具面落地后直接复用。
+
+### 根治（已实现，可选）：`nativeTools: true`
+
+`ctx.tools.register()` 的原生工具面已落地（`lib/native-tools.js`）：宿主按**调用**把调用方 agent 交给工具
+（`execute(args, exec)` 的 `exec.agent`），于是每次调用都能解析出**自己的**会话 →
+映射到该会话的 Hub 节点 → 经 `x-agentchat-session` **逐请求**记账。因此：
+
+- 多顶层会话**并发**也各自精确归属，**不再需要**共享单文件 `dsh.current`（也就不存在"谁的回合最后开始"的漂移）；
+- 拿不到调用者会话时**拒发**（返回明确文案），不猜、不回落容器；
+- 工具集由 Hub `tools/list` **动态生成**（Hub 加工具自动跟随，无硬编码 schema）。
+
+开启方式：在 profile 的 `cordis.patch.yml` 里给本插件行加 `config.nativeTools: true`（`titleAsName`/`pollMs` 同级），
+重启 DSH 后生效。开启后建议**去掉 MCP 行**（否则模型会同时看到 `mcp__agentchat__*` 与 `agentchat_*` 两套工具）；
+在去掉 MCP 行之前，桥仍按「已知限制」的规则工作。`mcp-bridge.mjs` 里的 `x-agentchat-session` 头/入参剥离逻辑
+与原生面共用同一套 Hub 身份语义。
 
 ## 验证清单（真机手动）
 

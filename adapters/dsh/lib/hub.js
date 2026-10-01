@@ -21,7 +21,7 @@
  * 网络/文件类失败一律由上层记日志后吞掉，**绝不让 Hub 抖动阻塞宿主**。
  */
 import { createHttpTransport, expectStatus, HubError, resolveHubConfig } from "./hub-config.js"
-import { HubToolError, mcpRegister, normalizeWake } from "./mcp.js"
+import { createMcpClient, HubToolError, mcpRegister, normalizeWake } from "./mcp.js"
 
 export { HubError, hubTokenPath, resolveHubConfig, resolveHubToken } from "./hub-config.js"
 export { HubToolError } from "./mcp.js"
@@ -107,5 +107,10 @@ export function createHubClient(options) {
       const result = await send(path, { name: displayName }, bearer, "PATCH")
       expectStatus(200, result, `PATCH ${path}`)
     },
+    /**
+     * **原生工具面**用：通用 MCP 客户端（一次握手后可反复 `list()`/`call()`；逐调用身份经
+     * `x-agentchat-session`，见 `lib/mcp.js`）。`lib/native-tools.js` 用它按调用者会话记账。
+     */
+    mcp: () => createMcpClient(send, bearer),
   }
 }

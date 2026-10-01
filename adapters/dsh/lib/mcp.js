@@ -135,6 +135,81 @@ export async function mcpRegister(transport, bearer, args) {
 }
 
 /**
+ * **通用 MCP 客户端**：一次握手后可反复 `list()` / `call()`。
+ *
+ * 与 `mcpRegister` 的关键差异是**逐调用身份**：Hub 只在 `initialize` 读 `x-agent-id`，
+ * 之后靠逐请求的 `x-agentchat-session`（值 = 会话节点的 `task_ref`，即宿主会话 id）重解析——
+ * 所以一个 MCP 会话就能承载**任意多个**不同会话的调用，且每次调用各自的记账身份互不影响
+ * （这正是原生工具面能修掉"共享单文件猜身份"的原因）。
+ * 不传 `taskRef` 时不带该头：Hub 侧等同**无身份**并回 `identity_required`（fail-closed，不回落容器）。
+ *
+ * @param {{send: (path: string, body: unknown, headers: Record<string, string>) => Promise<{status: number, text: string, sessionId: string | undefined}>}} transport
+ * @param {Record<string, string>} bearer 共享 bearer 头
+ * @param {{identity?: string}} [options] `initialize` 的兜底身份（可选；一般不需要，逐调用头更精确）
+ * @returns {{list: () => Promise<unknown[]>, call: (name: string, args: unknown, taskRef?: string) => Promise<string>, reset: () => void}}
+ */
+export function createMcpClient(transport, bearer, options = {}) {
+  const base = options.identity === undefined ? bearer : { ...bearer, "x-agent-id": options.identity }
+  let sessionId
+  async function ensureSession() {
+    if (sessionId !== undefined) return sessionId
+    const init = await transport.send(
+      "/mcp",
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "agentchat-dsh", version: "0.1.0" },
+        },
+      },
+      mcpHeaders(base, undefined),
+    )
+    expectStatus(200, init, "POST /mcp initialize")
+    if (init.sessionId === undefined) {
+      throw new HubError("protocol", undefined, "initialize returned no mcp-session-id")
+    }
+    sessionId = init.sessionId
+    await transport.send(
+      "/mcp",
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      mcpHeaders(bearer, sessionId),
+    )
+    return sessionId
+  }
+  async function rpc(method, params, extra) {
+    const sid = await ensureSession()
+    const response = await transport.send(
+      "/mcp",
+      { jsonrpc: "2.0", id: 2, method, params },
+      mcpHeaders({ ...bearer, ...extra }, sid),
+    )
+    const parsed = parseSseJson(expectStatus(200, response, `POST /mcp ${method}`))
+    if (method === "tools/list") {
+      const tools = /** @type {{result?: {tools?: unknown}}} */ (parsed)["result"]?.["tools"]
+      return Array.isArray(tools) ? tools : []
+    }
+    const result = toolResultOf(parsed)
+    if (result.isError) {
+      throw new HubToolError(codeFromToolText(result.text), result.text)
+    }
+    return result.text
+  }
+  return {
+    list: () => rpc("tools/list", {}),
+    call: (name, args, taskRef) =>
+      rpc(
+        "tools/call",
+        { name, arguments: args },
+        taskRef === undefined ? {} : { "x-agentchat-session": taskRef },
+      ),
+    reset: () => void (sessionId = undefined),
+  }
+}
+
+/**
  * 归一化 `/internal/wake` 的 `messages`：逐项守卫 `id`/`fromAgentId`/`body` 均为字符串，
  * **静默丢弃**形状不符项（一条坏消息不得拖垮整轮注入）。
  *
