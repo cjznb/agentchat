@@ -708,6 +708,21 @@ describe("group op:add 入群 system 通知（Task 5）", () => {
 })
 
 describe("错误契约（DoD ③）", () => {
+  it("rejects self-send with stable [self_send] code (BUG-SELF-SEND)", async () => {
+    const self = makeAgent("self-sender")
+    const client = await connect(self.id)
+    const result = await callTool(client, "send", { to: self.id, body: "to myself" })
+    expect(textOf(result)).toContain("[self_send]")
+  })
+
+  it("maps a previously unmapped domain error to a stable [agent_not_found] (mapping audit)", async () => {
+    const agent = makeAgent("vanish-sender")
+    const client = await connect(agent.id)
+    db.prepare("DELETE FROM agents WHERE id = ?").run(agent.id)
+    const result = await callTool(client, "send", { to: "any-peer", body: "hi" })
+    expect(textOf(result)).toContain("[agent_not_found]")
+  })
+
   it("turns RecipientNotFound, use_shout_tool and missing identity into tool errors", async () => {
     const sender = makeAgent("mcp-err-sender")
     const client = await connect(sender.id)

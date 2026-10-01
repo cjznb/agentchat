@@ -150,6 +150,15 @@ export class NotParticipantError extends Error {
   }
 }
 
+/** 发起对自身的发送（无意义，显式拒绝）—— 与 `SelfAskError`（self_ask）同风格先例。 */
+export class SelfSendError extends Error {
+  readonly code = "self_send"
+  constructor(readonly agentId: string) {
+    super(`agent ${agentId} cannot send a message to itself`)
+    this.name = "SelfSendError"
+  }
+}
+
 function isHuman(agent: Agent): boolean {
   return agent.vendor === "human"
 }
@@ -320,6 +329,11 @@ function routeWake(
 
 /** 同步投递核心（无 `wait` 路径与 `wait` 路径共用）：入库后发布消息事件（决议 5 发布点 1）。 */
 function deliver(db: Db, input: SendMessageInput): SendMessageResult {
+  // 自发消息守卫（BUG-SELF-SEND）：先于一切解析单点拒绝，MCP 与 HTTP 两径共用。
+  if (input.to === input.from) {
+    console.warn(`[agentchat] self-send rejected (agent=${input.from})`)
+    throw new SelfSendError(input.from)
+  }
   const sender = getAgent(db, input.from)
   if (sender === undefined) throw new AgentNotFoundError(input.from)
   const conversation = resolveConversation(db, sender, input.to)

@@ -34,10 +34,21 @@ function errorCode(error: Error): string | undefined {
   return typeof value === "string" ? value : undefined
 }
 
+/**
+ * 稳定码补映射（错误映射审计）：以下类在工具路径会被抛出但**无** `code`
+ * （或携带驱动层原始 code），原样透出即 raw —— 按类名归一为稳定错误码；
+ * 自带 `code` 的域错误（RecipientNotFound / SelfSendError / RegistrationError…）不经此表。
+ */
+const STABLE_CODE_BY_NAME: Record<string, string> = {
+  AgentNotFoundError: "agent_not_found",
+  SqliteError: "storage_error",
+  ZodError: "invalid_input",
+}
+
 /** 错误 → `{isError:true}` 文本结果（`Name: message [code]`），handler 不向上抛。 */
 export function errorResult(error: unknown): CallToolResult {
   const err = error instanceof Error ? error : new Error(String(error))
-  const code = errorCode(err)
+  const code = STABLE_CODE_BY_NAME[err.name] ?? errorCode(err)
   const suffix = code === undefined ? "" : ` [${code}]`
   return { content: [{ type: "text", text: `${err.name}: ${err.message}${suffix}` }], isError: true }
 }

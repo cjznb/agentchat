@@ -224,6 +224,10 @@ export function uiRoutes(db?: Db): Hono {
         })
         return c.json({ ok: true, ...result })
       } catch (error) {
+        // 自发消息守卫（BUG-SELF-SEND，core/messaging SelfSendError）：与 MCP 径同码，HTTP 侧 409。
+        if (error instanceof Error && error.name === "SelfSendError") {
+          return c.json({ ok: false, error: "self_send" }, 409)
+        }
         if (error instanceof RecipientNotFound) return c.json({ ok: false, error: error.code }, 404)
         if (error instanceof NotParticipantError) return c.json({ ok: false, error: error.code }, 403)
         if (error instanceof ContainerNotChatTargetError) {
