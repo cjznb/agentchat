@@ -10,10 +10,8 @@ import { Hono } from "hono"
 import { z } from "zod"
 import { conversationRoster, rosterTree } from "../core/agents"
 import {
-  addParticipant as gatedAddParticipant,
   applyAddParticipant,
   ContainerNotChatTargetError,
-  createGroup as gatedCreateGroup,
   NotParticipantError,
   RecipientNotFound,
   sendMessage,
@@ -27,33 +25,26 @@ import {
   groupAddPayloadSchema,
   groupCreatePayloadSchema,
   postDecision,
-  postSystem,
   shoutPayloadSchema,
   type DecidedApproval,
 } from "../core/permissions"
 import { MessageNotFoundError, NotRevocableError, NotSenderError, revokeMessage } from "../core/revoke"
-import { agentCard, conversationList, conversationMessages, groupList } from "../core/ui-queries"
+import { agentCard, conversationList, conversationMessages } from "../core/ui-queries"
 import { config } from "../config"
 import { openDb, type Db } from "../db"
-import { agentDisplayName, getAgent } from "../store/agents"
+import { getAgent } from "../store/agents"
 import { getApproval, listApprovals, type Approval } from "../store/approvals"
-import {
-  createDm,
-  createGroup,
-  deleteConversationCascade,
-  getConversation,
-  isParticipant,
-  listParticipants,
-  removeParticipant,
-} from "../store/conversations"
+import { createDm, createGroup, getConversation } from "../store/conversations"
 import { latestInConversation } from "../store/messages"
 import { markRead } from "../store/read_states"
 import { handleAgentRename } from "./agent-rename"
+import { groupRoutes } from "./groups"
 
 // 生产缺省连接：首个 roster 请求时按 `config.dbPath` 打开并复用（进程单例）。
+// 修复 C1：导出给 routes/groups.ts 复用（群路由由下方 .route 接线时注入）。
 let defaultDb: Db | undefined
 
-function resolveDb(db: Db | undefined): Db {
+export function resolveDb(db: Db | undefined): Db {
   if (db !== undefined) return db
   defaultDb ??= openDb(config.dbPath)
   return defaultDb
@@ -63,11 +54,6 @@ const decisionBodySchema = z.object({ decision: z.enum(["approve", "reject"]) })
 // body + 结构化提及（spec §3.1；仅群会话参与 T 解析，shout 入口忽略 mentions）。
 const sendBodySchema = z.object({ body: z.string(), mentions: z.array(z.string()).optional() })
 const ensureDmBodySchema = z.object({ to: z.string().min(1) })
-const groupBodySchema = z.object({
-  name: z.string().min(1),
-  memberIds: z.array(z.string()).optional(),
-})
-const memberBodySchema = z.object({ agentId: z.string().min(1) })
 
 /**
  * 批准后的实际执行（决议 1：执行在路由层 —— 本层同时 import permissions 与
@@ -266,87 +252,9 @@ export function uiRoutes(db?: Db): Hono {
         throw error
       }
     })
-    // Task 9：群列表 / 建群（human 走既有 gate → 即时执行零审批）。
-    .get("/api/groups", (c) => c.json({ groups: groupList(resolveDb(db)) }))
-    .post("/api/groups", async (c) => {
-      const database = resolveDb(db)
-      const parsed = groupBodySchema.safeParse(await c.req.json().catch(() => undefined))
-      if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
-      const outcome = gatedCreateGroup(database, {
-        name: parsed.data.name,
-        createdBy: ensureHuman(database).id,
-        ...(parsed.data.memberIds === undefined ? {} : { memberIds: parsed.data.memberIds }),
-      })
-      return "approved" in outcome
-        ? c.json({ ok: true, group: outcome.approved })
-        : c.json({ ok: true, approval: outcome.approval })
-    })
-    .post("/api/groups/:id/members", async (c) => {
-      const database = resolveDb(db)
-      const parsed = memberBodySchema.safeParse(await c.req.json().catch(() => undefined))
-      if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
-      const outcome = gatedAddParticipant(database, {
-        conversationId: c.req.param("id"),
-        agentId: parsed.data.agentId,
-        invitedBy: ensureHuman(database).id,
-      })
-      return "approved" in outcome
-        ? c.json({ ok: true })
-        : c.json({ ok: true, approval: outcome.approval })
-    })
-    // 批次2轮D F2：移除群成员（仅人类 UI，不新增 MCP 工具）。守卫序：非法 body 400 →
-    // 会话不存在 404 → 非群会话 400 → 目标不在群 404 → 删到仅剩 1 人 409（稳定码）。
-    .post("/api/groups/:id/members/remove", async (c) => {
-      const database = resolveDb(db)
-      const parsed = memberBodySchema.safeParse(await c.req.json().catch(() => undefined))
-      if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
-      const conversation = getConversation(database, c.req.param("id"))
-      if (conversation === undefined) {
-        return c.json({ ok: false, error: "conversation_not_found" }, 404)
-      }
-      if (conversation.kind !== "group") return c.json({ ok: false, error: "not_group" }, 400)
-      const targetId = parsed.data.agentId
-      if (!isParticipant(database, conversation.id, targetId)) {
-        return c.json({ ok: false, error: "not_in_group" }, 404)
-      }
-      if (listParticipants(database, conversation.id).length <= 1) {
-        return c.json({ ok: false, error: "cannot_remove_last_member" }, 409)
-      }
-      const target = getAgent(database, targetId)
-      removeParticipant(database, conversation.id, targetId)
-      // 移出通知沿入群通知（joinNotice）同款：kind=system、postSystem 直写+publish、0 wake。
-      const roster = listParticipants(database, conversation.id).flatMap((participant) => {
-        const agent = getAgent(database, participant.agentId)
-        return agent === undefined ? [] : [`${agentDisplayName(agent)}(${agent.id.slice(0, 8)})`]
-      })
-      postSystem(database, {
-        conversationId: conversation.id,
-        fromAgentId: ensureHuman(database).id,
-        body: `「${target === undefined ? targetId : agentDisplayName(target)}」已移出群「${conversation.name ?? conversation.key}」。成员：${roster.join("、")}`,
-        meta: { action: "group_remove", agentId: targetId },
-        idempotencyKey: `group-remove:${conversation.id}:${targetId}`,
-      })
-      return c.json({ ok: true })
-    })
-    // 批次2轮D F2：解散群聊（仅人类 UI）。先广播「群已解散」system 条目（复用既有
-    // message 封套、0 wake，在线端即时看到并移除会话），再按外键现实级联删除。
-    .post("/api/groups/:id/dissolve", (c) => {
-      const database = resolveDb(db)
-      const conversation = getConversation(database, c.req.param("id"))
-      if (conversation === undefined) {
-        return c.json({ ok: false, error: "conversation_not_found" }, 404)
-      }
-      if (conversation.kind !== "group") return c.json({ ok: false, error: "not_group" }, 400)
-      postSystem(database, {
-        conversationId: conversation.id,
-        fromAgentId: ensureHuman(database).id,
-        body: `群「${conversation.name ?? conversation.key}」已解散。`,
-        meta: { action: "group_dissolve", agentId: conversation.id },
-        idempotencyKey: `group-dissolve:${conversation.id}`,
-      })
-      deleteConversationCascade(database, conversation.id)
-      return c.json({ ok: true })
-    })
+    // 群路由（批次2修复 C1：GET/POST /api/groups、成员增删、解散整体拆至
+    // routes/groups.ts；此处以 .route 接线，守卫链/错误码/载荷零变化）。
+    .route("/", groupRoutes(db, resolveDb))
     // Task 9：全员喊话（human → gate 即时执行）。
     .post("/api/shout", async (c) => {
       const database = resolveDb(db)

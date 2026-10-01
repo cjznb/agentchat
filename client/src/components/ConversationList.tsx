@@ -10,6 +10,8 @@
  * - 批次2 轮C (C1)：顶部「群聊」分组头——不可点击 header + 箭头切换、默认收起、
  *   展开态持久化 `agentchat:groupSectionExpanded`；群行全部挂分组区、分组整体
  *   置顶于普通会话之上（喊话仍最顶，非群行相对原序不变）；分组头不聚合未读。
+ *   修复 (C1)：分组区（状态/持久化/header/行区）抽至 `GroupSection.tsx`，本文件
+ *   只负责分区（喊话顶置 → 分组区 → 其余行）与行渲染，行为零变化。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { RosterNode } from "../../../shared/contracts"
@@ -25,35 +27,16 @@ import {
 import { useStore } from "../store"
 import { conversationMentioned } from "../unread"
 import { Badge, Body, MentionBadge, StatusDot } from "./conversation-row"
+import { GroupSection, GROUP_SECTION_KEY } from "./GroupSection"
+
+// 分组展开态键仍从本模块导出（既有消费方导入路径不变，实现已移至 GroupSection）。
+export { GROUP_SECTION_KEY }
 
 function safeStorage(): StorageLike | null {
   try {
     return typeof localStorage === "undefined" ? null : localStorage
   } catch {
     return null // 隐私模式禁用存储：不持久化展开态
-  }
-}
-
-// ── C1「群聊」分组展开态（键沿 `agentchat:` 前缀，风格照 fold.ts 绑定） ──
-export const GROUP_SECTION_KEY = "agentchat:groupSectionExpanded"
-
-/** 读取分组展开态：缺省 / 坏值 → 收起（默认收起是冻结语义）。 */
-function loadGroupSection(storage: StorageLike | null): boolean {
-  if (storage === null) return false
-  try {
-    return storage.getItem(GROUP_SECTION_KEY) === "true"
-  } catch {
-    return false
-  }
-}
-
-/** 写入分组展开态；隐私模式禁用存储时静默跳过。 */
-function saveGroupSection(storage: StorageLike | null, open: boolean): void {
-  if (storage === null) return
-  try {
-    storage.setItem(GROUP_SECTION_KEY, String(open))
-  } catch {
-    /* 忽略写入失败 */
   }
 }
 
@@ -211,8 +194,6 @@ export interface ConversationListProps {
 export function ConversationList({ onCreateGroup }: ConversationListProps = {}) {
   const { state, openAndRead } = useStore()
   const [expanded, setExpanded] = useState<readonly string[]>(() => loadExpandedRoots(safeStorage()))
-  // C1：群聊分组默认收起；展开态持久化见下。
-  const [groupOpen, setGroupOpen] = useState<boolean>(() => loadGroupSection(safeStorage()))
 
   const rows = useMemo(
     () => foldConversations(state.conversations, state.roster),
@@ -242,15 +223,6 @@ export function ConversationList({ onCreateGroup }: ConversationListProps = {}) 
     saveExpandedRoots(safeStorage(), expanded)
   }, [expanded])
 
-  // C1 分组展开态持久化（同 F6 幂等模式）。
-  const groupPersistedRef = useRef<string | null>(null)
-  useEffect(() => {
-    const serialized = String(groupOpen)
-    if (groupPersistedRef.current === serialized) return
-    groupPersistedRef.current = serialized
-    saveGroupSection(safeStorage(), groupOpen)
-  }, [groupOpen])
-
   const open = useCallback(
     (conversationId: string) => openAndRead(conversationId),
     [openAndRead],
@@ -270,28 +242,11 @@ export function ConversationList({ onCreateGroup }: ConversationListProps = {}) 
             <FlatItem key={row.id} row={row} activeId={state.openConversationId} onOpen={open} roster={state.roster} />
           ))}
           {groupRows.length === 0 ? null : (
-            <li className="group-section" data-testid="group-section">
-              <div className="group-section-header" data-testid="group-section-header">
-                <button
-                  className="group-section-toggle"
-                  data-testid="group-section-toggle"
-                  aria-expanded={groupOpen}
-                  aria-label={`${groupOpen ? "收起" : "展开"}群聊分组`}
-                  onClick={() => setGroupOpen((previous) => !previous)}
-                  type="button"
-                >
-                  <span aria-hidden="true">{groupOpen ? "▾" : "▸"}</span>
-                </button>
-                <span className="group-section-title">群聊</span>
-              </div>
-              {groupOpen ? (
-                <ul className="group-section-rows">
-                  {groupRows.map((row) => (
-                    <FlatItem key={row.id} row={row} activeId={state.openConversationId} onOpen={open} roster={state.roster} />
-                  ))}
-                </ul>
-              ) : null}
-            </li>
+            <GroupSection>
+              {groupRows.map((row) => (
+                <FlatItem key={row.id} row={row} activeId={state.openConversationId} onOpen={open} roster={state.roster} />
+              ))}
+            </GroupSection>
           )}
           {otherRows.map((row) =>
             row.kind === "root" ? (
