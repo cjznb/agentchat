@@ -8,11 +8,19 @@
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createApp } from "../../server/index"
 import { openDb, type Db } from "../../server/db"
 import { insertAgent } from "../../server/store/agents"
 import { sendMessage } from "../../server/core/messaging"
+import { retire } from "../../server/core/agents"
+
+// ④ 500 注入（prune-report.md:56「部分失败 500 路径无专项用例」）：retire 缺省仍代理真实现，
+// 用例内临时改写为「第 2 次调用抛错」触发部分失败分支，finally 恢复（既有执行用例不受影响）。
+vi.mock("../../server/core/agents", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../server/core/agents")>()
+  return { ...original, retire: vi.fn(original.retire) }
+})
 
 const NOW = Date.parse("2026-09-30T12:00:00.000Z")
 const HOUR = 3_600_000
@@ -124,5 +132,36 @@ describe("POST /api/admin/prune-sessions —— 执行", () => {
     const again = await post(app, { execute: true })
     const againBody = (await again.json()) as { ok: boolean; count: number }
     expect(againBody.count).toBe(0)
+  })
+
+  it("④ 部分失败注入：第 2 个 retire 抛错 → 500 {ok:false, error:'prune_failed', retired, count}", async () => {
+    const { db, app } = fixture()
+    historicalSession(db, "stale-a", HOUR + 1)
+    historicalSession(db, "stale-b", HOUR + 2)
+    const mocked = vi.mocked(retire)
+    const delegate = mocked.getMockImplementation()
+    if (delegate === undefined) throw new Error("缺少 vi.mock 工厂代理实现")
+    let calls = 0
+    mocked.mockImplementation((database, id) => {
+      calls += 1
+      if (calls === 2) throw new Error("注入：第 2 个 retire 失败")
+      return delegate(database, id)
+    })
+    try {
+      const response = await post(app, { execute: true })
+      expect(response.status).toBe(500)
+      const body = (await response.json()) as {
+        ok: boolean
+        error: string
+        retired: { id: string; name: string }[]
+        count: number
+      }
+      expect(body.ok).toBe(false)
+      expect(body.error).toBe("prune_failed")
+      expect(body.count).toBe(1)
+      expect(body.retired).toHaveLength(1)
+    } finally {
+      mocked.mockImplementation(delegate)
+    }
   })
 })
