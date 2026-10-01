@@ -101,6 +101,34 @@ export function foldTree(
   return sortByStatus(roster.filter((node) => !isHuman(node))).map((node) => toRow(node, unread))
 }
 
+/** 选人器分拣结果：主列表（含在线/忙碌后代）+ 离线/历史会话折叠栏。 */
+export interface PickerPartition {
+  readonly main: readonly TreeRow[]
+  readonly legacy: readonly TreeRow[]
+}
+
+/**
+ * 选人器「离线/历史会话」分拣（修2A；纯函数）：
+ * 某**根级子树**（节点及其全部后代）无任何 `online`/`busy` 成员 → 整棵移入折叠栏；
+ * 含在线/忙碌后代的子树留主列表（活子树内的离线叶子留在原父下不动）。
+ * `logical` 恒非在线（`kind === "logical"` 不参与在线判定）；`retired` 状态本就非在线。
+ */
+export function partitionPickerRows(rows: readonly TreeRow[]): PickerPartition {
+  const main: TreeRow[] = []
+  const legacy: TreeRow[] = []
+  for (const row of rows) {
+    if (subtreeHasLive(row)) main.push(row)
+    else legacy.push(row)
+  }
+  return { main, legacy }
+}
+
+/** 子树内是否存在在线/忙碌成员（logical 节点自身不计入）。 */
+function subtreeHasLive(row: TreeRow): boolean {
+  const live = !row.logical && (row.node.status === "online" || row.node.status === "busy")
+  return live || row.children.some(subtreeHasLive)
+}
+
 // ── 视觉纯映射：role 标签颜色 / 状态点（spec §11.2） ───────────────────
 
 export type RoleTone = "executor" | "organizer" | "supervisor" | "other" | "none"

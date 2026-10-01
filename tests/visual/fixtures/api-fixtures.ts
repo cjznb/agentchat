@@ -309,7 +309,7 @@ export const groupListResponse: { groups: readonly GroupEntry[] } = {
       key: "group:g-001",
       createdBy: HUMAN_ID,
       createdAt: T0 - 900_000,
-      members: [HUMAN_ID, ROOT_A, CHILD_A1, CHILD_A2, ROOT_LONG],
+      members: [HUMAN_ID, ROOT_A, CHILD_A1, CHILD_A2],
     },
   ],
 }

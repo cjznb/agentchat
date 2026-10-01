@@ -101,7 +101,11 @@ export function ContactCard({
           <p className="contact-kind">{node.kind === "logical" ? "逻辑节点" : "运行时节点"}</p>
           <h2 data-testid="contact-name">{name}</h2>
         </div>
-        {editing ? null : (
+        {editing ? (
+          <span className="contact-rename contact-rename-slot" aria-hidden="true">
+            ✎
+          </span>
+        ) : (
           <button className="contact-rename" data-testid="contact-rename" aria-label="修改展示名" title="修改展示名" onClick={() => rename.start(node.id, name)} type="button">
             ✎
           </button>

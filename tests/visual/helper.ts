@@ -1,8 +1,14 @@
 /**
- * 视觉仪器 helper —— 层1 确定性溢出断言 + 层2 区域截图产图 + 路由拦截 mock。
+ * 视觉仪器 helper —— 层1 确定性溢出断言（**按轴豁免**，V1.1） + 层2 区域截图产图 + 路由拦截 mock。
  *
- * 白名单（冻结设计 4）：① overflow-x/y 计算值为 auto|scroll 的故意滚动区
- * ② TEXTAREA/INPUT/SELECT ③ 类名含 composer-mention。
+ * 层1 按轴白名单（V1.1 冻结设计）：
+ * ① **显式垂直滚动容器类清单**（styles.css 中 `overflow-y: auto|scroll` 的容器类，以 grep 为准）：
+ *    清单内容器**只豁免 Y 轴**（`scrollHeight>clientHeight` 不报），**X 轴照报** ——
+ *    旧「整元素豁免」会把 `.group-info`（overflow-y:auto）的横向溢出一并吞掉，修 1 这类
+ *    bug 层1 永远扫不到。
+ * ② TEXTAREA/INPUT/SELECT 元素级豁免（不变）。
+ * ③ 类名含 composer-mention 豁免（不变）。
+ * ④ 非清单内元素维持原判定：该轴非 auto|scroll 时溢出 >1px 即报。
  * 违规输出 {path/tag/class/超出像素} 清单：写入
  * `test-results/visual/<场景>-overflow.json` 并打进断言失败消息。
  * 扫描函数以**真函数**传入 evaluate（闭包外变量禁止）；DOM 访问经
@@ -91,7 +97,7 @@ export async function openApp(page: Page, conversationId?: string): Promise<void
   await expect(page.getByTestId("app-shell")).toBeVisible()
 }
 
-/** 层1：遍历 DOM，按白名单判定溢出违规（阈值超出 clientWidth/Height 1px 即违规）。 */
+/** 层1：遍历 DOM，按**按轴**白名单判定溢出违规（阈值超出 clientWidth/Height 1px 即违规）。 */
 export async function scanOverflow(page: Page): Promise<readonly OverflowOffender[]> {
   return page.evaluate<OverflowOffender[]>(() => {
     const scope = globalThis as unknown as ScanScope
@@ -114,6 +120,18 @@ export async function scanOverflow(page: Page): Promise<readonly OverflowOffende
       }
       return parts.join(" > ")
     }
+    // V1.1 按轴白名单：垂直滚动容器类（styles.css `overflow-y: auto|scroll`，以 grep 为准）。
+    // 清单内只豁免 Y 轴，X 轴照报；其余元素维持原判定。
+    const verticalScrollClasses = [
+      "conversation-list",
+      "chat-scroll",
+      "org-tree",
+      "group-body",
+      "group-info",
+      "notif-aside",
+      "notif-list",
+      "settings-body",
+    ]
     const elements = scope.document.querySelectorAll("body *")
     for (let index = 0; index < elements.length; index += 1) {
       const element = elements[index]
@@ -127,8 +145,10 @@ export async function scanOverflow(page: Page): Promise<readonly OverflowOffende
       const canScrollY = style.overflowY === "auto" || style.overflowY === "scroll"
       const excessX = element.scrollWidth - element.clientWidth
       const excessY = element.scrollHeight - element.clientHeight
-      const overX = !canScrollX && excessX > 1
-      const overY = !canScrollY && excessY > 1
+      const classNames = className.split(" ").filter((name) => name.length > 0)
+      const isVerticalContainer = verticalScrollClasses.some((name) => classNames.includes(name))
+      const overX = isVerticalContainer ? excessX > 1 : !canScrollX && excessX > 1
+      const overY = isVerticalContainer ? false : !canScrollY && excessY > 1
       if (overX || overY) {
         offenders.push({
           path: pathOf(element),
