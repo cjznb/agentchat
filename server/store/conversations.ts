@@ -178,6 +178,31 @@ export function addParticipant(db: Db, input: AddParticipantInput): void {
   })
 }
 
+/** 移除会话成员行（F2 群成员移除）：仅删 participants 行；群/在群/至少一人守卫在路由层。 */
+export function removeParticipant(db: Db, conversationId: string, agentId: string): void {
+  db.prepare<[string, string]>(
+    "DELETE FROM participants WHERE conversation_id = ? AND agent_id = ?",
+  ).run(conversationId, agentId)
+}
+
+/**
+ * 解散会话级联删除（F2）：schema 外键无 `ON DELETE CASCADE` 且 `PRAGMA foreign_keys=ON`，
+ * 按被引用顺序手动处置 —— wake_jobs（引用 messages.seq）→ messages → read_states →
+ * participants → conversations，同一事务原子落库。
+ */
+export function deleteConversationCascade(db: Db, conversationId: string): void {
+  const tx = db.transaction((id: string): void => {
+    db.prepare<[string]>(
+      "DELETE FROM wake_jobs WHERE message_id IN (SELECT seq FROM messages WHERE conversation_id = ?)",
+    ).run(id)
+    db.prepare<[string]>("DELETE FROM messages WHERE conversation_id = ?").run(id)
+    db.prepare<[string]>("DELETE FROM read_states WHERE conversation_id = ?").run(id)
+    db.prepare<[string]>("DELETE FROM participants WHERE conversation_id = ?").run(id)
+    db.prepare<[string]>("DELETE FROM conversations WHERE id = ?").run(id)
+  })
+  tx(conversationId)
+}
+
 export function getConversation(db: Db, id: string): Conversation | undefined {
   const row = db
     .prepare<[string], ConversationRow>("SELECT * FROM conversations WHERE id = ?")

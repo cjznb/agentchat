@@ -27,6 +27,7 @@ import {
   groupAddPayloadSchema,
   groupCreatePayloadSchema,
   postDecision,
+  postSystem,
   shoutPayloadSchema,
   type DecidedApproval,
 } from "../core/permissions"
@@ -34,9 +35,17 @@ import { MessageNotFoundError, NotRevocableError, NotSenderError, revokeMessage 
 import { agentCard, conversationList, conversationMessages, groupList } from "../core/ui-queries"
 import { config } from "../config"
 import { openDb, type Db } from "../db"
-import { getAgent } from "../store/agents"
+import { agentDisplayName, getAgent } from "../store/agents"
 import { getApproval, listApprovals, type Approval } from "../store/approvals"
-import { createDm, createGroup, getConversation } from "../store/conversations"
+import {
+  createDm,
+  createGroup,
+  deleteConversationCascade,
+  getConversation,
+  isParticipant,
+  listParticipants,
+  removeParticipant,
+} from "../store/conversations"
 import { latestInConversation } from "../store/messages"
 import { markRead } from "../store/read_states"
 import { handleAgentRename } from "./agent-rename"
@@ -284,6 +293,59 @@ export function uiRoutes(db?: Db): Hono {
       return "approved" in outcome
         ? c.json({ ok: true })
         : c.json({ ok: true, approval: outcome.approval })
+    })
+    // 批次2轮D F2：移除群成员（仅人类 UI，不新增 MCP 工具）。守卫序：非法 body 400 →
+    // 会话不存在 404 → 非群会话 400 → 目标不在群 404 → 删到仅剩 1 人 409（稳定码）。
+    .post("/api/groups/:id/members/remove", async (c) => {
+      const database = resolveDb(db)
+      const parsed = memberBodySchema.safeParse(await c.req.json().catch(() => undefined))
+      if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
+      const conversation = getConversation(database, c.req.param("id"))
+      if (conversation === undefined) {
+        return c.json({ ok: false, error: "conversation_not_found" }, 404)
+      }
+      if (conversation.kind !== "group") return c.json({ ok: false, error: "not_group" }, 400)
+      const targetId = parsed.data.agentId
+      if (!isParticipant(database, conversation.id, targetId)) {
+        return c.json({ ok: false, error: "not_in_group" }, 404)
+      }
+      if (listParticipants(database, conversation.id).length <= 1) {
+        return c.json({ ok: false, error: "cannot_remove_last_member" }, 409)
+      }
+      const target = getAgent(database, targetId)
+      removeParticipant(database, conversation.id, targetId)
+      // 移出通知沿入群通知（joinNotice）同款：kind=system、postSystem 直写+publish、0 wake。
+      const roster = listParticipants(database, conversation.id).flatMap((participant) => {
+        const agent = getAgent(database, participant.agentId)
+        return agent === undefined ? [] : [`${agentDisplayName(agent)}(${agent.id.slice(0, 8)})`]
+      })
+      postSystem(database, {
+        conversationId: conversation.id,
+        fromAgentId: ensureHuman(database).id,
+        body: `「${target === undefined ? targetId : agentDisplayName(target)}」已移出群「${conversation.name ?? conversation.key}」。成员：${roster.join("、")}`,
+        meta: { action: "group_remove", agentId: targetId },
+        idempotencyKey: `group-remove:${conversation.id}:${targetId}`,
+      })
+      return c.json({ ok: true })
+    })
+    // 批次2轮D F2：解散群聊（仅人类 UI）。先广播「群已解散」system 条目（复用既有
+    // message 封套、0 wake，在线端即时看到并移除会话），再按外键现实级联删除。
+    .post("/api/groups/:id/dissolve", (c) => {
+      const database = resolveDb(db)
+      const conversation = getConversation(database, c.req.param("id"))
+      if (conversation === undefined) {
+        return c.json({ ok: false, error: "conversation_not_found" }, 404)
+      }
+      if (conversation.kind !== "group") return c.json({ ok: false, error: "not_group" }, 400)
+      postSystem(database, {
+        conversationId: conversation.id,
+        fromAgentId: ensureHuman(database).id,
+        body: `群「${conversation.name ?? conversation.key}」已解散。`,
+        meta: { action: "group_dissolve", agentId: conversation.id },
+        idempotencyKey: `group-dissolve:${conversation.id}`,
+      })
+      deleteConversationCascade(database, conversation.id)
+      return c.json({ ok: true })
     })
     // Task 9：全员喊话（human → gate 即时执行）。
     .post("/api/shout", async (c) => {

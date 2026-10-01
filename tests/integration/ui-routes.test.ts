@@ -268,6 +268,136 @@ describe("POST /api/groups/:id/members（入群 system 通知，Task 5）", () =
   })
 })
 
+// ── 批次2轮D F2：群成员移除 + 解散群聊（human UI 专属，不进 MCP 工具面） ──
+
+describe("POST /api/groups/:id/members/remove（移除成员）", () => {
+  it("removes the member and posts a kind:'system' notice to the remaining roster with zero wake", async () => {
+    const created = await post("/api/groups", { name: "t-d-remove", memberIds: [rootId] })
+    const createdJson = groupCreateResultSchema.parse(await created.json())
+    if (!("group" in createdJson)) throw new Error("human group creation must execute immediately")
+    const child = insertAgent(db, {
+      name: "t-d-child",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      parentId: rootId,
+    })
+    await post(`/api/groups/${createdJson.group.id}/members`, { agentId: child.id })
+
+    const res = await post(`/api/groups/${createdJson.group.id}/members/remove`, {
+      agentId: child.id,
+    })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ ok: true })
+    expect(isParticipant(db, createdJson.group.id, child.id)).toBe(false)
+
+    // 余下成员（human + root）即为群成员全集。
+    const after = groupListSchema.parse(await (await app.request("/api/groups")).json())
+    const listed = after.groups.find((group) => group.id === createdJson.group.id)
+    expect(new Set(listed?.members)).toEqual(new Set([humanId, rootId]))
+
+    // 通知形状：kind=system + 移出语义正文 + 余下成员在会话历史可见 + 0 wake job。
+    const notice = history(db, { conversationId: createdJson.group.id }).find(
+      (m) => m.kind === "system" && m.body.startsWith("「t-d-child」已移出群「t-d-remove」"),
+    )
+    if (notice === undefined) throw new Error("expected the removal system notice in the group")
+    expect(notice.body).toContain(`用户(${humanId.slice(0, 8)})`)
+    expect(notice.body).toContain(`ui-root(${rootId.slice(0, 8)})`)
+    for (const agentId of [humanId, rootId, child.id]) {
+      expect(getWakeJob(db, notice.seq, agentId)).toBeUndefined()
+    }
+  })
+
+  it("rejects last-member 409 / not-in-group 404 / non-group 400 / unknown 404 / bad body 400", async () => {
+    // 删到 0：仅剩 human 一人的群 → 409 稳定码。
+    const soloCreated = groupCreateResultSchema.parse(
+      await (await post("/api/groups", { name: "t-d-solo" })).json(),
+    )
+    if (!("group" in soloCreated)) throw new Error("human group creation must execute immediately")
+    const last = await post(`/api/groups/${soloCreated.group.id}/members/remove`, {
+      agentId: humanId,
+    })
+    expect(last.status).toBe(409)
+    expect(await last.json()).toEqual({ ok: false, error: "cannot_remove_last_member" })
+
+    const created = groupCreateResultSchema.parse(
+      await (await post("/api/groups", { name: "t-d-guard", memberIds: [rootId] })).json(),
+    )
+    if (!("group" in created)) throw new Error("human group creation must execute immediately")
+    const outsider = insertAgent(db, {
+      name: "t-d-outsider",
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      parentId: rootId,
+    })
+    const notIn = await post(`/api/groups/${created.group.id}/members/remove`, {
+      agentId: outsider.id,
+    })
+    expect(notIn.status).toBe(404)
+    expect(await notIn.json()).toEqual({ ok: false, error: "not_in_group" })
+
+    const nonGroup = await post(`/api/groups/${dmId}/members/remove`, { agentId: rootId })
+    expect(nonGroup.status).toBe(400)
+    expect(await nonGroup.json()).toEqual({ ok: false, error: "not_group" })
+
+    const unknown = await post("/api/groups/does-not-exist/members/remove", { agentId: rootId })
+    expect(unknown.status).toBe(404)
+    expect(await unknown.json()).toEqual({ ok: false, error: "conversation_not_found" })
+
+    const bad = await post(`/api/groups/${created.group.id}/members/remove`, {})
+    expect(bad.status).toBe(400)
+    expect(await bad.json()).toEqual({ ok: false, error: "invalid_body" })
+  })
+})
+
+describe("POST /api/groups/:id/dissolve（解散群聊）", () => {
+  it("broadcasts a kind:'system' dissolve notice in the message envelope, then deletes rows", async () => {
+    const created = groupCreateResultSchema.parse(
+      await (await post("/api/groups", { name: "t-d-gone", memberIds: [rootId] })).json(),
+    )
+    if (!("group" in created)) throw new Error("human group creation must execute immediately")
+    // 群内先落一条普通消息（消息行按外键现实随解散级联处置）。
+    const sent = await post(`/api/conversations/${created.group.id}/messages`, {
+      body: "解散前的话",
+    })
+    expect(sent.status).toBe(200)
+
+    const before = currentWsSeq()
+    const res = await post(`/api/groups/${created.group.id}/dissolve`, {})
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ ok: true })
+
+    // 广播复用既有 message 封套（type=message + kind=system + 「群已解散」语义）。
+    const frames = framesSince(before).map((frame) => JSON.stringify(frame))
+    expect(
+      frames.some(
+        (frame) =>
+          frame.includes('"type":"message"') &&
+          frame.includes('"kind":"system"') &&
+          frame.includes("已解散"),
+      ),
+    ).toBe(true)
+
+    // 落地：participants + conversation 删除；消息行随级联删除；列表不再含该群。
+    expect(getConversation(db, created.group.id)).toBeUndefined()
+    expect(isParticipant(db, created.group.id, humanId)).toBe(false)
+    expect(isParticipant(db, created.group.id, rootId)).toBe(false)
+    expect(history(db, { conversationId: created.group.id })).toEqual([])
+    const list = groupListSchema.parse(await (await app.request("/api/groups")).json())
+    expect(list.groups.some((group) => group.id === created.group.id)).toBe(false)
+  })
+
+  it("rejects a non-group conversation (400) and an unknown conversation (404)", async () => {
+    const nonGroup = await post(`/api/groups/${dmId}/dissolve`, {})
+    expect(nonGroup.status).toBe(400)
+    expect(await nonGroup.json()).toEqual({ ok: false, error: "not_group" })
+    const unknown = await post("/api/groups/does-not-exist/dissolve", {})
+    expect(unknown.status).toBe(404)
+    expect(await unknown.json()).toEqual({ ok: false, error: "conversation_not_found" })
+  })
+})
+
 describe("POST /api/shout", () => {
   it("broadcasts a human shout into the shout conversation", async () => {
     const res = await post("/api/shout", { body: "everyone" })

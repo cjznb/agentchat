@@ -177,6 +177,24 @@ export function addGroupMember(
   )
 }
 
+/** 移除群成员（F2，人类 UI 专属；不进 MCP 工具面）。非 2xx 抛错。 */
+export async function removeGroupMember(conversationId: string, agentId: string): Promise<void> {
+  const response = await fetch(
+    `/api/groups/${encodeURIComponent(conversationId)}/members/remove`,
+    postInit({ agentId }),
+  )
+  if (!response.ok) throw new Error("remove_member_failed")
+}
+
+/** 解散群聊（F2，人类 UI 专属；不进 MCP 工具面）。非 2xx 抛错。 */
+export async function dissolveGroup(conversationId: string): Promise<void> {
+  const response = await fetch(
+    `/api/groups/${encodeURIComponent(conversationId)}/dissolve`,
+    postInit({}),
+  )
+  if (!response.ok) throw new Error("dissolve_group_failed")
+}
+
 export function shout(body: string): Promise<ShoutResult> {
   return request("/api/shout", shoutResultSchema, postInit({ body }))
 }

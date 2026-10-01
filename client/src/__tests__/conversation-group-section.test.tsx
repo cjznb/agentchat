@@ -6,6 +6,9 @@
  *       分组整体置顶于非群行之上、非群行原序回归）。
  * C2 — GroupInfo「添加成员」弹窗多选（遮罩+面板+MemberPicker 内嵌、确认走既有
  *       addGroupMember action、取消/Esc/遮罩关闭不提交、旧 select 入口移除）。
+ * 批次2 轮D (F2)：
+ * D  — 成员行「移出群聊」两步确认（确认调 removeGroupMember + 刷新、取消不调）、
+ *       底部「解散群聊」alertdialog 确认（调 dissolveGroup + 回列表、取消无副作用）。
  * 无 React 测试库：`react-dom/client` + `react#act` 直接渲染（jsdom）。
  */
 import { act } from "react"
@@ -24,8 +27,10 @@ vi.mock("../store", () => ({
 }))
 
 vi.mock("../api", () => ({
-  listGroups: vi.fn(async () => [{ id: "g1", name: "测试群", members: [] }]),
+  listGroups: vi.fn(async () => [{ id: "g1", name: "测试群", members: ["n1", "n2"] }]),
   addGroupMember: vi.fn(async () => ({})),
+  removeGroupMember: vi.fn(async () => undefined),
+  dissolveGroup: vi.fn(async () => undefined),
   renameAgent: vi.fn(async () => ({})),
   renameErrorMessage: vi.fn(() => "改名失败"),
   ApiError: class ApiError extends Error {},
@@ -184,6 +189,7 @@ describe("C1 会话列表群聊分组头", () => {
     click(toggle)
     click(toggle)
     expect(row(el, "g1")).toBeNull()
+    expect(row(el, "g2")).toBeNull()
     expect(localStorage.getItem(GROUP_KEY)).toBe("false")
     expect(find(el, "group-section-toggle")?.getAttribute("aria-expanded")).toBe("false")
   })
@@ -324,5 +330,80 @@ describe("C2 GroupInfo 添加成员弹窗", () => {
     await act(async () => {})
     expect(find(el, "member-add-dialog")).toBeNull()
     expect(api.addGroupMember).not.toHaveBeenCalled()
+  })
+})
+
+// ── 批次2 轮D：F2 成员移除 + 解散群聊 ──────────────────────────────
+
+describe("D GroupInfo 移除成员 + 解散群聊", () => {
+  beforeEach(() => {
+    storeState.roster = [
+      makeNode("n1", "执行者", "runtime"),
+      makeNode("n2", "成员乙", "runtime"),
+    ]
+    storeState.conversations = []
+    storeState.openConversationId = null
+  })
+
+  async function mountInfo(onClose: () => void): Promise<HTMLDivElement> {
+    const el = mount(<GroupInfo conversationId="g1" onClose={onClose} />)
+    await act(async () => {})
+    return el
+  }
+
+  it("成员行存在移除按钮 → 两步确认 → removeGroupMember 被调用且列表刷新", async () => {
+    const api = await import("../api")
+    const el = await mountInfo(() => {})
+    expect(find(el, "member-remove")).not.toBeNull()
+    click(find(el, "member-remove"))
+    expect(find(el, "member-remove-confirm")).not.toBeNull()
+    // 初始载入 1 次 + 成功后 refresh 1 次。
+    expect(api.listGroups).toHaveBeenCalledTimes(1)
+    click(find(el, "member-remove-yes"))
+    await act(async () => {})
+    expect(api.removeGroupMember).toHaveBeenCalledWith("g1", "n1")
+    expect(api.listGroups).toHaveBeenCalledTimes(2)
+    expect(find(el, "member-remove-confirm")).toBeNull()
+  })
+
+  it("确认态点「取消」→ removeGroupMember 不被调用", async () => {
+    const api = await import("../api")
+    const el = await mountInfo(() => {})
+    click(find(el, "member-remove"))
+    expect(find(el, "member-remove-confirm")).not.toBeNull()
+    click(find(el, "member-remove-no"))
+    await act(async () => {})
+    expect(find(el, "member-remove-confirm")).toBeNull()
+    expect(api.removeGroupMember).not.toHaveBeenCalled()
+    expect(api.listGroups).toHaveBeenCalledTimes(1)
+  })
+
+  it("解散按钮 → alertdialog 显式确认 → dissolveGroup 被调用且回到列表", async () => {
+    const api = await import("../api")
+    const onClose = vi.fn()
+    const el = await mountInfo(onClose)
+    expect(find(el, "group-dissolve-open")).not.toBeNull()
+    click(find(el, "group-dissolve-open"))
+    const dialog = find(el, "dissolve-dialog")
+    expect(dialog).not.toBeNull()
+    expect(dialog?.getAttribute("role")).toBe("alertdialog")
+    expect(find(el, "dissolve-confirm")).not.toBeNull()
+    click(find(el, "dissolve-confirm"))
+    await act(async () => {})
+    expect(api.dissolveGroup).toHaveBeenCalledWith("g1")
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it("解散确认对话点「取消」→ 无副作用（不调 action、不回列表）", async () => {
+    const api = await import("../api")
+    const onClose = vi.fn()
+    const el = await mountInfo(onClose)
+    click(find(el, "group-dissolve-open"))
+    expect(find(el, "dissolve-dialog")).not.toBeNull()
+    click(find(el, "dissolve-cancel"))
+    await act(async () => {})
+    expect(find(el, "dissolve-dialog")).toBeNull()
+    expect(api.dissolveGroup).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
   })
 })
