@@ -9,6 +9,8 @@
  * 批次2 轮D (F2)：
  * D  — 成员行「移出群聊」两步确认（确认调 removeGroupMember + 刷新、取消不调）、
  *       底部「解散群聊」alertdialog 确认（调 dissolveGroup + 回列表、取消无副作用）。
+ * 批次2 修复 (M1)：
+ * M1 — 分区渲染 DOM 级回归锁：shout 行默认可见且 DOM 先于群分组头，群分组默认收起。
  * 无 React 测试库：`react-dom/client` + `react#act` 直接渲染（jsdom）。
  */
 import { act } from "react"
@@ -241,6 +243,32 @@ describe("C1 会话列表群聊分组头", () => {
     const el = mount(<ConversationList />)
     const header = find(el, "group-section-header")
     expect(header?.querySelector('[data-testid="conversation-item"]')).toBeNull()
+  })
+
+  // ── M1：分区渲染 DOM 级回归锁（此前仅有 fold.test.ts 数据级 + 受损 e2e） ──
+
+  it("M1：shout 行默认可见且 DOM 先于群分组头，群行默认收起仍不渲染", () => {
+    storeState.conversations = [
+      conversation("sh1", "group", "shout", "全员喊话", 200),
+      conversation("g1", "group", "g1", "产品群", 100),
+      conversation("d1", "dm", "dm:h1_n1", "节点一私聊", 50),
+    ]
+    const el = mount(<ConversationList />)
+    const shout = el.querySelector('[data-testid="conversation-item"][data-kind="shout"]')
+    expect(shout).not.toBeNull()
+    const header = find(el, "group-section-header")
+    expect(header).not.toBeNull()
+    // DOM 顺序：shoutRows 先于群分组头（分区渲染，不聚合进分组区）。
+    expect(
+      (shout as Node).compareDocumentPosition(header as Node) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    // shout 行不属于群分组区（header 父级 = group-section，不含 shout）。
+    expect(header?.parentElement?.contains(shout)).toBe(false)
+    // 群分组默认收起：分区不改变冻结的默认收起语义。
+    expect(el.querySelector('[data-testid="conversation-item"][data-kind="group"]')).toBeNull()
+    // 非群行照常可见（分区不吞其他行）。
+    expect(row(el, "d1")).not.toBeNull()
   })
 })
 

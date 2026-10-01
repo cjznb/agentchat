@@ -22,6 +22,8 @@ test("folds conversations: shout pinned, human hidden, accordion, badge clears o
   const running = await start({ port: 0, db, home, hubTokenPath: join(home, "hub_token") })
   try {
     seedList(db, home)
+    // C1 默认收起：断言「cl-group 顶层可见」需预置分组展开态（Playwright 惯例 addInitScript，导航前生效）。
+    await page.addInitScript("localStorage.setItem('agentchat:groupSectionExpanded', 'true')")
     await page.goto(`${running.url}/`)
 
     // 喊话置顶：列表首项即喊话频道（`data-kind="shout"`）。

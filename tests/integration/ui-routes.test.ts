@@ -50,7 +50,28 @@ import { getApproval } from "../../server/store/approvals"
 import { getConversation, getConversationByKey, isParticipant, SHOUT_KEY } from "../../server/store/conversations"
 import { getById, history, send } from "../../server/store/messages"
 import { getWakeJob } from "../../server/store/wake"
+import { vi } from "vitest"
 import { currentWsSeq, framesSince, resetWsHub } from "../../server/ws"
+
+// M2（解散 meta）观测缝：冻结的 WS 四事件封套不载 meta（publish.ts emit 字段固定）、
+// 解散消息行随级联删除 → 在 postSystem 写入 seam 捕获载荷；包装 call-through，
+// 真实写入+广播行为不变（仅记录）。
+const postSystemCapture = vi.hoisted(() => ({
+  calls: [] as { meta?: unknown; idempotencyKey?: string }[],
+}))
+vi.mock("../../server/core/permissions", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../server/core/permissions")>()
+  return {
+    ...actual,
+    postSystem: (
+      db: Parameters<typeof actual.postSystem>[0],
+      post: Parameters<typeof actual.postSystem>[1],
+    ) => {
+      postSystemCapture.calls.push(post)
+      return actual.postSystem(db, post)
+    },
+  }
+})
 
 let home = ""
 let db: Db
@@ -301,6 +322,8 @@ describe("POST /api/groups/:id/members/remove（移除成员）", () => {
       (m) => m.kind === "system" && m.body.startsWith("「t-d-child」已移出群「t-d-remove」"),
     )
     if (notice === undefined) throw new Error("expected the removal system notice in the group")
+    // M2：meta.action 取值锁定（冻结设计点名 group_remove + 目标 agentId）。
+    expect(notice.meta).toMatchObject({ action: "group_remove", agentId: child.id })
     expect(notice.body).toContain(`用户(${humanId.slice(0, 8)})`)
     expect(notice.body).toContain(`ui-root(${rootId.slice(0, 8)})`)
     for (const agentId of [humanId, rootId, child.id]) {
@@ -369,6 +392,7 @@ describe("POST /api/groups/:id/dissolve（解散群聊）", () => {
     expect(await res.json()).toEqual({ ok: true })
 
     // 广播复用既有 message 封套（type=message + kind=system + 「群已解散」语义）。
+    // 注：冻结四事件封套不载 meta（publish.ts emit 字段固定）→ meta.action 在 postSystem seam 锁定（见下）。
     const frames = framesSince(before).map((frame) => JSON.stringify(frame))
     expect(
       frames.some(
@@ -378,6 +402,15 @@ describe("POST /api/groups/:id/dissolve（解散群聊）", () => {
           frame.includes("已解散"),
       ),
     ).toBe(true)
+
+    // M2：meta.action 取值锁定（group_dissolve + 会话 id；经 postSystem seam 捕获，call-through 真实执行）。
+    const captured = postSystemCapture.calls.find(
+      (post) => post.idempotencyKey === `group-dissolve:${created.group.id}`,
+    )
+    expect(captured?.meta).toMatchObject({
+      action: "group_dissolve",
+      agentId: created.group.id,
+    })
 
     // 落地：participants + conversation 删除；消息行随级联删除；列表不再含该群。
     expect(getConversation(db, created.group.id)).toBeUndefined()

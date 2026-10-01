@@ -1142,3 +1142,36 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .mention-hit { background: var(--color-jade-soft); color: var(--color-jade); border-radius: var(--radius-small); padding: 0 2px; }
 .mention-chip { display: inline-block; margin-inline-start: 6px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--color-jade-soft); color: var(--color-jade); font-size: 11px; line-height: 16px; }
 .mention-badge { margin-inline-end: 6px; padding: 0 5px; border-radius: var(--radius-pill); background: var(--color-jade); color: var(--color-raised); font-size: 11px; font-style: normal; }
+
+/* ── 批次2修复 M4：成员行移出两步确认 + 解散 danger 区（补轮D零样式欠账） ──
+   派生自 .bubble-revoke（hairline 边框 + hover 转 error）与 .card-button.is-reject
+   （danger 族）。:root 已有红系 token `--color-error`（styles.css:13）故**不新增变量**；
+   全 token 化无裸 hex。解散按钮独立 .group-danger-button，不再复用青色 .group-add-button。 */
+.member-remove-confirm { display: inline-flex; align-items: center; gap: var(--space-1); }
+.member-remove-yes, .member-remove-no {
+  padding: 0 var(--space-2);
+  border: var(--line-thin) solid var(--color-hairline);
+  border-radius: var(--radius-small);
+  background: transparent;
+  font: 600 var(--text-label)/1.6 var(--font-utility);
+  cursor: pointer;
+  transition: color var(--duration-micro) var(--ease-standard), border-color var(--duration-micro) var(--ease-standard), background var(--duration-micro) var(--ease-standard);
+}
+.member-remove-yes { color: var(--color-error); border-color: color-mix(in srgb, var(--color-error) 45%, var(--color-hairline)); }
+.member-remove-yes:hover { color: var(--color-raised); background: var(--color-error); border-color: var(--color-error); }
+.member-remove-no { color: var(--color-muted); }
+.member-remove-no:hover { color: var(--color-ink); border-color: var(--color-muted); }
+.member-remove-yes:focus-visible, .member-remove-no:focus-visible { outline: var(--line-signal) solid var(--color-error); outline-offset: var(--space-1); }
+.group-danger { display: grid; gap: var(--space-2); margin-top: var(--space-2); padding-top: var(--space-3); border-top: var(--line-thin) solid var(--color-hairline); }
+.group-danger-button {
+  min-height: var(--target-size);
+  border: var(--line-thin) solid color-mix(in srgb, var(--color-error) 45%, var(--color-hairline));
+  border-radius: var(--radius-medium);
+  color: var(--color-error);
+  background: color-mix(in srgb, var(--color-error) 8%, var(--color-raised));
+  font-weight: 650;
+  cursor: pointer;
+  transition: color var(--duration-micro) var(--ease-standard), background var(--duration-micro) var(--ease-standard), border-color var(--duration-micro) var(--ease-standard);
+}
+.group-danger-button:hover { color: var(--color-raised); background: var(--color-error); border-color: var(--color-error); }
+.group-danger-button:focus-visible { outline: var(--line-signal) solid var(--color-error); outline-offset: var(--space-1); }

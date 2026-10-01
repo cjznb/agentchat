@@ -33,6 +33,8 @@ test("builds a group from a multi-select tree, adds members, and summarizes a sh
   const running = await start({ port: 0, db, home, hubTokenPath: join(home, "hub_token") })
   try {
     const seed = seedGroups(db, home)
+    // C1 默认收起：本用例断言群行顶层可见（items.nth(1) 等）→ 导航前预置分组展开态。
+    await page.addInitScript("localStorage.setItem('agentchat:groupSectionExpanded', 'true')")
     await page.goto(`${running.url}/`)
 
     // ── 建群：从组织树多选（含子 agent 与逻辑节点）──────────────────
@@ -76,10 +78,19 @@ test("builds a group from a multi-select tree, adds members, and summarizes a sh
     await expect(groupMember(page, seed.logical)).toBeVisible()
     // human 不出现在成员树；下拉亦不含 human。
     await expect(groupMember(page, seed.humanId)).toHaveCount(0)
-    await expect(page.getByTestId("group-add-select").locator("option", { hasText: "用户" })).toHaveCount(0)
 
-    await page.getByTestId("group-add-select").selectOption({ label: "gs-child2" })
-    await page.getByTestId("group-add-submit").click()
+    // C2 testid 迁移（轮C对照表补 e2e 消费方）：内联 select 已改模态弹窗 —— 打开弹窗后
+    // picker 内不含 human 行（与旧 `group-add-select` option 断言语义一致）。
+    await page.getByTestId("group-add-open").click()
+    await expect(page.getByTestId("member-add-dialog")).toBeVisible()
+    await expect(
+      page.getByTestId("member-picker").locator('[data-testid="member-row"]', { hasText: "用户" }),
+    ).toHaveCount(0)
+
+    // 展开 gs-root1 → 勾选 gs-child2 → 确认提交（替代旧 group-add-select + group-add-submit）。
+    await memberRow(page, seed.root1).getByTestId("member-toggle").click()
+    await memberRow(page, seed.child2).getByTestId("member-check").check()
+    await page.getByTestId("member-add-confirm").click()
     await expect(groupMember(page, seed.child2)).toBeVisible()
     await expect(page.getByTestId("group-member-count")).toHaveText("成员 3")
 
