@@ -335,8 +335,6 @@ export function apply(ctx, config) {
     entry.agent = agent
     if (running) {
       stopPolling(sessionId)
-      // 多会话并存时，出站身份取"正在跑回合"的那个（MCP 工具调用发生在回合内），见 lib/session-hint.js。
-      hint.onRunning(sessionId)
       await reportState(entry.nodeId, "busy")
       await reportInstance("busy")
       return

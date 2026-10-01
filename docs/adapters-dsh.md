@@ -341,6 +341,11 @@ Hub 的 `send`/`ask` 等工具按**调用方身份**记账（MCP `initialize` �
   `initialize` 并带上新头——这是身份能改变的唯一途径。Hub 报 `400 agent_not_found`（如换库/重置）时同样
   清缓存身份与会话并**只重试一次**。
 
+> ⚠️ **fail-closed 是刻意的（安全级）**：早期版本在 ≥2 个顶层会话时按"**最近进入 `running`**"猜身份，
+> 那是跨会话 last-writer-wins 指针——真机发生**身份冒用**（成员A 的消息被记成成员B，且 `respond_ask`
+> 被 `AskForbiddenError` 拒绝，因为服务端此刻把 A 当成 B）。现在**能唯一确定才给身份**：多会话并存 →
+> 无身份 → 桥回落容器 → Hub 对以容器为收件方的 DM 回 `container_not_chat_target`。**显式失败 >> 静默冒名。**
+
 由此的行为边界：
 
 | 场景 | 出站记账 | 对端能否回复本 DSH 会话 |

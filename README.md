@@ -136,6 +136,10 @@ profile `package.json` 的 `dsh.profile.bundles`，并把 Hub 的 MCP 行写进 
 「以容器为收件方」的回复，对端得到明确错误）。唤醒/注入始终按会话节点，不受影响。彻底修法是改用
 `ctx.tools.register()` 的原生工具面。详见 [docs/adapters-dsh.md](docs/adapters-dsh.md)。
 
+> ⚠️ **多会话并存时"不给身份"是刻意的（fail-closed，安全级）**：早期版本会按"最近进入 `running`"猜一个，
+> 结果在同机两会话并跑时造成**身份冒用**（成员A 的消息被记成成员B，连 `ask` 授权判定都跟着错）。
+> 现在宁可让 Hub 显式拒绝，也不静默冒名。
+
 > **Claude Code 有两个落点（务必区分）**：**hooks 落 `settings.json`**；**MCP 配置落 `~/.claude.json` 顶层
 > `mcpServers`**（或 `--mcp-config` 指向项目 `.mcp.json`；设 `CLAUDE_CONFIG_DIR` 时随其重定位）——**两个不同文件**。
 > 这两个文件的落点是官方事实，安装器从机制上拒绝把二者写成同一文件。

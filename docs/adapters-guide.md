@@ -116,7 +116,7 @@ POST /internal/retire { agentId }                 →  200；404 agent_not_found
 | 注入并唤醒 | `client.session.promptAsync` | `Stop` hook 阻塞续跑（`decision:"block"`） | `agent.followup(msg)`（空闲）/ `agent.steer(msg)`（运行中）；**`inject` 不唤醒** |
 | 空闲检测 | `session.idle` / `session.status` | `Notification(idle_prompt)`（仅上报，不注入） | `agent/status` = `running`/`idle` |
 | 空窗补拉 | 空闲轮询（`AGENTCHAT_POLL_MS`，10s） | 无法常驻 → 只能 SessionStart/Stop 时拉 | 空闲轮询（同上，**登记即开轮询**，见坑 3） |
-| 逐会话出站身份 | `tool.execute.before` 改写入参 → 桥剥头 | ❌ 无（容器身份） | ❌ 禁改写 → 磁盘提示 `agents/dsh.current`（单会话/活跃会话精确） |
+| 逐会话出站身份 | `tool.execute.before` 改写入参 → 桥剥头 | ❌ 无（容器身份） | ❌ 禁改写 → 磁盘提示 `agents/dsh.current`（**仅单会话精确**，多会话 fail-closed 回落容器） |
 | 生命周期 | `dispose` → offline；`session.deleted` → retire | `session_end` hook | `agent/disposed` → 只停跟踪；插件卸载 → 实例 offline |
 | 装配落点 | 写 OpenCode 配置（JSONC，幂等合并） | 合并 `settings.json` 的 `hooks` + `mcpServers` | bundle（`dsh.bundle.patch`）+ profile `cordis.patch.yml` + `dsh.profile.bundles` |
 
@@ -196,9 +196,12 @@ adapters/<vendor>/
 1. **改写入参 + 桥剥头**（OpenCode 已实现，最可靠）：
    宿主在每次工具调用前把会话 id 注入工具入参 → 桥**剥离**该键并转成请求头 `x-agentchat-session` → Hub 按 `task_ref` 解析。
    红线：**只原地改**（宿主丢弃钩子返回值）；写入失败只记日志、绝不抛。
-2. **磁盘会话提示**（DSH 折中）：插件维护 `<home>/agents/<vendor>.current`（**恰好一个顶层会话**时写它；
-   多会话并存时取**最近进入 running** 的那个，都不在跑才回落容器）；桥逐请求读它，**值变了就重建 Hub 会话**。
-   代价：并发多会话时可能错记；此时回落容器会让"对端回复"被 Hub 拒绝。
+2. **磁盘会话提示**（DSH 折中）：插件维护 `<home>/agents/<vendor>.current`，**只在"恰好一个顶层会话"时写它**，
+   否则删除（**fail-closed**）；桥逐请求读它，**值变了就重建 Hub 会话**。
+   代价：多会话并存时没有身份 → 桥回落实例容器 → Hub 明确拒绝以容器为收件方的 DM。
+   ⚠️ **切勿**在"多于一个"时按"最近进入 running"等启发式猜身份：那是跨会话 last-writer-wins 全局指针，
+   等于把"谁的回合最后开始"当成"谁在说话"——真机已发生**身份冒用**（A 的消息挂到 B 名下，归属/回执/ask 授权全错）。
+   宁可显式失败，不可静默冒名。
 3. **原生工具面**（终极解，未实现）：宿主插件用 `ctx.tools.register()` 自己代理 Hub 工具面 →
    每次调用天然带调用者 agent 上下文 → 任意并发都精确，且**不再需要 MCP 桥**。
 
@@ -245,8 +248,9 @@ Hub 里**显示**的是 `COALESCE(custom_name, name)`，所以正确做法是把
 | 5 | 注入后整轮报 `format v4 message requires a producer-owned source kind` | 用了宿主**已废弃**的消息来源包装（DSH 的 `kind:"plugin"`） | 用**生产者自有 kind**（DSH 迁移规则：未知插件 → `plugin:<名字>`），并保留其余字段 | 断言来源 kind 不得为 `plugin`、必须 `plugin:` 前缀 |
 | 6 | 重启后出站身份记到了**别的会话**名下 | 陈旧的身份提示文件未被清除（新进程"同值不触盘"逻辑早退） | 启动时把状态文件真值读为基线 → 首次发布即清掉陈旧值 | 预置陈旧 `*.current` → 卸载/首次发布后文件应消失 |
 | 7 | 身份已经正确写入磁盘，Hub 侧却一直 `identity_required` | Hub 只在 `initialize` 读 `x-agent-id`；桥在宿主启动时（磁盘还没有 id）已建会话 | 解析值变化时**丢弃 `mcp-session-id` 重新 initialize**；`400 agent_not_found` 清缓存并**只重试一次** | "id 尚不存在 → 出现"必须触发重新握手且带上头 |
-| 8 | 对端**无法回复**某 agent（`container_not_chat_target`） | 出站身份落在容器节点上，而容器不是聊天对象 | 单会话/活跃会话精确到会话节点；多会话退化为容器是**已知边界**，要写进文档并给终极解（原生工具面） | 断言单会话时 `fromAgentId` = 会话节点 |
-| 9 | 阻塞式 `ask` 总超时（但请示其实已创建） | 桥的 MCP `tools/call` 超时（30s）+ 宿主 MCP 客户端还有 `toolCallTimeoutMs`（常见 60s） | 文档化：**用异步 ask**，答复会经 wake 回投；要阻塞就同时调大两处超时 | 断言 `wait` 超时后请示仍在 `approvals` 且答复能被 wake 送达 |
+| 8 | 对端**无法回复**某 agent（`container_not_chat_target`） | 出站身份落在容器节点上，而容器不是聊天对象 | 单会话精确到会话节点；多会话 **fail-closed** 回落容器（显式拒绝优于静默错挂） | 断言单会话时 `fromAgentId` = 会话节点 |
+| 9 (安全) | 同机两会话并跑时，A 发出的消息 `fromAgentId` 记成 B（**身份冒用**） | 多会话时按"最近进入 `running`"猜身份 = 跨会话 last-writer-wins 全局指针（谁的回合最后开始就当谁在说话） | **删掉启发式**：只在"恰好一个顶层会话"时给身份，否则不给（回落容器 → Hub 显式拒绝） | 两顶层会话并存 → 提示文件必须不存在；释放一个 → 立刻恢复为该节点 |
+| 10 | 阻塞式 `ask` 总超时（但请示其实已创建） | 桥的 MCP `tools/call` 超时（30s）+ 宿主 MCP 客户端还有 `toolCallTimeoutMs`（常见 60s） | 文档化：**用异步 ask**，答复会经 wake 回投；要阻塞就同时调大两处超时 | 断言 `wait` 超时后请示仍在 `approvals` 且答复能被 wake 送达 |
 
 ---
 

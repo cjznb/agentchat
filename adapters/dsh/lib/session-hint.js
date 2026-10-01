@@ -80,7 +80,6 @@ export function sessionName(header, sessionId) {
  *   noteReopened(sessionId: string): void,
  *   reconcile(sessionId: string): boolean,
  *   onRegistered(sessionId: string, nodeId: string, topLevel: boolean): void,
- *   onRunning(sessionId: string): void,
  *   onDisposed(sessionId: string): void,
  *   clear(): void,
  * }}
@@ -93,8 +92,6 @@ export function createSessionHint(home, limit, log) {
   const reopened = new Map()
   /** 当前存活**顶层**会话的 `sessionId → 节点 id`（`size` 即顶层会话数）。 */
   const live = new Map()
-  /** 最近一次进入 `running` 的顶层会话（多会话并存时据此选定出站身份，见 `currentNodeId`）。 */
-  let activeId
   /**
    * 最近一次写入/删除的值（`undefined` = 文件应不存在）：同值不重复触盘。
    *
@@ -117,18 +114,19 @@ export function createSessionHint(home, limit, log) {
   }
 
   /**
-   * 出站身份应当指向的节点 id：
-   * - 恰好一个顶层会话 → 就是它（无歧义，与旧行为一致）；
-   * - 多于一个 → 取**最近进入 `running`** 的那个：MCP 工具调用发生在回合内，这是唯一可用的信号
-   *   （真机场景：桌面端同时恢复了两个会话，用户只在其中一个里干活）；
-   * - 都不在跑且多于一个 → `undefined`（**不猜**，桥回落实例 id；此时 Hub 会明确拒绝以容器为收件方的
-   *   DM，而不是静默地把消息记到错误的会话名下）。
+   * 出站身份应当指向的节点 id：**只在"恰好一个顶层会话"时给出**，否则一律 `undefined`。
+   *
+   * **fail-closed**（真机事故，安全级）：曾经在"多于一个"时取"最近进入 `running`"的会话——
+   * 那是跨会话的 last-writer-wins 全局指针，等于把**谁的回合最后开始**当成**谁在说话**：
+   * 同机两个会话并跑时，A 发出的消息会被挂到 B 名下（Hub 侧的归属、回执、ask 授权判定全部跟着错），
+   * 即静默的**身份冒用**。任何"猜"都会制造这种污染，所以这里宁可**不给身份**：
+   * 桥回落实例容器 id，Hub 会明确拒绝以容器为收件方的 DM（`container_not_chat_target`），
+   * 错误显式可见、审计不被污染。
+   *
+   * 并发多会话下要精确归属，只有根治一条路：宿主原生工具面（每次调用天然带调用者上下文），
+   * 见 `docs/adapters-guide.md` §5 第 3 条。
    */
-  const currentNodeId = () => {
-    if (live.size === 1) return live.values().next().value
-    if (activeId !== undefined) return live.get(activeId)
-    return undefined
-  }
+  const currentNodeId = () => (live.size === 1 ? live.values().next().value : undefined)
 
   /**
    * 依据 {@link currentNodeId} 写/删提示文件：有确定对象 → 写其节点 id；无 → 删除。
@@ -176,22 +174,11 @@ export function createSessionHint(home, limit, log) {
       publish()
     },
     /**
-     * `agent/status = running`：记为「当前活跃顶层会话」并重算提示。多会话并存时出站身份即取它——
-     * MCP 工具调用发生在回合内，这是可用范围内最准的信号（见 `currentNodeId`）。
-     */
-    onRunning(sessionId) {
-      if (!live.has(sessionId)) return
-      activeId = sessionId
-      publish()
-    },
-    /**
      * 释放：留「注册期被释放」标记（覆盖 `await` 竞态；只有新的 `agent/created` 能清除它），
-     * 再摘除节点；若被释放的正是活跃会话则清空活跃标记，随后按存活数重算提示
-     * （剩一个时自动改写为它的节点 id）。
+     * 再摘除节点；随后按存活数重算提示（剩一个时自动改写为它的节点 id，否则删除提示）。
      */
     onDisposed(sessionId) {
       remember(disposed, sessionId, true)
-      if (activeId === sessionId) activeId = undefined
       const nodeId = live.get(sessionId)
       if (nodeId === undefined) return
       live.delete(sessionId)
@@ -200,7 +187,6 @@ export function createSessionHint(home, limit, log) {
     /** 插件卸载：不再有存活会话 → 删除提示文件（键 = 节点 id，故整体清空）。 */
     clear() {
       live.clear()
-      activeId = undefined
       publish()
     },
   }

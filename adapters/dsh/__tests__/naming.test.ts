@@ -113,7 +113,7 @@ describe("会话提示文件（重启后不得留陈旧值）", () => {
     expect(readToken(currentPath(home))).toBeUndefined()
   })
 
-  it("恰好一个顶层会话 → 写该节点；多于一个且无人跑回合 → 删除（不猜）", () => {
+  it("恰好一个顶层会话 → 写该节点；多于一个 → 删除（**fail-closed**，绝不猜）", () => {
     const home = tempHome()
     const hint = createSessionHint(home, 16, () => {})
     hint.onRegistered("s1", "node-1", true)
@@ -124,20 +124,20 @@ describe("会话提示文件（重启后不得留陈旧值）", () => {
     expect(readToken(currentPath(home))).toBeUndefined()
   })
 
-  it("多会话并存时取**正在跑回合**的那个（真机：桌面端恢复两个会话）", () => {
+  it("多会话并存 → **不给身份**（宁可回落容器被 Hub 显式拒绝，也不静默冒名）", () => {
+    // 真机事故（安全级）：曾按"最近进入 running"猜身份 → 同机两会话并跑时，
+    // A 发出的消息被挂到 B 名下（归属/回执/ask 授权全错）。任何"猜"都会制造这种污染。
     const home = tempHome()
     const hint = createSessionHint(home, 16, () => {})
     hint.onRegistered("s1", "node-1", true)
     hint.onRegistered("s2", "node-2", true)
-    expect(readToken(currentPath(home))).toBeUndefined() // 无人跑回合 → 不猜（桥回落容器）
-    hint.onRunning("s2")
-    expect(readToken(currentPath(home))).toBe("node-2") // 回合内发出的 MCP 调用归属 s2
-    hint.onRunning("s1")
-    expect(readToken(currentPath(home))).toBe("node-1") // 换成 s1 在跑
+    expect(readToken(currentPath(home))).toBeUndefined()
     hint.onDisposed("s1")
-    expect(readToken(currentPath(home))).toBe("node-2") // 活跃者释放 → 只剩 s2，回到它
+    expect(readToken(currentPath(home))).toBe("node-2") // 只剩一个 → 又能确定身份
+    hint.onRegistered("s1", "node-1", true)
+    expect(readToken(currentPath(home))).toBeUndefined() // 回到两个 → 再次收回身份
     hint.onRegistered("s3", "node-3", false)
-    expect(readToken(currentPath(home))).toBe("node-2") // 子代理不影响
+    expect(readToken(currentPath(home))).toBeUndefined() // 子代理不影响
   })
 })
 
