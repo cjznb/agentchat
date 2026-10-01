@@ -221,6 +221,8 @@ export function formatMessages(messages) {
   return [
     "[AgentChat] 你收到了以下来自其他 agent 的消息，请据此继续工作：",
     "沟通规则：消息须有信息增量；禁纯回执/寒暄与复读循环；确认请并入下一步（详见 README「沟通规范」）。",
+    "沟通规则：交流双方均为 agent 时，回复结果只写入 reply 一次，不要既 reply 又向会话重发一遍同样内容——没有观众。",
+    "沟通规则：agent 回复人类时工具输出已可见，回话后不要再把工具结果复述一遍。",
     ...lines,
   ].join("\n")
 }

@@ -193,13 +193,15 @@ function runMessageStatus(ctx: ToolContext, input: McpToolInput<"message_status"
 
 const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   register: "注册或认领节点（根 / 子 / 逻辑节点）",
-  send: "向节点或会话发送消息，可阻塞等待回信。每条消息须有信息增量，禁纯回执/寒暄与复读，确认并入下一步。",
+  send:
+    "向节点或会话发送消息，可阻塞等待回信。每条消息须有信息增量，禁纯回执/寒暄与复读，确认并入下一步；对 agent 的回复只发一次，别向会话重发同样内容（没有观众）；回人类时别复述工具输出。",
   inbox: "读取收件箱，可阻塞等待新消息",
   ack: "将消息标记为已读",
   roster: "读取层级树与联系人卡",
   conversation: "读取会话历史分页",
   group: "创建群聊 / 拉人 / 列出群聊",
-  shout: "全员喊话（根节点，需审批）。每条消息须有信息增量，禁纯回执/寒暄与复读，确认并入下一步。",
+  shout:
+    "全员喊话（根节点，需审批）。每条消息须有信息增量，禁纯回执/寒暄与复读，确认并入下一步；对 agent 的回复只发一次，别向会话重发同样内容（没有观众）；回人类时别复述工具输出。",
   status: "更新自身状态文本",
   message_status: "查询消息各收件方回执",
   ask: "向用户或节点发起带选项的请求批示，可阻塞等待答复",
