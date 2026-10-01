@@ -113,6 +113,20 @@ describe("会话提示文件（重启后不得留陈旧值）", () => {
     expect(readToken(currentPath(home))).toBeUndefined()
   })
 
+  it("**外部删除提示文件后能自愈**（进程内记忆不得让它永久停留在回落态）", () => {
+    // 真机报告缺陷 7.4：`published` 是进程内记忆；另一个进程/人工删掉文件后，
+    // 若只按它早退（同值不触盘），身份会永久停在容器回落——群发被拒、DM 无人能回。
+    const home = tempHome()
+    const hint = createSessionHint(home, 16, () => {})
+    hint.onRegistered("s1", "node-1", true)
+    expect(readToken(currentPath(home))).toBe("node-1")
+    rmSync(currentPath(home))
+    expect(readToken(currentPath(home))).toBeUndefined()
+    // 同值再发布（真机路径：补注册重试/重连认领对同一会话再次 onRegistered）→ 必须重写
+    hint.onRegistered("s1", "node-1", true)
+    expect(readToken(currentPath(home))).toBe("node-1")
+  })
+
   it("恰好一个顶层会话 → 写该节点；多于一个 → 删除（**fail-closed**，绝不猜）", () => {
     const home = tempHome()
     const hint = createSessionHint(home, 16, () => {})

@@ -130,11 +130,15 @@ export function createSessionHint(home, limit, log) {
 
   /**
    * 依据 {@link currentNodeId} 写/删提示文件：有确定对象 → 写其节点 id；无 → 删除。
-   * 同值不触盘；文件操作失败只记日志（下次状态变化再试）。
+   *
+   * **发布前校验磁盘现值**（真机报告缺陷 7.4）：`published` 只是**进程内**记忆，
+   * 另一进程/人工删除或改写文件后，仅凭它早退会让身份**永久**停留在回落（容器）态——
+   * 例如补注册重试对同一会话再次 `onRegistered`（值不变）时正好早退。故同值也要看盘：
+   * 盘中现值 === `next` 才跳过；否则重写/清除。文件操作失败只记日志（下次状态变化再试）。
    */
   function publish() {
     const next = currentNodeId()
-    if (next === published) return
+    if (next === published && readToken(path) === next) return
     const result = next === undefined ? clearToken(path) : writeToken(path, next)
     if (!result.ok) log(`会话提示写入失败（继续）：${result.error ?? "unknown"}`)
     published = next
