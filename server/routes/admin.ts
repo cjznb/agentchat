@@ -19,6 +19,7 @@ import { Hono, type Context } from "hono"
 import { z } from "zod"
 import { config } from "../config"
 import { clearAllTables, openDb, type Db } from "../db"
+import { retire } from "../core/agents"
 
 /** 适配器侧出厂态条目（**不含** `agentchat.db`——运行中就地清空，不删文件）。 */
 export const ADAPTER_STATE_TARGETS = [
@@ -43,6 +44,30 @@ const resetBodySchema = z.object({
   confirm: z.literal("RESET"),
   keepBackups: z.boolean().optional(),
 })
+
+/** `POST /api/admin/prune-sessions`：`execute:false` 预览候选（零写入），`true` 逐个退役。 */
+const pruneBodySchema = z.object({
+  execute: z.boolean().default(false),
+})
+
+/** 死节点清理唯一谓词：任务节点（非人类/非逻辑）+ offline + 超 1 小时无活动。 */
+const PRUNE_OFFLINE_MS = 3_600_000
+
+interface PruneRow {
+  readonly id: string
+  readonly name: string
+  readonly last_seen: number
+}
+
+function listPruneCandidates(db: Db, nowMs: number): PruneRow[] {
+  return db
+    .prepare(
+      `SELECT id, name, last_seen FROM agents
+       WHERE task_ref IS NOT NULL AND status = 'offline' AND last_seen < ?
+       ORDER BY last_seen`,
+    )
+    .all(nowMs - PRUNE_OFFLINE_MS) as PruneRow[]
+}
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -133,5 +158,36 @@ export function adminRoutes(db?: Db, options?: AdminRoutesOptions): Hono {
         snapshotPath,
         ...(failed.length === 0 ? {} : { failed }),
       })
+    })
+    .post("/api/admin/prune-sessions", async (c) => {
+      if (!isLoopback(c)) return c.json({ ok: false, error: "forbidden" }, 403)
+      const parsed = pruneBodySchema.safeParse(await c.req.json().catch(() => undefined))
+      if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
+
+      let database: Db
+      try {
+        database = resolveDb(db)
+      } catch (error) {
+        return c.json({ ok: false, error: "db_open_failed", detail: errorText(error) }, 500)
+      }
+      const candidates = listPruneCandidates(database, now())
+      if (!parsed.data.execute) {
+        return c.json({
+          ok: true,
+          candidates: candidates.map((row) => ({ id: row.id, name: row.name, lastSeen: row.last_seen })),
+          count: candidates.length,
+        })
+      }
+      const retired: { id: string; name: string }[] = []
+      try {
+        for (const row of candidates) {
+          retire(database, row.id)
+          retired.push({ id: row.id, name: row.name })
+        }
+      } catch (error) {
+        // 部分失败：已退役的保持退役（不可恢复），报告已完成数与错误码
+        return c.json({ ok: false, error: "prune_failed", detail: errorText(error), retired, count: retired.length }, 500)
+      }
+      return c.json({ ok: true, retired, count: retired.length })
     })
 }

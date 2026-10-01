@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useState } from "react"
 import type { AdminInfo, ResetResult } from "../../../shared/contracts"
-import { loadAdminInfo, resetHub } from "../adminApi"
+import { loadAdminInfo, pruneSessions, resetHub, type PruneSessionsResult } from "../adminApi"
 import { ApiError } from "../api"
 import {
   clearAgentchatLocalStorage,
@@ -22,11 +22,13 @@ import {
 export interface SettingsApi {
   readonly loadInfo: () => Promise<AdminInfo>
   readonly reset: (request: ResetRequest) => Promise<ResetResult>
+  readonly prune: (execute: boolean) => Promise<PruneSessionsResult>
 }
 
 const defaultApi: SettingsApi = {
   loadInfo: () => loadAdminInfo(),
   reset: (request) => resetHub(request.confirm, request.keepBackups),
+  prune: (execute) => pruneSessions(execute),
 }
 
 function clearBrowserLocalState(): number {
@@ -41,6 +43,8 @@ export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
   const [notice, setNotice] = useState<string | null>(null)
   const [localNotice, setLocalNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [prunePreview, setPrunePreview] = useState<PruneSessionsResult | null>(null)
+  const [pruneError, setPruneError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -62,6 +66,41 @@ export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
   }, [])
 
   const canReset = isResetConfirmed(confirmWord) && !busy
+
+  const startPrune = useCallback(() => {
+    if (busy) return
+    setBusy(true)
+    setPruneError(null)
+    void api
+      .prune(false)
+      .then((preview) => {
+        if (preview.count === 0) {
+          setLocalNotice("没有可清理的离线历史会话。")
+        } else {
+          setPrunePreview(preview)
+        }
+      })
+      .catch((reason: unknown) => {
+        setPruneError(`预览失败：${reason instanceof ApiError ? reason.code : "unknown"}`)
+      })
+      .finally(() => setBusy(false))
+  }, [api, busy])
+
+  const confirmPrune = useCallback(() => {
+    if (prunePreview === null || busy) return
+    setBusy(true)
+    setPruneError(null)
+    void api
+      .prune(true)
+      .then((result) => {
+        setPrunePreview(null)
+        setLocalNotice(`已退役 ${result.count} 个历史会话节点。`)
+      })
+      .catch((reason: unknown) => {
+        setPruneError(`清理失败：${reason instanceof ApiError ? reason.code : "unknown"}`)
+      })
+      .finally(() => setBusy(false))
+  }, [api, busy, prunePreview])
 
   const doReset = useCallback(() => {
     if (!isResetConfirmed(confirmWord) || busy) return
@@ -116,6 +155,55 @@ export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
           {localNotice !== null ? (
             <p className="settings-notice" data-testid="settings-local-notice">
               {localNotice}
+            </p>
+          ) : null}
+        </section>
+
+        <section className="settings-block">
+          <h2>数据清理</h2>
+          <p className="settings-hint">
+            批量退役超过 1 小时无活动的历史测试会话节点（不可恢复；这些会话在 OpenCode 中重新打开时会注册为新节点）。
+          </p>
+          <button
+            type="button"
+            className="settings-action"
+            data-testid="settings-prune"
+            disabled={busy}
+            onClick={startPrune}
+          >
+            清理离线历史会话
+          </button>
+          {prunePreview !== null ? (
+            <div className="settings-confirm" role="alertdialog" data-testid="settings-prune-confirm">
+              <p>
+                将退役 {prunePreview.count} 个历史会话节点：
+                {prunePreview.names.slice(0, 8).join("、")}
+                {prunePreview.count > 8 ? "…" : ""}
+              </p>
+              <p className="settings-hint">退役不可恢复；这些会话在 OpenCode 中重新打开时会注册为新节点。</p>
+              <button
+                type="button"
+                className="settings-danger"
+                data-testid="settings-prune-confirm-btn"
+                disabled={busy}
+                onClick={confirmPrune}
+              >
+                确认清理
+              </button>
+              <button
+                type="button"
+                className="settings-action"
+                data-testid="settings-prune-cancel"
+                disabled={busy}
+                onClick={() => setPrunePreview(null)}
+              >
+                取消
+              </button>
+            </div>
+          ) : null}
+          {pruneError !== null ? (
+            <p className="settings-error" role="alert" data-testid="settings-prune-error">
+              {pruneError}
             </p>
           ) : null}
         </section>

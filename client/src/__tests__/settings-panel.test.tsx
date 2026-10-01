@@ -30,6 +30,7 @@ function fakeApi(overrides: Partial<SettingsApi> = {}): SettingsApi {
   return {
     loadInfo: async () => ({ home: "/tmp/home", logsDir: "/tmp/home/logs" }),
     reset: async () => ({ ok: true, restartRequired: true, snapshotPath: "/tmp/home.bak" }),
+    prune: async () => ({ count: 0, names: [] }),
     ...overrides,
   }
 }
@@ -152,5 +153,60 @@ describe("Settings 保留 backups/ 开关", () => {
 
     expect(payloads).toHaveLength(2)
     expect(payloads[1]).toEqual({ confirm: "RESET", keepBackups: true })
+  })
+})
+
+describe("Settings 清理离线历史会话", () => {
+  it("按钮存在 → 预览(false) → 弹层含 count 与前 8 名字 → 确认执行(true) → 成功文案", async () => {
+    const calls: boolean[] = []
+    const names = Array.from({ length: 10 }, (_, index) => `sess-${index}`)
+    const container = await renderPanel(
+      fakeApi({
+        prune: async (execute) => {
+          calls.push(execute)
+          return execute ? { count: 10, names } : { count: 10, names }
+        },
+      }),
+    )
+
+    const button = find(container, "settings-prune") as HTMLElement
+    expect(button).not.toBeNull()
+    await act(async () => void button.click())
+
+    expect(calls).toEqual([false])
+    const confirm = find(container, "settings-prune-confirm")
+    expect(confirm?.textContent).toContain("将退役 10 个历史会话节点")
+    expect(confirm?.textContent).toContain("sess-0")
+    expect(confirm?.textContent).toContain("sess-7")
+    expect(confirm?.textContent).not.toContain("sess-8")
+    expect(confirm?.textContent).toContain("重新打开时会注册为新节点")
+
+    await act(async () => void (find(container, "settings-prune-confirm-btn") as HTMLElement).click())
+    expect(calls).toEqual([false, true])
+    expect(find(container, "settings-prune-confirm")).toBeNull()
+    expect(find(container, "settings-local-notice")?.textContent).toContain("已退役 10 个历史会话节点")
+  })
+
+  it("预览 count=0 → 无弹层，直接提示无可清理", async () => {
+    const container = await renderPanel(
+      fakeApi({ prune: async () => ({ count: 0, names: [] }) }),
+    )
+    await act(async () => void (find(container, "settings-prune") as HTMLElement).click())
+
+    expect(find(container, "settings-prune-confirm")).toBeNull()
+    expect(find(container, "settings-local-notice")?.textContent).toContain("没有可清理")
+  })
+
+  it("预览失败 → settings-local-notice 无内容，prune 错误提示出现", async () => {
+    const container = await renderPanel(
+      fakeApi({
+        prune: async () => {
+          throw new ApiError("/api/admin/prune-sessions", 500, "prune_failed")
+        },
+      }),
+    )
+    await act(async () => void (find(container, "settings-prune") as HTMLElement).click())
+    expect(find(container, "settings-prune-confirm")).toBeNull()
+    expect(container.querySelector("[data-testid='settings-prune-error']")?.textContent).toContain("prune_failed")
   })
 })
