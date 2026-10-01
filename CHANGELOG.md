@@ -4,7 +4,7 @@
 
 ## [0.1.0] - 2026-10-01
 
-首个公开发布：聚合「群聊 @提及」功能主线（12 任务 + 6 项真机反馈修复 + 样式/视觉工程化）与 DSH 桌面端适配器，共 35 个提交（`9877825d..v0.1.0`）。
+首个公开发布：聚合「群聊 @提及」功能主线（12 任务 + 6 项真机反馈修复 + 样式/视觉工程化）与 DSH 桌面端适配器，共 37 个提交（`9877825d..v0.1.0`）。
 
 ### 新增
 
@@ -13,7 +13,7 @@
 - **roster 会话过滤**：`roster?conversation=` 成员闸门、`op:list` 出 `member_cards`、拉人入群 system 通知（0 唤醒）。
 - **成员自定义显示名**：`custom_name` 列与迁移、展示名优先级 `agentDisplayName`、资料卡与群成员行两入口改名（`PATCH /api/agents/:id`）。
 - **反寒暄沟通规范**：四条规则写入注入消息头、工具描述与 README（spec §15，防 agent 复读/寒暄）。
-- **DSH 桌面端适配器**（`adapters/dsh/`）：Cordis bundle 插件 + stdio MCP 桥 + 安装器（plan/apply/yaml）+ 115 项测试与 `docs/adapters-dsh.md` 文档。
+- **DSH 桌面端适配器**（`adapters/dsh/`）：Cordis bundle 插件 + stdio MCP 桥 + 安装器（plan/apply/yaml）+ 115 项测试与 `docs/adapters-dsh.md` 文档；节点展示名采用 DSH 会话标题（机器唯一名不变）。
 - **《编写 AgentChat 适配器》指南**（`docs/adapters-guide.md`）：Hub 契约、宿主能力矩阵、9 条真机事故表、验收清单。
 - **视觉测试仪器 V1**：`playwright.visual.config.ts` + `tests/visual/`（路由 mock、层 1 按轴溢出断言、层 2 区域截图），`npm run visual` 5 场景。
 - **离线死节点清理**：`POST /api/admin/prune-sessions`（预览-确认-执行）+ 设置页「清理离线历史会话」按钮。
