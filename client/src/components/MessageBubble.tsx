@@ -2,12 +2,16 @@
  * 消息气泡（spec §11.4；Plan 3 T5）——己方右 / 对方左、系统消息居中、
  * 发送者头像 + 厂商徽标 + 子节点徽标、己方四级回执。纯展示，数据全由 props 注入。
  * Task 8：正文 `@名字` 高亮（`splitMentions` 分段）+ `meta.mentions` 正文未写的提及 chip。
+ * 轮 2 T3：正文 MD⇄原文视图（mdScope 订阅 + 单条手动覆盖）+ 脚注 MD⇄原文/复制按钮。
  */
-import { Fragment } from "react"
+import { Fragment, useEffect, useState } from "react"
 import type { ChatMessage } from "../../../shared/contracts"
 import { splitMentions, type MentionTarget } from "../../../shared/mentions"
+import { browserStorage } from "../accordion"
 import type { CardData } from "../cards"
 import { formatClock, initialOf, vendorBadge, type SenderView } from "../chat"
+import { MDMessage } from "../markdown"
+import { defaultMdView, readMdScope, subscribe, type MdScope } from "../mdScope"
 import { receiptGlyph } from "../receipts"
 import { canRevoke, revokeView } from "../revoke"
 import { ChatCard } from "./Cards"
@@ -59,6 +63,11 @@ export function MessageBubble({
   showChildBadge = true,
 }: MessageBubbleProps) {
   const highlightAttr = highlighted ? "true" : undefined
+  // 轮 2：MD 范围（订阅变更即时换 view）+ 单条手动覆盖（覆盖后不受 scope 广播影响）。
+  const [mdScope, setMdScope] = useState<MdScope>(() => readMdScope(browserStorage()))
+  useEffect(() => subscribe(setMdScope), [])
+  const [mdOverride, setMdOverride] = useState<"md" | "raw" | null>(null)
+  const [copied, setCopied] = useState(false)
 
   if (message.kind === "system") {
     if (card !== null) {
@@ -97,6 +106,11 @@ export function MessageBubble({
       : null
   const revoked = revokeView(message, own)
   const showRevoke = canRevoke(message, own) && onRevoke !== undefined
+  // 轮 2 判定来源：own → 人类；非己方按 SenderView.vendor（"human" = 人类，其余 = agent）。
+  const isAgentMessage = !own && sender?.vendor !== "human"
+  const view = mdOverride ?? defaultMdView(mdScope, isAgentMessage)
+  // 轮 2：撤回任意态（占位/标记）都不出 MD⇄原文与复制按钮；仅 "none"（未撤回）出。
+  const showMdButtons = revoked === "none"
   // Task 8：正文 `@` 分段高亮 + `meta.mentions` 中正文未书写的成员出 chip。
   const parts = splitMentions(message.body, participants)
   const chipNames: string[] = []
@@ -109,6 +123,25 @@ export function MessageBubble({
       if (target === undefined) continue
       if (message.body.includes("@" + target.name)) continue
       chipNames.push(target.name)
+    }
+  }
+
+  /** 复制原文：clipboard 缺失/写入失败一律静默（不弹错、不改文案）。 */
+  function copyBody(): void {
+    try {
+      const clip = navigator.clipboard
+      if (clip === undefined) return
+      void clip.writeText(message.body).then(
+        () => {
+          setCopied(true)
+          window.setTimeout(() => setCopied(false), 1500)
+        },
+        () => {
+          /* 写入失败：静默 */
+        },
+      )
+    } catch {
+      /* clipboard 不可用：静默 */
     }
   }
 
@@ -147,6 +180,10 @@ export function MessageBubble({
           <p className="bubble-body is-revoked" data-testid="revoke-placeholder">
             此消息已撤回
           </p>
+        ) : view === "md" ? (
+          <div className="bubble-body md-body" data-testid="bubble-md-body">
+            <MDMessage source={message.body} participants={participants} />
+          </div>
         ) : (
           <p className="bubble-body">
             {parts.map((part, index) =>
@@ -162,6 +199,27 @@ export function MessageBubble({
         )}
         <footer className="bubble-foot">
           <time className="bubble-time">{formatClock(message.createdAt)}</time>
+          {showMdButtons ? (
+            <>
+              <button
+                className="bubble-md-toggle"
+                data-testid="bubble-md-toggle"
+                type="button"
+                title={view === "md" ? "看原文" : "看排版"}
+                onClick={() => setMdOverride(view === "md" ? "raw" : "md")}
+              >
+                {view === "md" ? "看原文" : "看排版"}
+              </button>
+              <button
+                className="bubble-copy"
+                data-testid="bubble-copy"
+                type="button"
+                onClick={copyBody}
+              >
+                {copied ? "已复制" : "复制"}
+              </button>
+            </>
+          ) : null}
           {revoked === "marked" ? (
             <span className="revoke-mark" data-testid="revoke-mark">
               已撤回
