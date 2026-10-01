@@ -114,6 +114,11 @@ OpenCode 插件与 DSH 插件在空闲期间还会**周期轮询**（`AGENTCHAT_
 | DSH 桌面端 | `node adapters/dsh/install.mjs --profile desktop` | [docs/adapters-dsh.md](docs/adapters-dsh.md) |
 
 三个安装器均**幂等**、改动前自动备份、支持 `--dry-run`（只打印不落盘）与 `--uninstall`（精确移除本适配器条目）。
+
+> **要为别的 agent 宿主写适配器？** 先读 [docs/adapters-guide.md](docs/adapters-guide.md)：Hub 契约、
+> 宿主能力矩阵（常驻事件流 / 入站注入 / 空闲可见性 / 入参改写 / 装配落点）、实现骨架、安装器规范、
+> 测试与验收清单，以及 9 条真机事故表（命名撞唯一索引、在途记录泄漏、登记须即开轮询、会话格式 v4 来源 kind、
+> 身份只在 initialize 认、退役单向门……）。
 OpenCode 的 MCP 条目是**本地 stdio 桥**（`adapters/opencode/mcp-bridge.mjs`），配置里**不含 `{file:}` 引用
 与 token 明文** —— 身份与 token 由桥**逐请求**从磁盘读取；旧版会砖的 `{file:}` 结构会被安装器**自动迁移**。
 桥对每次 `tools/call` 会把插件（`tool.execute.before`）注入的 `x-agentchat-session` **剥离**并转请求头，
