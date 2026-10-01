@@ -10,6 +10,13 @@ import { useCallback, useEffect, useState } from "react"
 import type { AdminInfo, ResetResult } from "../../../shared/contracts"
 import { loadAdminInfo, pruneSessions, resetHub, type PruneSessionsResult } from "../adminApi"
 import { ApiError } from "../api"
+import { browserStorage } from "../accordion"
+import {
+  notify,
+  readMdScope,
+  writeMdScope,
+  type MdScope,
+} from "../mdScope"
 import {
   clearAgentchatLocalStorage,
   isResetConfirmed,
@@ -45,6 +52,7 @@ export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
   const [error, setError] = useState<string | null>(null)
   const [prunePreview, setPrunePreview] = useState<PruneSessionsResult | null>(null)
   const [pruneError, setPruneError] = useState<string | null>(null)
+  const [mdScope, setMdScope] = useState<MdScope>(() => readMdScope(browserStorage()))
 
   useEffect(() => {
     let cancelled = false
@@ -206,6 +214,26 @@ export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
               {pruneError}
             </p>
           ) : null}
+        </section>
+
+        <section className="settings-block">
+          <h2>消息渲染</h2>
+          <p className="settings-hint">选择哪些消息按 Markdown 渲染（变更即时生效，无需重启）。</p>
+          <select
+            className="settings-input"
+            data-testid="settings-md-scope"
+            value={mdScope}
+            onChange={(event) => {
+              const next = event.target.value as MdScope
+              setMdScope(next)
+              writeMdScope(browserStorage(), next)
+              notify(next)
+            }}
+          >
+            <option value="all">全部</option>
+            <option value="agent">仅 AI 回复</option>
+            <option value="off">关闭</option>
+          </select>
         </section>
 
         <section className="settings-block is-danger">

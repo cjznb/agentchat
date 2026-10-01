@@ -8,10 +8,11 @@
  * 无 React 测试库：`react-dom/client` + `react#act` 直接渲染（与既有 tsx 用例同法）。
  */
 import { act } from "react"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createRoot, type Root } from "react-dom/client"
 import { ApiError } from "../api"
 import { Settings, type SettingsApi } from "../components/Settings"
+import { STORAGE_KEY, subscribe } from "../mdScope"
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 
@@ -208,5 +209,29 @@ describe("Settings 清理离线历史会话", () => {
     await act(async () => void (find(container, "settings-prune") as HTMLElement).click())
     expect(find(container, "settings-prune-confirm")).toBeNull()
     expect(container.querySelector("[data-testid='settings-prune-error']")?.textContent).toContain("prune_failed")
+  })
+})
+
+describe("Settings 消息渲染范围", () => {
+  it("select 渲染三选项（全部/仅 AI 回复/关闭），change 落值 + notify", async () => {
+    const container = await renderPanel(fakeApi())
+    const select = find(container, "settings-md-scope") as HTMLSelectElement | null
+    expect(select).not.toBeNull()
+    expect(Array.from(select!.options).map((option) => option.value)).toEqual(["all", "agent", "off"])
+    expect(Array.from(select!.options).map((option) => option.textContent)).toEqual(["全部", "仅 AI 回复", "关闭"])
+    expect(select!.value).toBe("all")
+
+    const listener = vi.fn()
+    const unsubscribe = subscribe(listener)
+
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")?.set
+    await act(async () => {
+      setter?.call(select!, "agent")
+      select!.dispatchEvent(new Event("change", { bubbles: true }))
+    })
+
+    expect(localStorage.getItem(STORAGE_KEY)).toBe("agent")
+    expect(listener).toHaveBeenCalledWith("agent")
+    unsubscribe()
   })
 })
