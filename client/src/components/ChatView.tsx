@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { ChatMessage } from "../../../shared/contracts"
 import { readCardMessage } from "../cards"
-import { buildRosterView, conversationTitle } from "../chat"
+import { buildRosterView, conversationTitle, dualDmSide, initiatorIdOf } from "../chat"
 import { useStore } from "../store"
 import { Composer } from "./Composer"
 import { GroupInfo } from "./GroupInfo"
@@ -52,7 +52,9 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
   const messages = state.messages.get(conversationId) ?? EMPTY_MESSAGES
   const messagesLoaded = state.messages.has(conversationId)
   const conversation = state.conversations.find((item) => item.id === conversationId)
-  const title = conversationTitle(conversation, rosterView)
+  // F1/B3：发起方 = 首条非系统消息 sender（会话 schema 无创建者字段）→ 标题与分侧共用。
+  const initiatorId = useMemo(() => initiatorIdOf(messages), [messages])
+  const title = conversationTitle(conversation, rosterView, initiatorId)
   const isGroup = conversation?.kind === "group"
   const isGroupChat = isGroup && conversation?.key !== "shout"
 
@@ -236,6 +238,13 @@ export function ChatView({ conversationId, focusMessageId }: ChatViewProps) {
                 message={message}
                 participants={Array.from(rosterView.byId.values(), ({ id, name }) => ({ id, name }))}
               own={rosterView.humanId !== null && message.fromAgentId === rosterView.humanId}
+                side={dualDmSide(
+                  conversation,
+                  rosterView,
+                  initiatorId,
+                  message,
+                  rosterView.humanId !== null && message.fromAgentId === rosterView.humanId,
+                )}
                 sender={rosterView.byId.get(message.fromAgentId)}
                 showSender={true}
                 showChildBadge={isGroup}

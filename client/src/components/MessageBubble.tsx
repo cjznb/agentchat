@@ -34,6 +34,8 @@ export interface MessageBubbleProps {
   readonly participants?: readonly MentionTarget[]
   /** `[子·根名]` 层级徽标渲染开关（缺省 = true，既有渲染点零变化）；私聊传 false 仅显身份行。 */
   readonly showChildBadge?: boolean
+  /** B3 双 agent DM 分侧（缺省 = 不渲染 `data-side`，既有渲染点零变化）。 */
+  readonly side?: "left" | "right" | undefined
 }
 
 /** `meta.mentions`（agentId 数组）类型收窄；无 meta / 非数组 / 非字符串元素 → 空。 */
@@ -61,6 +63,7 @@ export function MessageBubble({
   revoking = false,
   participants = [],
   showChildBadge = true,
+  side,
 }: MessageBubbleProps) {
   const highlightAttr = highlighted ? "true" : undefined
   // 轮 2：MD 范围（订阅变更即时换 view）+ 单条手动覆盖（覆盖后不受 scope 广播影响）。
@@ -151,6 +154,7 @@ export function MessageBubble({
       data-testid="message-row"
       data-message-id={message.id}
       data-own={own}
+      data-side={side}
       data-highlight={highlightAttr}
     >
       {showIdentity ? (

@@ -55,14 +55,70 @@ function dmPeerIds(key: string): readonly string[] {
   return parts.length === 2 && parts.every((id) => id !== "") ? parts : []
 }
 
-/** 会话标题：喊话/群用会话名；DM 取非 human 参与方名（roster 缺失 → 会话名/“私聊”）。 */
+/**
+ * B3/F1：纯双 agent DM 参与方（key 段数=2 且均非 human；roster 无 human 身份时不判定）。
+ * 含人类 DM / 群 / roster 未就绪 → null（既有规则零改动）。
+ */
+export function dualAgentDmIds(
+  conversation: ConversationSummary | undefined,
+  view: RosterView,
+): readonly [string, string] | null {
+  if (conversation === undefined || conversation.kind !== "dm") return null
+  const peers = dmPeerIds(conversation.key)
+  if (peers.length !== 2 || view.humanId === null) return null
+  if (peers.some((id) => id === view.humanId)) return null
+  const [idA, idB] = peers
+  return idA !== undefined && idB !== undefined ? [idA, idB] : null
+}
+
+/** B3：发起方 = 会话首条非系统消息的 sender（`ConversationSummary` 无创建者字段 → 客户端派生）。 */
+export function initiatorIdOf(
+  messages: readonly { readonly kind: string; readonly fromAgentId: string }[],
+): string | null {
+  return messages.find((m) => m.kind !== "system")?.fromAgentId ?? null
+}
+
+/**
+ * B3：双 agent DM 分侧——发起方居左、对向居右；own / 人类注入按非发起方侧（右）；
+ * 非参与方 sender（系统/第三方）与非双 agent DM → undefined（群聊与含人类 DM 零变化）。
+ */
+export function dualDmSide(
+  conversation: ConversationSummary | undefined,
+  view: RosterView,
+  initiatorId: string | null,
+  message: { readonly fromAgentId: string },
+  own: boolean,
+): "left" | "right" | undefined {
+  const peers = dualAgentDmIds(conversation, view)
+  if (peers === null) return undefined
+  if (own) return "right"
+  if (!peers.includes(message.fromAgentId)) return undefined
+  return message.fromAgentId === initiatorId ? "left" : "right"
+}
+
+/**
+ * 会话标题：喊话/群用会话名；DM 取非 human 参与方名（roster 缺失 → 会话名/“私聊”）。
+ * F1：纯双 agent DM → 「{发起方}和{对方}的私聊」（发起方在前；initiatorId 缺省 → key 序）。
+ */
 export function conversationTitle(
   conversation: ConversationSummary | undefined,
   view: RosterView,
+  initiatorId: string | null = null,
 ): string {
   if (conversation === undefined) return "会话"
   if (conversation.key === "shout") return conversation.name ?? "全员喊话"
   if (conversation.kind === "group") return conversation.name ?? "群聊"
+  const dual = dualAgentDmIds(conversation, view)
+  if (dual !== null) {
+    const first = view.byId.get(dual[0])
+    const second = view.byId.get(dual[1])
+    if (first !== undefined && second !== undefined) {
+      const initiatorSecond = initiatorId !== null && initiatorId === dual[1] && initiatorId !== dual[0]
+      return initiatorSecond
+        ? `${second.name}和${first.name}的私聊`
+        : `${first.name}和${second.name}的私聊`
+    }
+  }
   for (const id of dmPeerIds(conversation.key)) {
     if (id === view.humanId) continue
     const peer = view.byId.get(id)

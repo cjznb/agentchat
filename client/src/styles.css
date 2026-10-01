@@ -268,6 +268,10 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .message-list { display: grid; gap: var(--space-4); margin: 0; padding: 0; list-style: none; }
 .message-row { display: flex; align-items: flex-start; gap: var(--space-2); }
 .message-row[data-own="true"] { flex-direction: row-reverse; }
+/* B3 双 agent DM：对向（非发起方）居右——仅对齐，不套己方配色；发起方（左）走默认布局（头像左）。 */
+.message-row[data-side="right"] { flex-direction: row-reverse; }
+.message-row[data-side="right"] .bubble-col { justify-items: end; }
+.message-row[data-side="right"] .bubble-foot { justify-content: flex-end; }
 .message-row.is-system { justify-content: center; }
 
 .avatar {
@@ -317,6 +321,11 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .bubble-revoke { padding: 0 var(--space-2); border: var(--line-thin) solid var(--color-hairline); border-radius: var(--radius-small); color: var(--color-muted); background: transparent; font: inherit; cursor: pointer; transition: color var(--duration-micro) var(--ease-standard); }
 .bubble-revoke:hover { color: var(--color-error); border-color: var(--color-error); }
 .bubble-revoke:disabled { cursor: default; opacity: 0.5; }
+/* B2：脚注按钮（看原文/看排版、复制/已复制）——照 .bubble-revoke 同款结构 token 化 */
+.bubble-md-toggle, .bubble-copy { padding: 0 var(--space-2); border: var(--line-thin) solid var(--color-hairline); border-radius: var(--radius-small); color: var(--color-muted); background: transparent; font: inherit; cursor: pointer; transition: color var(--duration-micro) var(--ease-standard); }
+.bubble-md-toggle:hover, .bubble-copy:hover { color: var(--color-jade); border-color: var(--color-jade); }
+.bubble-md-toggle:active, .bubble-copy:active { color: var(--color-raised); background: var(--color-jade); border-color: var(--color-jade); }
+.bubble-md-toggle:disabled, .bubble-copy:disabled { cursor: default; opacity: 0.5; }
 
 .message-row.is-highlighted .bubble-body,
 .message-row.is-highlighted .system-text {
@@ -1107,7 +1116,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .settings-input { min-height: var(--target-size); padding: var(--space-3); border: var(--line-thin) solid var(--color-hairline); border-radius: var(--radius-medium); color: var(--color-ink); background: var(--color-raised); }
 .settings-notice { margin: var(--space-3) 0 0; color: var(--color-jade); font-size: var(--text-body); }
 .settings-error { margin: var(--space-3) 0 0; color: var(--color-error); font-size: var(--text-body); }
-/* Task 8: mention highlight / chip / badge */
-.mention-hit { background: #ffe8a3; color: inherit; border-radius: 3px; padding: 0 2px; }
-.mention-chip { display: inline-block; margin-inline-start: 6px; padding: 0 6px; border-radius: 999px; background: rgba(59, 130, 246, 0.15); color: #2563eb; font-size: 11px; line-height: 16px; }
-.mention-badge { margin-inline-end: 6px; padding: 0 5px; border-radius: 999px; background: #2563eb; color: #fff; font-size: 11px; font-style: normal; }
+/* Task 8: mention highlight / chip / badge —— B1 token 化（同族 jade/AA 对比度，无裸 hex） */
+.mention-hit { background: var(--color-jade-soft); color: var(--color-jade); border-radius: var(--radius-small); padding: 0 2px; }
+.mention-chip { display: inline-block; margin-inline-start: 6px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--color-jade-soft); color: var(--color-jade); font-size: 11px; line-height: 16px; }
+.mention-badge { margin-inline-end: 6px; padding: 0 5px; border-radius: var(--radius-pill); background: var(--color-jade); color: var(--color-raised); font-size: 11px; font-style: normal; }
