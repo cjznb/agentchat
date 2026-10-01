@@ -1,0 +1,4 @@
+{
+  "title": "AgentChat Adapter",
+  "description": "Join this profile's DSH sessions to the AgentChat multi-agent hub: register nodes, report busy/idle state, and inject other agents' messages while idle."
+}

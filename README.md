@@ -4,7 +4,7 @@
 
 ## 状态
 
-Hub 核心 + Web UI + 两个厂商适配器（OpenCode / Claude Code）**均已实现**（Hub：HTTP/WS/MCP、ask 批示、通知中心、审批闸门；Web UI：聊天软件式三栏界面；适配器：进程外插件/hooks + 一键安装器）。spec 见 `docs/superpowers/specs/`。
+Hub 核心 + Web UI + 三个厂商适配器（OpenCode / Claude Code / DSH 桌面端）**均已实现**（Hub：HTTP/WS/MCP、ask 批示、通知中心、审批闸门；Web UI：聊天软件式三栏界面；适配器：进程外插件/hooks + 一键安装器）。spec 见 `docs/superpowers/specs/`。
 
 ## Web UI
 
@@ -90,10 +90,10 @@ CI / 管道 / 脚本一律不开。`--no-open` 与 `AGENTCHAT_NO_OPEN` 是同一
 
 ## 适配器
 
-把 OpenCode / Claude Code 接入 Hub —— 两者都是**进程外 pull 适配器**：Hub **不主动推送**，由适配器在 agent
+把 OpenCode / Claude Code / DSH 桌面端接入 Hub —— 三者都是**进程外 pull 适配器**：Hub **不主动推送**，由适配器在 agent
 空闲时**主动拉取**待投递内容（agent 侧无长驻连接可被 Hub 推送）。
 发送时 Hub 一律为合格收件方建 wake_job（不依赖厂商登记），pull 适配器在认领时投递；
-OpenCode 插件在空闲期间还会**周期轮询**（`AGENTCHAT_POLL_MS`，默认 10s）补拉，故「已经 idle 之后」到达的消息也能被投递。
+OpenCode 插件与 DSH 插件在空闲期间还会**周期轮询**（`AGENTCHAT_POLL_MS`，默认 10s）补拉，故「已经 idle 之后」到达的消息也能被投递。
 
 **厂商登记免手动配置**：厂商列表按 **env `AGENTCHAT_ADAPTERS` > `<AGENTCHAT_HOME>/config.json` 的
 `adapters` 字段 > 空** 解析（**env 为空串 = 显式清空**并压过文件；只有**未设**才回落到文件）。两个安装器安装时会把**本厂商 id 自动合并**进 `config.json`（幂等、保留其它键、
@@ -111,12 +111,25 @@ OpenCode 插件在空闲期间还会**周期轮询**（`AGENTCHAT_POLL_MS`，默
 |---|---|---|
 | OpenCode | `node adapters/opencode/install.mjs` | [docs/adapters-opencode.md](docs/adapters-opencode.md) |
 | Claude Code | `node adapters/claude-code/install.mjs` | [docs/adapters-claude-code.md](docs/adapters-claude-code.md) |
+| DSH 桌面端 | `node adapters/dsh/install.mjs --profile desktop` | [docs/adapters-dsh.md](docs/adapters-dsh.md) |
 
-两安装器均**幂等**、改动前自动备份、支持 `--dry-run`（只打印不落盘）与 `--uninstall`（精确移除本适配器条目）。
+三个安装器均**幂等**、改动前自动备份、支持 `--dry-run`（只打印不落盘）与 `--uninstall`（精确移除本适配器条目）。
 OpenCode 的 MCP 条目是**本地 stdio 桥**（`adapters/opencode/mcp-bridge.mjs`），配置里**不含 `{file:}` 引用
 与 token 明文** —— 身份与 token 由桥**逐请求**从磁盘读取；旧版会砖的 `{file:}` 结构会被安装器**自动迁移**。
 桥对每次 `tools/call` 会把插件（`tool.execute.before`）注入的 `x-agentchat-session` **剥离**并转请求头，
 使 Hub 按**会话节点**（`task_ref`）解析出站身份 —— 故会话回复不再从容器（实例节点）发出。
+
+**DSH 桌面端适配器**是 **Cordis bundle**（`adapters/dsh/`：纯 ESM Host 插件 + `mcp-bridge.mjs`），装进
+DSH profile 而不是某个配置文件：安装器在 `<DSH_HOME>/profiles/node_modules` 建目录联接、把本包追加进
+profile `package.json` 的 `dsh.profile.bundles`，并把 Hub 的 MCP 行写进 profile 的 `cordis.patch.yml`
+（bundle 自带的 patch 只插入插件行，**不含任何机器路径**，故同一份包可被任意路径安装）。
+运行时事件映射：`agent/status` → `busy`/`idle`、`agent/created` → 注册节点、`agent/disposed` → **不退役**
+（DSH 无「会话删除」事件，而 Hub 的已退役节点永久拒绝同 `task_ref` 再注册）。
+**已知限制**：DSH 的 `tools/pre-execute` 不允许改写工具入参，故无法像 OpenCode 那样注入逐会话身份提示。
+适配器改用**磁盘会话提示**（`<AGENTCHAT_HOME>/agents/dsh.current`）：**恰好一个**顶层会话时出站记账精确到
+该会话节点（对端可正常回复并由插件唤醒），0 个或 ≥2 个上层会话并存时退回**实例容器节点**（此时 Hub 会拒绝
+「以容器为收件方」的回复，对端得到明确错误）。唤醒/注入始终按会话节点，不受影响。彻底修法是改用
+`ctx.tools.register()` 的原生工具面。详见 [docs/adapters-dsh.md](docs/adapters-dsh.md)。
 
 > **Claude Code 有两个落点（务必区分）**：**hooks 落 `settings.json`**；**MCP 配置落 `~/.claude.json` 顶层
 > `mcpServers`**（或 `--mcp-config` 指向项目 `.mcp.json`；设 `CLAUDE_CONFIG_DIR` 时随其重定位）——**两个不同文件**。

@@ -1,0 +1,4 @@
+{
+  "title": "AgentChat 适配器",
+  "description": "把本 profile 的 DSH 会话接入 AgentChat 多 Agent 中枢：注册节点、上报忙碌/空闲状态、空闲时注入其他 agent 的消息。"
+}

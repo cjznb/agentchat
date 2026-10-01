@@ -1,0 +1,14 @@
+# AgentChat DSH 适配器 · bundle patch（随包发布，路径无关）
+#
+# 只插入**本适配器自己的 Host 插件行**（`@agentchat/dsh-adapter` → `index.js`）。
+# 机器相关的东西刻意不在这里，交给安装器写进 profile 的用户 patch 层：
+#   - Hub 的 MCP 工具行（`@deepseek-ai/dsh-mcp-client` + 本包 `mcp-bridge.mjs` 的绝对路径）
+#   - `AGENTCHAT_ADAPTERS` / `<home>/config.json` 的厂商登记
+# 这样本包可以被 `plugin_manager install_bundle`（target = 本目录绝对路径）或
+# `npx pnpm add <本目录>` 以任意路径安装，而不会把开发机路径写进版本库。
+- insert:
+    - id: agentchat-dsh
+      name: '@agentchat/dsh-adapter'
+      config:
+        # 空闲轮询间隔（毫秒）。可选；不写则读 `AGENTCHAT_POLL_MS`，再退回 10s。
+        pollMs: 10000
