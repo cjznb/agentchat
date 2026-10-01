@@ -144,6 +144,28 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .list-empty small { color: var(--color-muted); font-size: var(--text-label); line-height: 1.4; }
 
 .conversation-list { display: grid; align-content: start; gap: var(--space-1); margin: 0; padding: var(--space-3); list-style: none; overflow-y: auto; min-height: 0; }
+/* C1 「群聊」分组头（不可点击 header + 箭头切换；默认收起，群行挂 group-section-rows） */
+.group-section { display: grid; gap: var(--space-1); }
+.group-section-header { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2); color: var(--color-muted); font: 600 var(--text-label)/1 var(--font-utility); }
+.group-section-title { flex: 1; min-width: 0; }
+.group-section-toggle { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; min-height: 24px; padding: 0; border: 0; border-radius: var(--radius-medium); background: transparent; color: var(--color-muted); cursor: pointer; font: inherit; }
+.group-section-toggle:hover { color: var(--color-jade); }
+.group-section-toggle:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: var(--space-1); }
+.group-section-rows { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
+/* C2 添加成员弹窗（fixed 遮罩 + 面板；picker 区 max-height + 滚动，宽于原内联面板） */
+.member-add-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: var(--space-5); background: color-mix(in srgb, var(--color-canvas) 55%, transparent); }
+.member-add-dialog { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(560px, 100%); max-height: min(80vh, 640px); border: var(--line-thin) solid var(--color-hairline); border-radius: var(--radius-medium); background: var(--color-raised); box-shadow: var(--shadow-overlay); }
+.member-add-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-bottom: var(--line-thin) solid var(--color-hairline); color: var(--color-muted); font: 600 var(--text-label)/1 var(--font-utility); }
+.member-add-close { border: 0; background: transparent; color: var(--color-muted); cursor: pointer; font: inherit; }
+.member-add-close:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: var(--space-1); }
+.member-add-body { min-height: 0; overflow-y: auto; padding: var(--space-3) var(--space-4); }
+.member-add-foot { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-top: var(--line-thin) solid var(--color-hairline); }
+.member-add-foot .group-info-error { margin: 0 auto 0 0; }
+.member-add-confirm, .member-add-cancel { padding: var(--space-2) var(--space-4); border-radius: var(--radius-medium); cursor: pointer; font: 600 var(--text-label)/1 var(--font-utility); }
+.member-add-cancel { border: var(--line-thin) solid var(--color-hairline); background: transparent; color: var(--color-muted); }
+.member-add-confirm { border: var(--line-thin) solid var(--color-jade); background: var(--color-jade); color: var(--color-canvas); }
+.member-add-confirm:disabled { cursor: default; opacity: 0.45; }
+.member-add-confirm:focus-visible, .member-add-cancel:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: var(--space-1); }
 .conversation-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

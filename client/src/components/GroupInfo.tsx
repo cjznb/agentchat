@@ -1,16 +1,22 @@
 /**
  * 群资料面板（spec §11.4「群创建/拉人：群资料页 +」；Plan 3 T7）——`GET /api/groups` 取群 + 成员，
- * 成员按所属根树状展示（`groups.groupMembers`），下拉拉人 `POST /api/groups/:id/members`。
+ * 成员按所属根树状展示（`groups.groupMembers`），加成员 `POST /api/groups/:id/members`。
  * 添加成功后重拉群列表 → 成员树即时更新。
+ *
+ * 批次2 轮C (C2)：「添加成员」入口由内联 `<select>` 改为**模态弹窗**——遮罩 + 面板
+ * 内嵌现有 `MemberPicker`（多选树原样复用），底栏确认/取消；确认走既有 addGroupMember
+ * action（语义不变，仅搬家），取消 / Esc / 点遮罩关闭不提交。弹窗内 picker
+ * max-height + 滚动，显示区域大于原内联面板。
  */
 import { useCallback, useEffect, useState } from "react"
 import type { GroupEntry } from "../../../shared/contracts"
 import { addGroupMember, listGroups } from "../api"
 import { useRenameEditor } from "../actions"
 import { vendorBadge } from "../chat"
-import { addableMembers, groupMembers } from "../groups"
+import { groupMembers } from "../groups"
 import { useStore } from "../store"
 import { statusGlyph, statusLabel } from "../treeFold"
+import { MemberPicker } from "./MemberPicker"
 
 export interface GroupInfoProps {
   readonly conversationId: string
@@ -22,9 +28,11 @@ export function GroupInfo({ conversationId, onClose }: GroupInfoProps) {
   const [entry, setEntry] = useState<GroupEntry | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [pick, setPick] = useState("")
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
+  // C2：添加成员弹窗（打开态 + 已选节点）。
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [picked, setPicked] = useState<readonly string[]>([])
   const rename = useRenameEditor()
 
   const refresh = useCallback(() => {
@@ -41,25 +49,52 @@ export function GroupInfo({ conversationId, onClose }: GroupInfoProps) {
   }, [refresh])
 
   const groups = entry === null ? [] : groupMembers(entry.members, state.roster)
-  const options = entry === null ? [] : addableMembers(state.roster, entry.members)
   const memberTotal = groups.reduce((sum, group) => sum + group.members.length, 0)
 
-  const add = useCallback(() => {
-    if (pick === "" || adding) return
+  const togglePick = useCallback((nodeId: string) => {
+    setPicked((previous) =>
+      previous.includes(nodeId) ? previous.filter((id) => id !== nodeId) : [...previous, nodeId],
+    )
+  }, [])
+
+  /** 取消 / Esc / 遮罩：关闭弹窗并清空选择，不提交。 */
+  const closePicker = useCallback(() => {
+    setPickerOpen(false)
+    setPicked([])
+  }, [])
+
+  // 确认：复用既有加成员 action（addGroupMember 逐个提交，审批/错误/刷新语义不变）。
+  const confirmAdd = useCallback(async () => {
+    if (picked.length === 0 || adding) return
     setAdding(true)
     setAddError(null)
-    void addGroupMember(conversationId, pick)
-      .then((result) => {
+    try {
+      for (const nodeId of picked) {
+        const result = await addGroupMember(conversationId, nodeId)
         if ("approval" in result) {
           setAddError("已提交审批，待批准后生效。")
           return
         }
-        setPick("")
-        refresh()
-      })
-      .catch(() => setAddError("添加失败，请重试。"))
-      .finally(() => setAdding(false))
-  }, [pick, adding, conversationId, refresh])
+      }
+      setPicked([])
+      setPickerOpen(false)
+      refresh()
+    } catch {
+      setAddError("添加失败，请重试。")
+    } finally {
+      setAdding(false)
+    }
+  }, [picked, adding, conversationId, refresh])
+
+  // Esc 关闭弹窗（不提交）。
+  useEffect(() => {
+    if (!pickerOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closePicker()
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [pickerOpen, closePicker])
 
   return (
     <aside className="group-info" data-testid="group-info" aria-label="群资料">
@@ -169,37 +204,72 @@ export function GroupInfo({ conversationId, onClose }: GroupInfoProps) {
         </section>
       ))}
       <div className="group-add">
-        <label className="group-add-field">
-          <span>添加成员</span>
-          <select
-            className="group-add-select"
-            data-testid="group-add-select"
-            value={pick}
-            disabled={options.length === 0 || adding}
-            onChange={(event) => setPick(event.target.value)}
-          >
-            <option value="">选择节点…</option>
-            {options.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.name}
-              </option>
-            ))}
-          </select>
-        </label>
         <button
           className="group-add-button"
-          data-testid="group-add-submit"
+          data-testid="group-add-open"
           type="button"
-          disabled={pick === "" || adding}
-          onClick={add}
+          onClick={() => setPickerOpen(true)}
         >
-          添加
+          添加成员
         </button>
       </div>
-      {addError !== null ? (
-        <p className="group-info-error" role="alert" data-testid="group-add-error">
-          {addError}
-        </p>
+      {pickerOpen ? (
+        <div
+          className="member-add-overlay"
+          data-testid="member-add-overlay"
+          onClick={closePicker}
+        >
+          <div
+            className="member-add-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="添加成员"
+            data-testid="member-add-dialog"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="member-add-head">
+              <span>添加成员</span>
+              <button
+                className="member-add-close"
+                data-testid="member-add-close"
+                aria-label="关闭"
+                onClick={closePicker}
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+            <div className="member-add-body">
+              <MemberPicker selected={picked} onToggle={togglePick} />
+            </div>
+            <div className="member-add-foot">
+              {addError !== null ? (
+                <p className="group-info-error" role="alert" data-testid="group-add-error">
+                  {addError}
+                </p>
+              ) : null}
+              <button
+                className="member-add-cancel"
+                data-testid="member-add-cancel"
+                type="button"
+                onClick={closePicker}
+              >
+                取消
+              </button>
+              <button
+                className="member-add-confirm"
+                data-testid="member-add-confirm"
+                type="button"
+                disabled={picked.length === 0 || adding}
+                onClick={() => {
+                  void confirmAdd()
+                }}
+              >
+                确认
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </aside>
   )
