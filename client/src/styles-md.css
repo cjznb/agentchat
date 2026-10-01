@@ -1,56 +1,32 @@
-/* 消息 Markdown 排版（轮 2 T4；styles.css 不再扩，独立成文件由 main.tsx 引入）。
- * - .md-body：段落/标题/列表/blockquote 排版（气泡本体仍是 .bubble-body，双类同挂）
- * - code.md-inline 行内等宽浅底；围栏 pre 横向滚动浅底
- * - .md-table-wrap 横向滚动 + 表格边框
- * - hljs token 小主题：全部取 styles.css :root 既有 token（无新增硬编码色值）
- * - mark.mention-hit 已在 styles.css（约 1111 行）定义，此处不重复
- * 间距 token 不确定处用 var(--space-N, <rem 兜底>)，颜色只用已确认存在的 token。 */
+/* 消息 Markdown 排版（轮 2 T4；styles.css 不再扩，main.tsx 引入本文件）。
+   颜色全部取 styles.css :root 既有 token；mark.mention-hit 已在 styles.css，不重复定义；
+   间距 token 不确定处用 var(--space-N, rem 兜底)。 */
+.md-body { font-size: var(--text-body); line-height: 1.55; word-break: break-word; }
+.md-body > :first-child { margin-top: 0; }
+.md-body > :last-child { margin-bottom: 0; }
+.md-body p { margin: 0 0 var(--space-3, 0.75rem); }
 
-/* ---- 容器与基础排版 ---- */
-.md-body {
-  font-size: var(--text-body);
-  line-height: 1.55;
-  word-break: break-word;
-}
-
-.md-body>*:first-child { margin-top: 0; }
-.md-body>*:last-child { margin-bottom: 0; }
-
-.md-body p {
-  margin: 0 0 var(--space-3, 0.75rem);
-}
-
-/* ---- 标题层级（气泡内不宜过大，逐级收敛） ---- */
-.md-body h1,
-.md-body h2,
-.md-body h3,
-.md-body h4,
-.md-body h5,
-.md-body h6 {
+/* 标题层级（气泡内逐级收敛） */
+.md-body h1, .md-body h2, .md-body h3,
+.md-body h4, .md-body h5, .md-body h6 {
   margin: var(--space-4, 1rem) 0 var(--space-2, 0.5rem);
   line-height: 1.3;
   font-weight: 650;
 }
-
 .md-body h1 { font-size: 1.25rem; }
 .md-body h2 { font-size: 1.125rem; }
 .md-body h3 { font-size: 1rem; }
-.md-body h4,
-.md-body h5,
-.md-body h6 { font-size: 0.9375rem; }
+.md-body h4, .md-body h5, .md-body h6 { font-size: 0.9375rem; }
 
-/* ---- 列表缩进 ---- */
-.md-body ul,
-.md-body ol {
+/* 列表缩进 */
+.md-body ul, .md-body ol {
   margin: 0 0 var(--space-3, 0.75rem);
   padding-left: 1.375rem;
 }
-
 .md-body li { margin: 0.15rem 0; }
-.md-body li>ul,
-.md-body li>ol { margin-bottom: 0; }
+.md-body li > ul, .md-body li > ol { margin-bottom: 0; }
 
-/* ---- 引用：左边条 + 弱化字色 ---- */
+/* 引用：左边条 + 弱化字色 */
 .md-body blockquote {
   margin: 0 0 var(--space-3, 0.75rem);
   padding: 0.25rem var(--space-3, 0.75rem);
@@ -58,22 +34,13 @@
   color: var(--color-muted);
 }
 
-/* ---- 链接 / 分隔线 ---- */
-.md-body a {
-  color: var(--color-role-supervisor);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
+/* 链接 / 分隔线（己方 jade 底链接跟字色，避免蓝字撞底） */
+.md-body a { color: var(--color-role-supervisor); text-decoration: underline; text-underline-offset: 2px; }
+.message-row[data-own="true"] .md-body a { color: inherit; }
+.md-body hr { border: none; border-top: var(--line-thin) solid var(--color-hairline); margin: var(--space-4, 1rem) 0; }
 
-.md-body hr {
-  border: none;
-  border-top: var(--line-thin) solid var(--color-hairline);
-  margin: var(--space-4, 1rem) 0;
-}
-
-/* ---- 行内 code：等宽 + 浅底 + 圆角 ---- */
-.code.md-inline,
-.md-body code.md-inline {
+/* 行内 code：等宽 + 浅底 + 圆角 */
+code.md-inline {
   font-family: var(--font-utility);
   font-size: 0.92em;
   padding: 0.1em 0.35em;
@@ -81,7 +48,7 @@
   background: color-mix(in srgb, var(--color-ink) 7%, transparent);
 }
 
-/* ---- 围栏 code：横向滚动 + 浅底（语言 class 由 rehype-highlight 挂上） ---- */
+/* 围栏 code：横向滚动 + 浅底（语言 class 由 rehype-highlight 挂上） */
 .md-body pre {
   margin: 0 0 var(--space-3, 0.75rem);
   padding: var(--space-3, 0.75rem);
@@ -89,9 +56,7 @@
   border-radius: var(--radius-small);
   background: color-mix(in srgb, var(--color-ink) 6%, transparent);
 }
-
-.md-body pre code,
-.md-body pre code.hljs {
+.md-body pre code, .md-body pre code.hljs {
   display: block;
   padding: 0;
   background: transparent;
@@ -99,91 +64,31 @@
   font-size: var(--text-body);
 }
 
-/* ---- 表格：外层横向滚动 + 边框 ---- */
+/* 表格：外层横向滚动 + 边框 */
 .md-table-wrap {
   overflow-x: auto;
   margin: 0 0 var(--space-3, 0.75rem);
   border: var(--line-thin) solid var(--color-hairline);
   border-radius: var(--radius-small);
 }
-
-.md-table-wrap table {
-  border-collapse: collapse;
-  min-width: 100%;
-  font-size: var(--text-body);
-}
-
-.md-table-wrap th,
-.md-table-wrap td {
+.md-table-wrap table { border-collapse: collapse; min-width: 100%; font-size: var(--text-body); }
+.md-table-wrap th, .md-table-wrap td {
   border: var(--line-thin) solid var(--color-hairline);
   padding: 0.3rem 0.6rem;
   text-align: left;
 }
+.md-table-wrap th { background: color-mix(in srgb, var(--color-list) 70%, transparent); font-weight: 600; }
 
-.md-table-wrap th {
-  background: color-mix(in srgb, var(--color-list) 70%, transparent);
-  font-weight: 600;
-}
-
-/* ---- 己方（ jade 底）气泡内：链接跟随字色，避免蓝字撞底 ---- */
-.message-row[data-own="true"] .md-body a {
-  color: inherit;
-}
-
-/* ---- hljs token 小主题（全部取既有 :root token） ---- */
-.hljs {
-  color: var(--color-ink);
-  background: transparent;
-}
-
-.hljs-comment,
-.hljs-quote {
-  color: var(--color-muted);
-  font-style: italic;
-}
-
-.hljs-keyword,
-.hljs-selector-tag,
-.hljs-built_in,
-.hljs-type,
-.hljs-doctag {
-  color: var(--color-role-supervisor);
-}
-
-.hljs-string,
-.hljs-regexp,
-.hljs-addition,
-.hljs-attr {
-  color: var(--color-jade);
-}
-
-.hljs-number,
-.hljs-symbol,
-.hljs-bullet,
-.hljs-literal {
-  color: var(--color-amber);
-}
-
-.hljs-title,
-.hljs-section,
-.hljs-name {
-  color: var(--color-error);
-}
-
-.hljs-meta,
-.hljs-meta .hljs-keyword {
-  color: var(--color-muted);
-}
-
-.hljs-variable,
-.hljs-template-variable,
-.hljs-params {
-  color: var(--color-ink);
-}
-
-.hljs-deletion {
-  color: var(--color-error);
-}
-
+/* hljs token 小主题（全部取既有 :root token，无新增硬编码色值） */
+.hljs { color: var(--color-ink); background: transparent; }
+.hljs-comment, .hljs-quote { color: var(--color-muted); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in,
+.hljs-type, .hljs-doctag { color: var(--color-role-supervisor); }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attr { color: var(--color-jade); }
+.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-literal { color: var(--color-amber); }
+.hljs-title, .hljs-section, .hljs-name { color: var(--color-error); }
+.hljs-meta { color: var(--color-muted); }
+.hljs-variable, .hljs-template-variable, .hljs-params { color: var(--color-ink); }
+.hljs-deletion { color: var(--color-error); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 700; }
