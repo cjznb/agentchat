@@ -15,16 +15,21 @@ if (process.env.TEST_WORKER_INDEX === undefined) {
   mkdirSync(hubHome, { recursive: true })
 }
 
+// 端口可参数化：默认 4646（CI/自举惯例不变）；开发机 4646 被真机 Hub 占用时，
+// 以 `AGENTCHAT_E2E_PORT=4647 npx playwright test …` 拉起隔离实例，避免测试
+// 打到真机（reuseExistingServer:false 下真机占用会让 webServer 启动冲突）。
+const port = Number(process.env.AGENTCHAT_E2E_PORT ?? 4646)
+
 export default defineConfig({
   testDir: "./tests/e2e",
-  use: { baseURL: "http://127.0.0.1:4646", trace: "retain-on-failure" },
+  use: { baseURL: `http://127.0.0.1:${port}`, trace: "retain-on-failure" },
   webServer: {
     // 自举：干净检出上 `npx playwright test` 直接可用 —— 先构建客户端（`start` 从 `client/dist`
     // 托管静态页），再拉起生产入口（HTTP + dispatcher）。
     command: "npm run build && npm start",
-    url: "http://127.0.0.1:4646/api/health",
+    url: `http://127.0.0.1:${port}/api/health`,
     reuseExistingServer: false,
     timeout: 120_000,
-    env: { AGENTCHAT_HOME: hubHome },
+    env: { AGENTCHAT_HOME: hubHome, AGENTCHAT_PORT: String(port) },
   },
 })
