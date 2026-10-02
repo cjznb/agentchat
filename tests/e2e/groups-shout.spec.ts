@@ -48,6 +48,9 @@ test("builds a group from a multi-select tree, adds members, and summarizes a sh
     await page.getByTestId("group-name-input").fill("gs-group")
     await memberRow(page, seed.root1).getByTestId("member-toggle").click()
     await memberRow(page, seed.child1).getByTestId("member-check").check()
+    // gs-board（根级逻辑节点）子树无 online/busy 成员（logical 恒非在线）→ partitionPickerRows
+    // 将其归入「离线/历史会话」折叠栏，且折叠时行不进 DOM —— 先展开再勾选。
+    await page.getByTestId("picker-legacy-toggle").click()
     await memberRow(page, seed.logical).getByTestId("member-check").check()
     await expect(page.getByTestId("member-count")).toHaveText("已选 2 名")
     await page.getByTestId("group-create-submit").click()
@@ -87,8 +90,14 @@ test("builds a group from a multi-select tree, adds members, and summarizes a sh
       page.getByTestId("member-picker").locator('[data-testid="member-row"]', { hasText: "用户" }),
     ).toHaveCount(0)
 
-    // 展开 gs-root1 → 勾选 gs-child2 → 确认提交（替代旧 group-add-select + group-add-submit）。
-    await memberRow(page, seed.root1).getByTestId("member-toggle").click()
+    // 勾选 gs-child2 → 确认提交（替代旧 group-add-select + group-add-submit）。
+    // 展开态经 localStorage(agentchat:expandedPicker) 跨 picker 实例持久化：建群流程已展开过
+    // gs-root1 → 弹窗内默认即展开，盲目点 toggle 会反而收起（child2 卸载）——按 aria-expanded 条件展开。
+    const root1Toggle = memberRow(page, seed.root1).getByTestId("member-toggle")
+    if ((await root1Toggle.getAttribute("aria-expanded")) === "false") {
+      await root1Toggle.click()
+    }
+    await expect(memberRow(page, seed.child2)).toBeVisible()
     await memberRow(page, seed.child2).getByTestId("member-check").check()
     await page.getByTestId("member-add-confirm").click()
     await expect(groupMember(page, seed.child2)).toBeVisible()
@@ -102,19 +111,20 @@ test("builds a group from a multi-select tree, adds members, and summarizes a sh
     await page.getByTestId("shout-input").fill("全员注意")
     await page.getByTestId("shout-send").click()
 
-    // 收件方 = 全部 agent 去掉 human = root1/root2/child1/child2/logical = 5；无适配器 → 全排队。
-    await expect(page.getByTestId("shout-queued")).toHaveText("5")
+    // 收件方 = kind='runtime' 且非 retired 的 agent 去 human（wake.ts §14.4 绑定规则）=
+    // root1/root2/child1/child2 = 4；gs-board 为 logical → 不生成投递行、不入汇总（历史期望 5 已过时）。
+    await expect(page.getByTestId("shout-queued")).toHaveText("4")
     await expect(page.getByTestId("shout-online")).toHaveText("0")
     await expect(page.getByTestId("shout-left")).toHaveText("0")
 
-    // 真实回执演进：root1 ack → `receipt` 事件 → 汇总刷新为 在线 1 / 排队 4。
+    // 真实回执演进：root1 ack → `receipt` 事件 → 汇总刷新为 在线 1 / 排队 3（总 4）。
     const shoutId = getConversationByKey(db, SHOUT_KEY)?.id
     if (shoutId === undefined) throw new Error("shout conversation missing after send")
     const shoutMessage = latestInConversation(db, shoutId)
     if (shoutMessage === undefined) throw new Error("shout message missing after send")
     expect(ack(db, seed.root1, [shoutMessage.id])).toBe(1)
     await expect(page.getByTestId("shout-online")).toHaveText("1", { timeout: 3000 })
-    await expect(page.getByTestId("shout-queued")).toHaveText("4")
+    await expect(page.getByTestId("shout-queued")).toHaveText("3")
   } finally {
     await page.close()
     resetWsHub()
