@@ -177,3 +177,62 @@ test("场景g3：成员行移出确认可见态（轮D补景）", async ({ page 
   await shot(page, "member-remove-confirm", "row", page.getByTestId("member-remove-confirm"))
   await expectNoOverflow(page, "member-remove")
 })
+
+test("场景g4：选中会话计算样式（jade9% tint + inset 左缘 accent）", async ({ page }) => {
+  await openGroupChat(page)
+  // fixture active 会话 = 群「发布协调群」，其列表行藏于默认折叠的「群聊」分组内。
+  const toggle = page.getByTestId("group-section-toggle")
+  await expect(toggle).toHaveAttribute("aria-expanded", "false")
+  await toggle.click()
+  await expect(toggle).toHaveAttribute("aria-expanded", "true")
+  // 展开后，active 行可见。
+  const activeRow = page.locator('[data-testid="conversation-item"][data-active="true"]')
+  await expect(activeRow).toBeVisible()
+  // 计算样式断言（沿 e/f 走 evaluate + 窄化作用域）。
+  // 算式来自 styles.css：
+  //   .conversation-item[data-active="true"] {
+  //     background: color-mix(in srgb, var(--color-jade) 9%, var(--color-raised)); // tint
+  //     box-shadow: inset var(--line-signal) 0 0 0 var(--color-jade);              // inset 左缘 accent
+  //   }
+  //  对照：data-kind="shout" 行也含 inset（见 .conversation-item[data-kind="shout"]），
+  //  故故意排除 shout 行，只择普通 DM/flat 行作对照。
+  const styles = await page.evaluate(() => {
+    const scope = globalThis as unknown as {
+      document: { querySelectorAll(selector: string): ArrayLike<{ getAttribute(name: string): string | null }> }
+      getComputedStyle(element: { getAttribute(name: string): string | null }): {
+        backgroundColor: string
+        boxShadow: string
+        display: string
+        visibility: string
+      }
+    }
+    type Sample = { backgroundColor: string; boxShadow: string }
+    const items = scope.document.querySelectorAll('[data-testid="conversation-item"]')
+    let active: Sample | null = null
+    let control: Sample | null = null
+    for (let index = 0; index < items.length; index += 1) {
+      const element = items[index]
+      if (element === undefined) continue
+      const style = scope.getComputedStyle(element)
+      if (style.display === "none" || style.visibility === "hidden") continue
+      const isActive = element.getAttribute("data-active") === "true"
+      const isShout = element.getAttribute("data-kind") === "shout"
+      if (isActive) active = { backgroundColor: style.backgroundColor, boxShadow: style.boxShadow }
+      else if (!isShout && control === null)
+        control = { backgroundColor: style.backgroundColor, boxShadow: style.boxShadow }
+    }
+    return { active, control }
+  })
+  if (styles.active === null) throw new Error("data-active conversation-item 不可见/缺失")
+  // 选中态：box-shadow 含 inset（左缘 accent）；background 非纯白（jade9% tint）。
+  expect(styles.active.boxShadow).toContain("inset")
+  expect(styles.active.backgroundColor).not.toBe("rgb(255, 255, 255)")
+  // 对照：普通行不含 inset，且 background 与选中行不同。
+  if (styles.control !== null) {
+    expect(styles.control.boxShadow).not.toContain("inset")
+    expect(styles.control.backgroundColor).not.toBe(styles.active.backgroundColor)
+  }
+  await shot(page, "g4-active-conversation", "list", page.getByTestId("middle-list"))
+  await shot(page, "g4-active-conversation", "active", activeRow)
+  await expectNoOverflow(page, "g4-active-conversation")
+})
