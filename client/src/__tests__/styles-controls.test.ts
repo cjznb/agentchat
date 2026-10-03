@@ -5,7 +5,15 @@
  * 防止回退到浏览器原生默认样式。
  */
 import { describe, expect, it } from "vitest"
-import css from "../styles-controls.css?raw"
+// 预存在缺陷修复：`../styles-controls.css?raw` 在本仓 vitest 下解析为空串（HEAD 上基线
+// 10 断言即 9 红）。改为 node:fs 直读原文 —— 断言内容零删除、语义不变。
+import { existsSync, readFileSync } from "node:fs"
+import { resolve } from "node:path"
+
+// vitest 下 import.meta.url 非 file scheme，改用 cwd 双候选（repo root / client）解析。
+const cssPath = [resolve(process.cwd(), "src/styles-controls.css"), resolve(process.cwd(), "client/src/styles-controls.css")].find(existsSync)
+if (!cssPath) throw new Error("styles-controls.css not found from " + process.cwd())
+const css = readFileSync(cssPath, "utf8")
 
 describe("styles-controls.css 表单控件 baseline", () => {
   it("文件非空", () => {
@@ -81,5 +89,54 @@ describe("styles-controls.css 表单控件 baseline", () => {
     // styles-controls.css 不应引入新的 hex 颜色值（排除注释中的十六进制引用）
     const body = css.replace(/\/\*[^*]*\*\//g, "")
     expect(body).not.toMatch(/#[0-9a-fA-F]{3,8}(?![0-9a-fA-F])/)
+  })
+})
+
+// —— P2-fix 轮：成员行换行根因 + 聊天栏边界/选中态（styles.css） ——
+import styles from "../styles.css?raw"
+
+/** 提取某选择器规则块 {...} 的内容（不含花括号）；未命中返回 ""。 */
+function ruleBlock(cssText: string, selectorSource: string): string {
+  const re = new RegExp(`${selectorSource}\\s*\\{([^}]*)\\}`)
+  const m = cssText.match(re)
+  return m?.[1] ?? ""
+}
+
+describe("P2-fix 成员行换行根因（flex 基准 0 + shrink 0）", () => {
+  it("member-name 使用 flex: 1 1 0（长名不再触发换行判定）", () => {
+    const block = ruleBlock(styles, "\\.member-name")
+    expect(block).toMatch(/flex:\s*1\s*1\s*0(?![0-9.])/)
+  })
+
+  it("尾部按钮/图标 flex-shrink: 0（不被压缩挤出行）", () => {
+    for (const sel of ["\\.member-icon", "\\.node-dot", "\\.member-rename", "\\.member-remove"]) {
+      const block = ruleBlock(styles, sel)
+      expect(block, `${sel} 应含 flex-shrink: 0`).toContain("flex-shrink: 0")
+    }
+  })
+
+  it("编辑态 member-rename-form 保持整行换行（flex: 1 0 100%）", () => {
+    const block = ruleBlock(styles, "\\.member-rename-form")
+    expect(block).toMatch(/flex:\s*1\s*0\s*100%/)
+  })
+})
+
+describe("P2-fix 聊天栏边界 strong token 与选中态 jade accent", () => {
+  it(":root 定义 --color-hairline-strong（color-mix 基于 ink）", () => {
+    expect(styles).toContain("--color-hairline-strong:")
+    expect(styles).toMatch(
+      /--color-hairline-strong:\s*color-mix\(in srgb,\s*var\(--color-ink\)\s+\d+%/,
+    )
+  })
+
+  it("bubble-body 边框引用 hairline-strong", () => {
+    const block = ruleBlock(styles, "\\.bubble-body")
+    expect(block).toContain("var(--color-hairline-strong)")
+  })
+
+  it("会话选中态为 jade tint 背景 + inset 左缘 accent", () => {
+    const block = ruleBlock(styles, String.raw`\.conversation-item\[data-active="true"\]`)
+    expect(block).toContain("color-mix(in srgb, var(--color-jade) 9%")
+    expect(block).toContain("box-shadow: inset var(--line-signal) 0 0 0 var(--color-jade)")
   })
 })

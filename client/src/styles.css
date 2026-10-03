@@ -8,6 +8,7 @@
   --color-muted: #63666f;
   --color-rail-ink: #c8cad2;
   --color-hairline: #dfe1e7;
+  --color-hairline-strong: color-mix(in srgb, var(--color-ink) 28%, var(--color-hairline));
   --color-jade: #0f7a52; /* AA：白字/自身文字在浅底上对比度 ≥4.5（原 #19a974 仅 ~2.9） */
   --color-jade-soft: #dff5ec;
   --color-error: #b83b4b;
@@ -183,7 +184,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   transition: background var(--duration-micro) var(--ease-standard);
 }
 .conversation-item:hover { background: color-mix(in srgb, var(--color-jade) 8%, transparent); }
-.conversation-item[data-active="true"] { background: var(--color-raised); }
+.conversation-item[data-active="true"] { background: color-mix(in srgb, var(--color-jade) 9%, var(--color-raised)); box-shadow: inset var(--line-signal) 0 0 0 var(--color-jade); }
 .conversation-item:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: calc(var(--space-1) * -1); }
 .conversation-item:disabled { cursor: default; }
 .conversation-body { display: grid; gap: var(--space-1); min-width: 0; }
@@ -275,7 +276,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   gap: var(--space-3);
   min-height: calc(var(--space-12) * 2);
   padding: var(--space-6);
-  border-bottom: var(--line-thin) solid var(--color-hairline);
+  border-bottom: var(--line-thin) solid var(--color-hairline-strong);
 }
 .chat-header p { margin: 0 0 var(--space-2); color: var(--color-muted); font: 600 var(--text-label)/1.4 var(--font-utility); letter-spacing: 0.08em; }
 .chat-header h1 { margin: 0; font-size: var(--text-title); line-height: 1.25; }
@@ -321,7 +322,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .bubble-body {
   margin: 0;
   padding: var(--space-3) var(--space-4);
-  border: var(--line-thin) solid var(--color-hairline);
+  border: var(--line-thin) solid var(--color-hairline-strong);
   border-radius: var(--radius-medium);
   background: var(--color-raised);
   font-size: var(--text-body);
@@ -355,7 +356,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   outline-offset: var(--space-1);
 }
 
-.composer { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); padding: var(--space-4) var(--space-6); border-top: var(--line-thin) solid var(--color-hairline); background: var(--color-view); }
+.composer { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); padding: var(--space-4) var(--space-6); border-top: var(--line-thin) solid var(--color-hairline-strong); background: var(--color-view); }
 .composer-input { min-height: var(--target-size); max-height: 8rem; padding: var(--space-3); border: var(--line-thin) solid var(--color-hairline); border-radius: var(--radius-medium); color: var(--color-ink); background: var(--color-raised); font: var(--text-body)/1.5 var(--font-ui); resize: none; }
 .composer-input:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: calc(var(--space-1) * -1); }
 .composer-input::placeholder { color: var(--color-muted); opacity: 1; }
@@ -451,6 +452,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .node-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-width: 0; }
 .node-status { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; }
 .node-dot {
+  flex-shrink: 0;
   display: inline-grid;
   place-items: center;
   font-size: var(--text-body);
@@ -801,6 +803,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   background: var(--color-raised);
 }
 .member-icon {
+  flex-shrink: 0;
   display: grid;
   place-items: center;
   width: var(--space-6);
@@ -813,9 +816,11 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .member-icon[data-vendor="opencode"] { background: var(--color-rail); }
 .member-icon[data-vendor="claude-code"] { background: var(--color-amber); }
 .member-icon.is-logical { color: var(--color-jade); background: color-mix(in srgb, var(--color-jade) 18%, transparent); }
-.member-name { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: var(--text-body); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; scrollbar-width: thin; scrollbar-color: var(--color-hairline) transparent; }
+.member-name { flex: 1 1 0; min-width: 0; overflow: hidden; font-size: var(--text-body); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; scrollbar-width: thin; scrollbar-color: var(--color-hairline) transparent; }
 .member-name::-webkit-scrollbar { width: 3px; background: transparent; }
 .member-name::-webkit-scrollbar-thumb { border-radius: var(--radius-small); background: var(--color-hairline); }
+.member-rename { flex-shrink: 0; }
+.member-remove { flex-shrink: 0; }
 .member-rename-form { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
 .member-rename-input { flex: 1 1 auto; min-width: 0; min-height: var(--target-size); padding: 0 var(--space-2); border: var(--line-thin) solid var(--color-hairline); border-radius: var(--radius-medium); color: var(--color-ink); background: var(--color-raised); font: var(--text-body)/1.5 var(--font-ui); }
 .member-rename-input:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: calc(var(--space-1) * -1); }
@@ -1149,7 +1154,7 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
    派生自 .bubble-revoke（hairline 边框 + hover 转 error）与 .card-button.is-reject
    （danger 族）。:root 已有红系 token `--color-error`（styles.css:13）故**不新增变量**；
    全 token 化无裸 hex。解散按钮独立 .group-danger-button，不再复用青色 .group-add-button。 */
-.member-remove-confirm { display: inline-flex; align-items: center; gap: var(--space-1); }
+.member-remove-confirm { display: inline-flex; align-items: center; gap: var(--space-1); flex-shrink: 0; }
 .member-remove-yes, .member-remove-no {
   padding: 0 var(--space-2);
   border: var(--line-thin) solid var(--color-hairline);
