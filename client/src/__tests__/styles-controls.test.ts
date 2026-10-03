@@ -5,8 +5,8 @@
  * 防止回退到浏览器原生默认样式。
  */
 import { describe, expect, it } from "vitest"
-// 预存在缺陷修复：`../styles-controls.css?raw` 在本仓 vitest 下解析为空串（HEAD 上基线
-// 10 断言即 9 红）。改为 node:fs 直读原文 —— 断言内容零删除、语义不变。
+// 注：本文件曾在不加载根 vitest 配置的方式下运行时 ?raw 得到空串，导致基于全文的
+// hex 断言产生误导性失败——现改为 node:fs 直读（与是否加载根配置无关），断言零删除、语义不变。
 import { existsSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 
