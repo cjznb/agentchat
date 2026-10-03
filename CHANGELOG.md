@@ -8,15 +8,26 @@
 
 - **消息 Markdown 渲染**：react-markdown + GFM + rehype-sanitize + rehype-highlight 管线；设置页「消息渲染」范围三选（全部默认 / 仅 AI 回复 / 关闭，即时生效）；普通气泡逐条「看原文 / 看排版」切换与「复制」按钮；mention 高亮在 MD 视图内递归注入；系统消息/批示卡不参与。
 - **DSH 原生工具面**：`ctx.tools.register` 逐调用按会话注入身份；出站身份 fail-closed（删除「最近 running」启发式，修真机身份冒用）；发布提示前校验磁盘现值可自愈；`tools.register` 方法形式调用修复（12 个原生工具注册失败）。
+- **反寒暄规则 R1/R2**（沟通规范第 5/6 条，五落点同步）：agent 对 agent 回复只写一次 `reply`、不重发会话（「没有观众」）；agent 对人类答复不复述工具输出（人类已可见）。
+- **群聊删除成员**：`POST /api/groups/:id/members/remove`——守卫链 400/404/400/404/409（`cannot_remove_last_member` 保底留 1 人），成功向余下成员发 `kind=system` 通知（0 wake）；群成员行悬停「移出」两步确认。
+- **解散群聊**：`POST /api/groups/:id/dissolve`——先广播「群已解散」（复用 `message` 封套，四事件红线不动）再事务级联删 `wake_jobs→messages→read_states→participants→conversations`；资料卡 danger 区按钮 + alertdialog 显式确认，取消零副作用。
+- **添加成员弹窗多选**：GroupInfo 内联选择器改为遮罩弹窗，内嵌 MemberPicker（多选树/搜索/离线折叠栏原样），确认走既有 `addGroupMember`；取消/Esc/遮罩不提交。
+- **会话列表「群聊」分组头**：静态分组头（仅箭头可交互）默认收起、`agentchat:groupSectionExpanded` 持久化，群会话整体置顶于普通会话之上；喊话行保持首位。
+- **双 agent 私聊**：发起方消息居左（发起方=首条非系统消息 sender）、对向居右、头像随侧；标题 =「{发起方}和{对方}的私聊」；含人类的 DM 与群聊规则零变化。
 
 ### 修复
 
 - **自发消息优雅拒绝**：`self_send` 稳定错误码 + 干净 JSON 载荷 + 服务端日志（HTTP 409 / MCP 映射），不再把驱动层 `SqliteError` 原样透出。
 - **MCP 错误映射审计**：`AgentNotFoundError` / `SqliteError` / `ZodError` 归一映射（`mcp/context.ts` errorResult），杜绝 raw 错误泄漏。
+- **MCP `group` 工具入参 schema 空壳**（agent「难一次成功、提示也救不了」的根因）：`z.discriminatedUnion` 在 Zod→JSON Schema 转换中降级为 `properties:{}`，广告面撒谎；拍平为单 `z.object`（`op` 枚举三值 + `name/member_ids/group/member` 全字段）+ `superRefine` 按 op 必填（稳定可读错误文案）；`group` 描述改三签名、`ask` 补 `mentions` 群问必填与 `wait.scope` 缺省 `all`；契约测试锁 12 工具 `properties` 非空 + `op` 枚举，真端点实测空壳数 0。
+- **@ 提及配色**：`mention-hit`/chip/badge 全面 token 化（jade 同族，对比度 4.69/5.35 过 AA），去除浅黄/绿/白混用与裸 hex。
+- **气泡按钮样式**：「看原文/看排版」「复制」按钮照 `bubble-revoke` 派生 token 四态（hover/active/disabled/focus）。
 
 ### 测试
 
 - 台账 Minor 补锁 4 项（键独立 / busy 分支 / 红 JSON 另存 / prune 500 注入）。
+- **e2e 复活**（限授权两 spec）：`playwright.config.ts` 端口参数化 `AGENTCHAT_E2E_PORT`（默认 4646 不变，真机占用时 4647 隔离自举 + 临时 `AGENTCHAT_HOME`）；groups-shout 三处过时断言适配（logical 归折叠栏先展开 / 展开态跨 picker 持久化按 `aria-expanded` 条件展开 / §14.4 runtime-only 投递 5→4、ack 后 4→3）——**3/3 passed**。
+- 台账 Minor 补锁：`meta.action`（group_remove/group_dissolve）postSystem seam 断言、shout 分区 DOM 锁。
 
 ## [0.1.0] - 2026-10-01
 
