@@ -53,7 +53,11 @@ interface ScanElement {
 
 interface ScanScope {
   document: { querySelectorAll(selector: string): ArrayLike<ScanElement> }
-  getComputedStyle(element: ScanElement): { overflowX: string; overflowY: string }
+  getComputedStyle(element: ScanElement): {
+    overflowX: string
+    overflowY: string
+    textOverflow: string
+  }
 }
 
 /** 全量路由拦截：spec 内不依赖任何 Hub 进程（绝对隔离）。 */
@@ -141,13 +145,22 @@ export async function scanOverflow(page: Page): Promise<readonly OverflowOffende
       const className = element.getAttribute("class") ?? ""
       if (className.indexOf("composer-mention") >= 0) continue
       const style = scope.getComputedStyle(element)
+      // V1.1 ellipsis 豁免：有意截断（text-overflow: ellipsis）且已渲染（clientWidth>0 门槛）
+      // 不报 X 轴；零宽/未布局元素不豁免，防吞真横向溢出。
+      const isEllipsisClip = style.textOverflow === "ellipsis" && element.clientWidth > 0
       const canScrollX = style.overflowX === "auto" || style.overflowX === "scroll"
       const canScrollY = style.overflowY === "auto" || style.overflowY === "scroll"
       const excessX = element.scrollWidth - element.clientWidth
       const excessY = element.scrollHeight - element.clientHeight
       const classNames = className.split(" ").filter((name) => name.length > 0)
       const isVerticalContainer = verticalScrollClasses.some((name) => classNames.includes(name))
-      const overX = isVerticalContainer ? excessX > 1 : !canScrollX && excessX > 1
+      // P2-5 方案A 有意延伸：rail 指示条负 right 越过按钮/动作区盒缘至 rail 边缘 —— X 轴白名单豁免。
+      const intentionalXClasses = ["rail-button", "rail-actions"]
+      const hasIntentionalX = intentionalXClasses.some((name) => classNames.includes(name))
+      let overX: boolean
+      if (isEllipsisClip || hasIntentionalX) overX = false
+      else if (isVerticalContainer) overX = excessX > 1
+      else overX = !canScrollX && excessX > 1
       const overY = isVerticalContainer ? false : !canScrollY && excessY > 1
       if (overX || overY) {
         offenders.push({
