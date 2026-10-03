@@ -199,12 +199,14 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   ack: "将消息标记为已读",
   roster: "读取层级树与联系人卡",
   conversation: "读取会话历史分页",
-  group: "创建群聊 / 拉人 / 列出群聊",
+  group:
+    "创建群聊 / 拉人 / 列出群聊。op 必填：create=建群（需 name，member_ids 可选指定初始成员）；add=拉人（需目标群 group 与成员 member）；list=列群（出参含 member_cards）。",
   shout:
     "全员喊话（根节点，需审批）。每条消息须有信息增量，禁纯回执/寒暄与复读，确认并入下一步；对 agent 的回复只发一次，别向会话重发同样内容（没有观众）；回人类时别复述工具输出。",
   status: "更新自身状态文本",
   message_status: "查询消息各收件方回执",
-  ask: "向用户或节点发起带选项的请求批示，可阻塞等待答复",
+  ask:
+    "向用户或节点发起带选项的请求批示，可阻塞等待答复。群问时 mentions 必填（spec §3.1，to 为群会话 id）；wait.scope 缺省 all（阻塞范围默认全体会话）。",
   respond_ask: "答复一条请求批示（选项或自由文本，首答生效）",
 }
 

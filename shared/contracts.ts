@@ -310,11 +310,37 @@ const mcpConversationInput = z.object({
   limit: z.number().int().positive().optional(),
 })
 
-const mcpGroupInput = z.discriminatedUnion("op", [
-  z.object({ op: z.literal("create"), name: z.string().min(1), member_ids: z.array(z.string()).optional() }),
-  z.object({ op: z.literal("add"), group: z.string().min(1), member: z.string().min(1) }),
-  z.object({ op: z.literal("list") }),
-])
+/**
+ * `group` 入参（修复轮 E 拍平）：原 `z.discriminatedUnion("op", [...])` 在 MCP SDK 的
+ * Zod→JSON Schema 转换中降级为空壳 `{"type":"object","properties":{}}`，tools/list 广告不到
+ * 任何字段。改为单一平铺 `z.object`——`op` 枚举与三分支全部字段均可见（校验与广告共用同一
+ * 单源，零转换代码）；分支必填性由 `superRefine` 按 op 强制，错误文案稳定可读。
+ * 静态类型仍为三分支联合（消费方 server/mcp/read-tools.ts 的 `switch(op)` 收窄不变）。
+ */
+type McpGroupInput =
+  | { op: "create"; name: string; member_ids?: string[] }
+  | { op: "add"; group: string; member: string }
+  | { op: "list" }
+
+const mcpGroupInput = z
+  .object({
+    op: z.enum(["create", "add", "list"]),
+    name: z.string().min(1).optional(),
+    member_ids: z.array(z.string()).optional(),
+    group: z.string().min(1).optional(),
+    member: z.string().min(1).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.op === "create" && value.name === undefined) {
+      ctx.addIssue({ code: "custom", path: ["name"], message: "create 需要 name" })
+    }
+    if (value.op === "add" && value.group === undefined) {
+      ctx.addIssue({ code: "custom", path: ["group"], message: "add 需要 group" })
+    }
+    if (value.op === "add" && value.member === undefined) {
+      ctx.addIssue({ code: "custom", path: ["member"], message: "add 需要 member" })
+    }
+  }) as unknown as z.ZodType<McpGroupInput>
 
 const mcpShoutInput = z.object({
   body: z.string(),

@@ -277,17 +277,22 @@ describe("tools/list 与十二工具金样例端到端（DoD ①，Important #1�
       // 广告 schema 接线校验：每个 object 工具的 properties 必须覆盖其金样例键
       // （若 conversation/roster 等被对调，键集即不匹配而失败）。
       const byName = new Map(tools.map((tool) => [tool.name, tool]))
+      // 契约回归锁（修复轮 E）：tools/list 逐工具必须广告非空 properties，
+      // 且 group 必须露出 op 枚举与三分支全部字段（拍平平铺 schema，
+      // 禁止 discriminatedUnion 空壳：`{"type":"object","properties":{}}`）。
       for (const name of MCP_TOOLS) {
-        if (name === "group") continue // discriminatedUnion → SDK 广告为空对象 schema，见下条断言
-        const advertised = Object.keys(byName.get(name)?.inputSchema.properties ?? {})
-        expect({ name, advertised }).toEqual({
+        const properties = byName.get(name)?.inputSchema.properties ?? {}
+        expect({ name, keys: Object.keys(properties) }).toEqual({
           name,
-          advertised: expect.arrayContaining(Object.keys(golden[name])),
+          keys: expect.arrayContaining(Object.keys(golden[name])),
         })
+        expect(Object.keys(properties).length).toBeGreaterThan(0)
       }
-      // group 是 discriminatedUnion：SDK 无法对象化 → 广告空 properties，
-      // 真正的联合校验由下面 `op:"create"` 正向 + 非法 `op` 反向调用端到端证明。
-      expect(Object.keys(byName.get("group")?.inputSchema.properties ?? {})).toEqual([])
+      const groupProps = byName.get("group")?.inputSchema.properties ?? {}
+      expect(groupProps["op"]).toMatchObject({ enum: ["create", "add", "list"] })
+      expect(Object.keys(groupProps)).toEqual(
+        expect.arrayContaining(["op", "name", "member_ids", "group", "member"]),
+      )
 
       // 反寒暄规则进工具描述（spec §15.5 落点 ②）：send / shout 描述须含规则关键词。
       for (const name of ["send", "shout"] as const) {
