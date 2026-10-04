@@ -1,0 +1,79 @@
+{
+  "description": "AgentChat 适配器 hooks：注册/状态/取件/注入 + 逐会话出站身份。诊断只落 <AGENTCHAT_HOME>/logs/workbuddy-adapter.log",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/hooks/session-start.mjs\"",
+            "description": "注册实例容器 + 本会话节点，上报 online，并兜底拉取排队中的消息",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\"",
+            "description": "心跳 busy + 懒注册兜底 + 补拉（cron 哨兵回路也走这里）",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "agentchat",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/hooks/pre-tool-use.mjs\"",
+            "description": "向本适配器 MCP 工具入参注入会话提示（逐会话出站身份）",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/hooks/stop.mjs\"",
+            "description": "回合结束：取件，有件则 continue:false + stopReason 继续起一轮",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "idle_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/hooks/notification.mjs\"",
+            "description": "空闲信号：仅上报 idle 心跳，不取件（无 additionalContext 槽位）",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CODEBUDDY_PLUGIN_ROOT}/hooks/session-end.mjs\"",
+            "description": "只停跟踪、绝不 retire（节点交由 last_seen 自然过期）",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -386,3 +386,58 @@ workbuddy@<host>                    根，role_tag=container，join_token 落盘
 **参考实现**
 - `adapters/claude-code/`（hook 形状蓝本：`session-start.mjs` / `busy.mjs` / `idle.mjs` / `common.mjs`）
 - `adapters/opencode/`（逐会话身份蓝本：`plugin.ts` 改入参 + `mcp-bridge.mjs` 剥头）
+
+---
+
+## 9. 实现结论（已落地，2026-10-01）
+
+本分析已转为**可用实现**：`adapters/workbuddy/`（使用与排障见其 [`README.md`](../adapters/workbuddy/README.md)）。
+§0 的"可行性=高"与 §1.4 的"空闲期唤醒靠内建 cron"两条主结论均成立，但落地过程对若干细节做了**修正**，
+记录于此以免后来者按旧结论走弯路：
+
+### 9.1 被证实成立的关键判断
+
+| 判断 | 落地证据 |
+|---|---|
+| `Stop` hook 可"阻止停止并把正文交给模型" | 宿主实现 `!1 === t.continue && (i.shouldContinue = !1, i.stopReason = t.stopReason)` → 适配器输出 `{"continue":false,"stopReason":…}`，**对真实 Hub 端到端验证通过** |
+| `PreToolUse.modifiedInput` 可改写入参 | 但语义是 **`c.modifiedInput && (n = c.modifiedInput)`：整体替换** —— 必须回**完整**新对象（本分析的初稿曾按"局部覆盖"理解，已修正） |
+| 逐会话出站身份可达"精确" | `PreToolUse` 注入 → 桥剥离转请求头 → Hub 端确认 `x-agentchat-session` 落到**会话节点**（非容器），E2E 断言通过 |
+| 出站身份优于 DSH、与 OpenCode 同档 | 成立。但多一层"身份变更必须重建 MCP 会话"的约束（`x-agent-id` 只在 `initialize` 读一次） |
+| `SessionEnd` 不得 `retire` | 实现期确认 `retire` 的**单向门**性质（同 `task_ref` 再注册被永久拒绝），故 `session-end.mjs` 只记日志 |
+
+### 9.2 需要修正 / 新发现（本分析未预见）
+
+1. **cron 无法由 hook 安装**。§1.4 结论方向正确，但 `CronCreate` 是**宿主工具**，一次性 hook 进程**无权调用**。
+   故"空闲期唤醒"最终交付为：① `/agentchat-loop` 斜杠命令（走 `CronCreate`）；② 文档化的 `/loop 1m [AgentChat] poll`；
+   ③ `AGENTCHAT_CRON_ARM=1` 时 `SessionStart` 附一段开通提示（尽力而为，`additionalContext` 不保证送达模型）。
+   —— **"完全静置可用"成立，但不是开箱即用，需要一次性开通**。
+2. **`Notification` 事件没有 `additionalContext` 槽位**。初稿曾打算在 `idle_prompt` 里直接 `wake` 投递；
+   这会**认领成功却无处投递**（消息置 `sending` + 30s 在途租约，到期重投成噪声）。最终 `notification.mjs`
+   **只上报心跳、不取件**。
+3. **根节点撞名需要一个"持久化后缀"机制**（§7 坑 1 在**容器节点**上的推广）。
+   `agents.name` 全局唯一且 `retire` 不可复活 → 一旦 `workbuddy@<host>` 被退役节点永久占位，
+   此后**每次**根注册都 `name_taken`。实现采用持久化的 6 位十六进制后缀（`workbuddy@<host>#a1b2c3`）；
+   且**认领路径必须带同一后缀**（回退成不带后缀的名字会再撞上那个占位名）。
+4. **`refused` 绝不能写入去重集合**。这是最容易写错、后果最重的一条：`refused` 语义是"**尚未投递**"，
+   误记入去重集合会让该消息**永久丢失**（既没投出去、又被当成已投而跳过）。
+5. **搭车心跳是必需的**：上报会话节点状态时必须**同时**触碰实例容器，否则长回合/长期空闲会让容器先被判
+   `offline`，整个实例从名单消失。
+6. **`Stop` 的链上限必须能"归零"**：`stop_hook_active === true` 才累计；`false`（新链）必须清零，
+   否则会出现"达上限后**永久饥饿**"（会话再也不被唤醒）。另加一道与 `stop_hook_active` 无关的滚动窗口计数
+   作双保险（防宿主某版本不传该字段时"注入–停止"活锁）。
+
+### 9.3 验证状态
+
+| 项 | 结果 |
+|---|---|
+| 端到端（**对真实运行中的 Hub，端口 4646**） | ✅ `node adapters/workbuddy/scripts/e2e-live.mjs` —— **18/18 断言通过** |
+| 单测 / 集成（真子进程 + mock Hub，不联网） | ✅ `npx vitest run adapters/workbuddy` —— **47/47 通过** |
+| 类型检查 | ✅ `npx tsc --noEmit` |
+| 空闲期 cron 完整回路（定时器是否真能唤醒静置会话） | ⏳ **未在真机端到端验证**，见 README「真机清单」 |
+
+### 9.4 工作量事后复盘
+
+原估"中等，与 `adapters/claude-code/` 同量级"基本准确。实际偏重的部分是**测试基建**：
+本机 Windows 上 `spawnSync(process.execPath, …)` 会以 `EBUSY`（`errno -4082`）失败，
+所有真实子进程用例必须改用异步 `spawn`，否则整批用例假失败。
+

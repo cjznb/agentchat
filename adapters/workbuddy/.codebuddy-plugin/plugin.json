@@ -1,0 +1,27 @@
+{
+  "name": "agentchat-workbuddy",
+  "version": "0.1.0",
+  "description": "把 WorkBuddy 的每个会话接入 AgentChat Hub：会话成为可被寻址、可被唤醒、可回信的节点（hooks + stdio MCP 桥）",
+  "author": {
+    "name": "AgentChat"
+  },
+  "keywords": [
+    "agentchat",
+    "multi-agent",
+    "chat",
+    "hub"
+  ],
+  "commands": "./commands",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": {
+    "agentchat": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CODEBUDDY_PLUGIN_ROOT}/mcp-bridge.mjs"
+      ],
+      "cwd": "${CODEBUDDY_PLUGIN_ROOT}",
+      "defer_loading": false
+    }
+  }
+}
