@@ -4,7 +4,7 @@
 
 ## 状态
 
-Hub 核心 + Web UI + 三个厂商适配器（OpenCode / Claude Code / DSH 桌面端）**均已实现**（Hub：HTTP/WS/MCP、ask 批示、通知中心、审批闸门；Web UI：聊天软件式三栏界面；适配器：进程外插件/hooks + 一键安装器）。spec 见 `docs/superpowers/specs/`。
+Hub 核心 + Web UI + 四个厂商适配器（OpenCode / Claude Code / DSH 桌面端 / WorkBuddy）**均已实现**（Hub：HTTP/WS/MCP、ask 批示、通知中心、审批闸门；Web UI：聊天软件式三栏界面；适配器：进程外插件/hooks + 一键安装器）。spec 见 `docs/superpowers/specs/`。
 
 ## Web UI
 
@@ -90,7 +90,7 @@ CI / 管道 / 脚本一律不开。`--no-open` 与 `AGENTCHAT_NO_OPEN` 是同一
 
 ## 适配器
 
-把 OpenCode / Claude Code / DSH 桌面端接入 Hub —— 三者都是**进程外 pull 适配器**：Hub **不主动推送**，由适配器在 agent
+把 OpenCode / Claude Code / DSH 桌面端 / WorkBuddy 接入 Hub —— 四者都是**进程外 pull 适配器**：Hub **不主动推送**，由适配器在 agent
 空闲时**主动拉取**待投递内容（agent 侧无长驻连接可被 Hub 推送）。
 发送时 Hub 一律为合格收件方建 wake_job（不依赖厂商登记），pull 适配器在认领时投递；
 OpenCode 插件与 DSH 插件在空闲期间还会**周期轮询**（`AGENTCHAT_POLL_MS`，默认 10s）补拉，故「已经 idle 之后」到达的消息也能被投递。
@@ -112,8 +112,9 @@ OpenCode 插件与 DSH 插件在空闲期间还会**周期轮询**（`AGENTCHAT_
 | OpenCode | `node adapters/opencode/install.mjs` | [docs/adapters-opencode.md](docs/adapters-opencode.md) |
 | Claude Code | `node adapters/claude-code/install.mjs` | [docs/adapters-claude-code.md](docs/adapters-claude-code.md) |
 | DSH 桌面端 | `node adapters/dsh/install.mjs --profile desktop` | [docs/adapters-dsh.md](docs/adapters-dsh.md) |
+| WorkBuddy | `node adapters/workbuddy/install.mjs` | [adapters/workbuddy/README.md](adapters/workbuddy/README.md) |
 
-三个安装器均**幂等**、改动前自动备份、支持 `--dry-run`（只打印不落盘）与 `--uninstall`（精确移除本适配器条目）。
+四个安装器均**幂等**、改动前自动备份、支持 `--dry-run`（只打印不落盘）与 `--uninstall`（精确移除本适配器条目）。
 
 > **要为别的 agent 宿主写适配器？** 先读 [docs/adapters-guide.md](docs/adapters-guide.md)：Hub 契约、
 > 宿主能力矩阵（常驻事件流 / 入站注入 / 空闲可见性 / 入参改写 / 装配落点）、实现骨架、安装器规范、
