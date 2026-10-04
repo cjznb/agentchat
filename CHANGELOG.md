@@ -4,10 +4,12 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-04
+
 ### 新增
 
 - **消息 Markdown 渲染**：react-markdown + GFM + rehype-sanitize + rehype-highlight 管线；设置页「消息渲染」范围三选（全部默认 / 仅 AI 回复 / 关闭，即时生效）；普通气泡逐条「看原文 / 看排版」切换与「复制」按钮；mention 高亮在 MD 视图内递归注入；系统消息/批示卡不参与。
-- **DSH 原生工具面**：`ctx.tools.register` 逐调用按会话注入身份；出站身份 fail-closed（删除「最近 running」启发式，修真机身份冒用）；发布提示前校验磁盘现值可自愈；`tools.register` 方法形式调用修复（12 个原生工具注册失败）。
+- **DSH 原生工具面**：`ctx.tools.register` 逐调用按会话注入身份；出站身份 fail-closed（删除「最近 running」启发式，修真机身份冒用）；发布提示前校验磁盘现值可自愈；`tools.register` 方法形式调用修复（12 个原生工具注册失败）；`hub.mcp()` 传裸 `send` 致原生工具面整体失效亦已修复。
 - **反寒暄规则 R1/R2**（沟通规范第 5/6 条，五落点同步）：agent 对 agent 回复只写一次 `reply`、不重发会话（「没有观众」）；agent 对人类答复不复述工具输出（人类已可见）。
 - **群聊删除成员**：`POST /api/groups/:id/members/remove`——守卫链 400/404/400/404/409（`cannot_remove_last_member` 保底留 1 人），成功向余下成员发 `kind=system` 通知（0 wake）；群成员行悬停「移出」两步确认。
 - **解散群聊**：`POST /api/groups/:id/dissolve`——先广播「群已解散」（复用 `message` 封套，四事件红线不动）再事务级联删 `wake_jobs→messages→read_states→participants→conversations`；资料卡 danger 区按钮 + alertdialog 显式确认，取消零副作用。
@@ -21,13 +23,21 @@
 - **MCP 错误映射审计**：`AgentNotFoundError` / `SqliteError` / `ZodError` 归一映射（`mcp/context.ts` errorResult），杜绝 raw 错误泄漏。
 - **MCP `group` 工具入参 schema 空壳**（agent「难一次成功、提示也救不了」的根因）：`z.discriminatedUnion` 在 Zod→JSON Schema 转换中降级为 `properties:{}`，广告面撒谎；拍平为单 `z.object`（`op` 枚举三值 + `name/member_ids/group/member` 全字段）+ `superRefine` 按 op 必填（稳定可读错误文案）；`group` 描述改三签名、`ask` 补 `mentions` 群问必填与 `wait.scope` 缺省 `all`；契约测试锁 12 工具 `properties` 非空 + `op` 枚举，真端点实测空壳数 0。
 - **@ 提及配色**：`mention-hit`/chip/badge 全面 token 化（jade 同族，对比度 4.69/5.35 过 AA），去除浅黄/绿/白混用与裸 hex。
-- **气泡按钮样式**：「看原文/看排版」「复制」按钮照 `bubble-revoke` 派生 token 四态（hover/active/disabled/focus）。
+- **气泡按钮样式**：「看原文/看排版」「复制」按钮照 `bubble-revoke` 派生 token 四态（hover/active/disabled/focus）；解散 danger 按钮同批 token 化。
+
+### 样式
+
+- **P2 美观批次（六项）**：群资料面板密度收紧一档（`.group-info` padding `space-5→space-4`）；气泡 max-width 加宽至 `min(36rem, 80%)`；窄视口 45rem rail 指示条负 inset 收敛为 0（不越界，radius/height 微调保观感）；行内滚动条改细窄 overlay（`scrollbar-width: thin` + hairline token + WebKit 3px 定制，全仓无残留 `none`）；rail 指示条纯 CSS 贴 rail 右缘（方案 A，`right: calc(space-2 * -1)`，几何断言锁 ≤1px）；`.member-rename-input` 补 token 描边与焦点环（与后载规则视觉等价，断言锁定）。
+- **P2-fix（真机验收两修）**：群资料成员行按钮错位修复——flex 换行判定根因（`.member-name` 基准 `1 1 auto → 1 1 0`，长名内容宽不再触发换行挤掉尾部按钮；图标/状态点/按钮 `flex-shrink: 0`；编辑态表单整行换行保留）；聊天栏边界加深——新 `--color-hairline-strong` token 用于气泡边框、视图头底边、输入条顶边（范围限聊天栏，设置/资料面板不动）；选中会话态——jade 9% 浅底 + 左缘 inset accent 竖条（照喊话行视觉语言）。
 
 ### 测试
 
 - 台账 Minor 补锁 4 项（键独立 / busy 分支 / 红 JSON 另存 / prune 500 注入）。
 - **e2e 复活**（限授权两 spec）：`playwright.config.ts` 端口参数化 `AGENTCHAT_E2E_PORT`（默认 4646 不变，真机占用时 4647 隔离自举 + 临时 `AGENTCHAT_HOME`）；groups-shout 三处过时断言适配（logical 归折叠栏先展开 / 展开态跨 picker 持久化按 `aria-expanded` 条件展开 / §14.4 runtime-only 投递 5→4、ack 后 4→3）——**3/3 passed**。
 - 台账 Minor 补锁：`meta.action`（group_remove/group_dissolve）postSystem seam 断言、shout 分区 DOM 锁。
+- **V1.1 视觉仪器前置**：X 轴豁免加 `textOverflow: ellipsis && clientWidth > 0` 双门槛（零宽不豁）；`.member-name` 回退 `overflow:hidden`；X 轴豁免白名单最小化（仅 P2-5 方案 A 的两类有意延伸元素）。
+- **V1 视觉场景 +7**：添加成员弹窗、解散确认、移出确认（各 full+region）、45rem 窄视口（bottom=0 断言）、桌面贴边几何（≤1px）、选中会话计算样式（g4：jade tint≠纯白 + boxShadow 含 inset + 对照行反证）—— `npm run visual` 5 → **12 passed**。
+- 新增样式单测 `p2-style.test.ts`（六项规则，首跑 8/8 红→绿）与 `p2-fix.test.ts`（边界/选中态规则锁）。
 
 ## [0.1.0] - 2026-10-01
 
