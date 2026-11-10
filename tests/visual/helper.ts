@@ -157,8 +157,10 @@ export async function scanOverflow(page: Page): Promise<readonly OverflowOffende
       const isEllipsisClip = style.textOverflow === "ellipsis" && element.clientWidth > 0
       // UI-1 ④-10 视觉隐藏豁免：`clip-path: inset(50%)`/`clip: rect(0…)` 是 sr-only 标准做法
       // （1px 盒内保留可访问名）。这类"有意裁掉"的文本不是布局溢出，报出来是仪器误报。
-      const isVisuallyHidden =
-        style.clipPath.includes("inset(50%)") || /rect\(\s*0/.test(style.clip)
+      // 取 `?? ""` 是为了容错**不完整样式对象**（单测里的 getComputedStyle 桩），真实浏览器恒有值。
+      const clipPath = style.clipPath ?? ""
+      const clip = style.clip ?? ""
+      const isVisuallyHidden = clipPath.includes("inset(50%)") || /rect\(\s*0/.test(clip)
       const canScrollX = style.overflowX === "auto" || style.overflowX === "scroll"
       const canScrollY = style.overflowY === "auto" || style.overflowY === "scroll"
       const excessX = element.scrollWidth - element.clientWidth
