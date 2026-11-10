@@ -203,7 +203,10 @@ export interface InboxQuery {
   readonly agentId: string
   /** 喊话广播会话 id；尚无喊话会话时传 `""`（空串恒不匹配真实 id）。 */
   readonly shoutConversationId: string
-  /** 游标（seq，不含）；0 = 从头。 */
+  /**
+   * **额外**下界（seq，不含），用于翻页；缺省 0。
+   * 真正的"未读"判据是每会话 `read_states` 位点（见 `inboxMessages`），本游标叠加其上。
+   */
   readonly after: number
   readonly limit: number
 }
@@ -211,16 +214,29 @@ export interface InboxQuery {
 export const DEFAULT_INBOX_LIMIT = 50
 
 /**
- * 收件箱：agent 可见会话（其参与的会话 + 喊话广播会话，决议 3）中游标之后的消息，
- * 全局 seq 升序。human = 隐含成员 + 超级观察者（复审 Important #1）：`vendor='human'`
- * 跳过成员过滤、可见**全部会话**（shout 规则对其他节点照旧）。可见性只由成员表、
- * 广播会话与 human 身份决定，不过滤己方消息（DoD：喊话对每个节点各得一条）。
+ * 收件箱 = **未读**（spec §9 工具承诺的「收件箱（未读+提及）」）：
+ * 可见会话中、**该 agent 自身每会话 `read_states` 位点之后**的消息，全局 seq 升序。
+ *
+ * 为什么必须带未读游标（P9 修复）：先前只用 `seq > $after`（`after` 缺省 0），取到的是
+ * **全部可见历史的最旧 limit 条** —— 新到的未读消息 seq 更大，永远挤不进这一页，于是
+ * 「unread=3 但 inbox 页里全是旧 DM」；也与 `unreadFor` / `directUnreadSeqs` 的口径打架。
+ * 无 `read_states` 行视为 0（该会话全部未读），故**从未 ack 过的 agent / human 行为等价于
+ * "未被读过的都算未读"**，与 `directUnreadSeqs` 的 `COALESCE(..., 0)` 逐字同源。
+ *
+ * 可见性不变（决议 3 + 复审 Important #1）：参与会话 + 喊话广播会话；human = 隐含成员 +
+ * 超级观察者（`vendor='human'` 跳过成员过滤、可见全部会话）。
+ * **不过滤己方消息**（与 `claimableInboxMessages` 的关键差别 —— 后者是投递台账，按 P2 口径
+ * 过滤自发；此处只加未读游标，不改这一条）。
+ * `after` 语义保留为额外下界（翻页）：缺省 0 时由未读游标主导。
  */
 export function inboxMessages(db: Db, query: InboxQuery): Message[] {
   const rows = db
     .prepare<InboxQuery, MessageRow>(
       `SELECT * FROM messages
         WHERE seq > $after
+          AND seq > COALESCE((SELECT last_read_seq FROM read_states r
+                               WHERE r.agent_id = $agentId
+                                 AND r.conversation_id = messages.conversation_id), 0)
           AND (conversation_id = $shoutConversationId
                OR EXISTS (SELECT 1 FROM agents WHERE id = $agentId AND vendor = 'human')
                OR conversation_id IN (SELECT conversation_id FROM participants WHERE agent_id = $agentId))

@@ -567,7 +567,7 @@ export function shout(
 }
 
 export interface InboxOptions {
-  /** 游标（seq，不含）；缺省 0 = 从头。 */
+  /** **额外**下界（seq，不含），用于翻页；缺省 0。未读判据是每会话 `read_states` 位点。 */
   readonly after?: number
   readonly limit?: number
   /** 阻塞等待（spec §9 `inbox.timeout` = §6.2 语义）；给出则返回 Promise 的等待结果。 */
@@ -575,9 +575,14 @@ export interface InboxOptions {
 }
 
 /**
- * 收件箱：可见会话（参与 + 喊话）中游标之后的消息，全局 seq 升序。
- * 带 `wait` 时挂起至新消息先到（`received` 模式无回执事件可言 → 恒超时），返回
- * `{timedOut, messages, receipts}`（决议 6：inbox 委托 wait.ts；receipts 恒为 []）。
+ * 收件箱 = **未读**：可见会话（参与 + 喊话；human 为超级观察者）中、该 agent 每会话
+ * `read_states` 位点之后的消息，全局 seq 升序（P9 修复，判据见 `store/messages.inboxMessages`）。
+ * `after` 是叠加在未读游标之上的额外下界（翻页用），缺省 0 时由未读游标主导。
+ *
+ * 带 `wait` 时（决议 6：委托 wait.ts，`receipts` 恒为 []）：
+ * - **已有未读则立即返回**该批未读（`waitFor` 先同步复查一次，非空即返回——"已收部分非空手"）；
+ * - 无未读才真正挂起，直到新消息进入未读集合（新消息在 ack 前恒为未读）被 `publish` 唤醒。
+ * 即等待语义仍是"新到达"，只是可返回的集合从"任意旧历史"收敛为"未读"，故**无需改 wait**。
  */
 export function inbox(
   db: Db,
