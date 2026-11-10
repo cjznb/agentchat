@@ -87,6 +87,9 @@ const DEFAULT_DSH_HOME = ".dsh"
  * @property {string} [adapterDir] 适配器包目录绝对路径
  * @property {string} [agentchatHome] AgentChat 数据目录（缺省：`$AGENTCHAT_HOME` 或 `~/.agentchat`）
  * @property {string} [nodeExe] 写进 MCP 行的 node 绝对路径（缺省：`process.execPath`）
+ * @property {boolean} [mcpBridge] 是否写 Hub MCP 桥工具行（缺省 **false**）。P7 起原生工具面
+ *   （逐调用身份）为默认工具面，桥行只作为可选回退（`--with-mcp-bridge`）；旧版装过桥行的
+ *   profile 在重装时会被**幂等摘除**，避免模型同时看到两套工具。
  * @property {NodeJS.ProcessEnv|Record<string,string|undefined>} [env] 解析缺省值用的环境变量
  * @property {string} [platform] 覆盖 `process.platform`（只为测试：决定联结类型）
  * @property {string} [profilePackage] 注入的当前 `package.json` 文本（`undefined` = 不存在）
@@ -304,7 +307,12 @@ export function planInstall(ctx = {}) {
   const paths = resolvePaths(ctx)
   const platform = nonEmpty(ctx.platform) ?? process.platform
   const depValue = dependencyValue(paths.adapterDir)
-  const block = buildManagedBlock(paths.nodeExe, paths.bridgePath, eolOf(ctx.userPatch))
+  /** P7 默认**不**写 MCP 桥行（原生工具面逐调用身份）；`--with-mcp-bridge` 才写。 */
+  const withBridge = ctx.mcpBridge === true
+  const patch = withBridge
+    ? planPatchInstall(paths.patchPath, ctx.userPatch, buildManagedBlock(paths.nodeExe, paths.bridgePath, eolOf(ctx.userPatch)))
+    : // 不写桥行：仍要**幂等摘除**旧版写入的托管块（否则模型会同时看到两套工具）。
+      planPatchUninstall(paths.patchPath, ctx.userPatch)
   return {
     files: [
       planManifest(paths.manifestPath, ctx.profilePackage, {
@@ -312,14 +320,16 @@ export function planInstall(ctx = {}) {
         depValue,
         uninstall: false,
       }),
-      planPatchInstall(paths.patchPath, ctx.userPatch, block),
+      patch,
       planHub(paths.agentchatConfigPath, ctx.agentchatConfig, false),
     ],
     links: [{ path: paths.linkPath, target: paths.adapterDir, type: linkType(platform) }],
     unlinks: [],
     notes: [
       `bundle 选择（dsh.profile.bundles）写入 ${paths.manifestPath}；未选中时 loader 不会合成该 bundle 的 patch`,
-      `Hub MCP 行（含 node 与 mcp-bridge.mjs 绝对路径）写入 ${paths.patchPath} 的托管块`,
+      withBridge
+        ? `Hub MCP 行（含 node 与 mcp-bridge.mjs 绝对路径）写入 ${paths.patchPath} 的托管块（--with-mcp-bridge）`
+        : `默认**不**写 Hub MCP 行：工具面走插件原生工具（agentchat_*，逐调用身份）；如需桥工具行请加 --with-mcp-bridge`,
     ],
     paths,
   }

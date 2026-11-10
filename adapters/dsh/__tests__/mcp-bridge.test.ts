@@ -25,7 +25,7 @@ function tempHome(): string {
   return home
 }
 
-/** 预置 `<home>/agents/*` 文件（`dsh.id` = 实例容器 id，`dsh.current` = 当前顶层会话节点提示）。 */
+/** 预置 `<home>/agents/*` 文件（`dsh.current` = 唯一身份源，`dsh.id` = 实例容器 id，仅诊断/兼容留痕）。 */
 function seedAgents(home: string, files: Record<string, string>): void {
   mkdirSync(join(home, "agents"), { recursive: true })
   for (const [name, value] of Object.entries(files)) writeFileSync(join(home, "agents", name), value)
@@ -169,21 +169,22 @@ describe("stdio 行帧与 initialize 握手", () => {
     expect(messageOf(none.frames()[0])).toContain("hub_token")
   })
 
-  it("x-agent-id：dsh.id 由插件注册后写出 → 懒解析并只成功时缓存", async () => {
+  it("x-agent-id：唯一身份源 = dsh.current（dsh.id 即使存在也不再当身份）", async () => {
     const home = tempHome()
+    seedAgents(home, { "dsh.id": "container-1\n" }) // P7：容器 id 存在也**不**作身份
     const h = makeHarness({ env: { AGENTCHAT_HOME: home } })
 
     await h.send(initFrame(1))
-    expect(h.calls[0]?.headers["x-agent-id"]).toBeUndefined()
+    expect(h.calls[0]?.headers["x-agent-id"]).toBeUndefined() // 绝不回落容器
+    expect(h.logs.some((line) => line.includes("出站身份缺失"))).toBe(true) // 可见告警，不静默
 
-    mkdirSync(join(home, "agents"), { recursive: true })
-    writeFileSync(join(home, "agents", "dsh.id"), "agent-9\n")
+    writeFileSync(join(home, "agents", "dsh.current"), "agent-9\n")
     await h.send({ jsonrpc: "2.0", id: 2, method: "tools/list" })
-    expect(h.calls[1]?.headers["x-agent-id"]).toBe("agent-9")
+    expect(h.calls.at(-1)?.headers["x-agent-id"]).toBe("agent-9")
 
-    rmSync(join(home, "agents", "dsh.id"))
+    rmSync(join(home, "agents", "dsh.current"))
     await h.send({ jsonrpc: "2.0", id: 3, method: "tools/list" })
-    expect(h.calls[2]?.headers["x-agent-id"]).toBe("agent-9")
+    expect(h.calls.at(-1)?.headers["x-agent-id"]).toBeUndefined() // 提示撤下 → 立刻回到无身份
   })
 })
 
@@ -206,13 +207,13 @@ function initCountingHub(onCall: (call: HubCall) => Reply | undefined) {
 }
 
 describe("出站身份：逐请求解析 + 身份变化重建 Hub 会话", () => {
-  it("真实生产时序：桥建会话时 dsh.id 尚未生成 → 文件出现后下一次请求重新 initialize 并带上 x-agent-id", async () => {
+  it("真实生产时序：桥建会话时 dsh.current 尚未出现 → 提示出现后下一次请求重新 initialize 并带上 x-agent-id", async () => {
     const home = tempHome()
     // 用「每次 initialize 发新会话 id」的假 Hub：只有它能显式暴露「重建了会话」这件事。
     const hub = initCountingHub(() => undefined)
     const h = makeHarness({ env: { AGENTCHAT_HOME: home }, handle: hub.handle })
 
-    // ① 宿主开机后的第一次工具调用（此刻插件还没注册，两个身份文件都不存在）：桥自建会话，
+    // ① 宿主开机后的第一次工具调用（此刻插件还没注册，`dsh.current` 不存在）：桥自建会话，
     //    Hub 会话因此没有身份 —— 除 register 外的工具都会被 Hub 拒（identity_required）。
     await h.send({ jsonrpc: "2.0", id: 1, method: "tools/list" })
     expect(h.calls.map((call) => call.body["method"])).toEqual([
@@ -230,10 +231,11 @@ describe("出站身份：逐请求解析 + 身份变化重建 Hub 会话", () =>
     expect(h.calls[3]?.headers["x-agent-id"]).toBeUndefined()
     expect(h.calls[3]?.headers["mcp-session-id"]).toBe("sess-1")
 
-    // ③ 插件注册成功后写出 dsh.id → 身份 undefined → 已定义，必须重建会话（Hub 只在 initialize
-    //    读该头，既有会话永不重读），否则后续工具调用会被 Hub 以 identity_required 拒绝。
+    // ③ 首个顶层会话注册成功 → 插件写出 `dsh.current` → 身份 undefined → 已定义，必须重建会话
+    //    （Hub 只在 initialize 读该头，既有会话永不重读），否则后续工具调用会被 Hub 以
+    //    identity_required 拒绝。
     mkdirSync(join(home, "agents"), { recursive: true })
-    writeFileSync(join(home, "agents", "dsh.id"), "agent-9\n")
+    writeFileSync(join(home, "agents", "dsh.current"), "agent-9\n")
     await h.send({ jsonrpc: "2.0", id: 3, method: "tools/list" })
 
     expect(h.calls.map((call) => call.body["method"])).toEqual([
@@ -255,49 +257,57 @@ describe("出站身份：逐请求解析 + 身份变化重建 Hub 会话", () =>
     expect(h.frames()[2]).toEqual({ jsonrpc: "2.0", id: 3, result: { tools: [{ name: "register" }] } })
   })
 
-  it("dsh.current 提示优先于 dsh.id；提示变化触发重建，提示不变不重建", async () => {
+  it("唯一身份源 = dsh.current：缺失即无身份（fail-closed）；出现/改变/撤下都触发重建", async () => {
     const home = tempHome()
-    seedAgents(home, { "dsh.id": "container-1\n" })
+    seedAgents(home, { "dsh.id": "container-1\n" }) // 容器 id 存在也不再作身份（P7）
     const hub = initCountingHub(() => undefined)
     const h = makeHarness({ env: { AGENTCHAT_HOME: home }, handle: hub.handle })
 
-    // 首次调用：提示文件不存在 → 回落到实例容器 id（并建立 Hub 会话 sess-1）。
+    // ① 提示不存在 → **不带** `x-agent-id`（旧版回落 container-1 并建立"容器身份"会话）。
     await h.send({ jsonrpc: "2.0", id: 1, method: "tools/list" })
-    expect(h.calls[0]?.headers["x-agent-id"]).toBe("container-1")
+    expect(h.calls[0]?.headers["x-agent-id"]).toBeUndefined()
     expect(hub.count()).toBe(1)
+    expect(h.logs.some((line) => line.includes("出站身份缺失"))).toBe(true)
 
-    // 值未变（文件被重写为同一 id）→ **不**重建：沿用会话 sess-1，且不再多发 initialize。
-    writeFileSync(join(home, "agents", "dsh.current"), "container-1\n")
-    await h.send({ jsonrpc: "2.0", id: 2, method: "tools/list" })
-    expect(hub.count()).toBe(1)
-    expect(h.calls.at(-1)?.headers["x-agent-id"]).toBe("container-1")
-    expect(h.calls.at(-1)?.headers["mcp-session-id"]).toBe("sess-1")
-
-    // 提示指向另一个节点 → 必须重建会话（否则既有 Hub 会话仍是容器身份，对端回复会被拒）。
+    // ② 提示出现（首个顶层会话注册）→ 重建会话带上会话节点身份。
     writeFileSync(join(home, "agents", "dsh.current"), "session-1\n")
-    await h.send({ jsonrpc: "2.0", id: 3, method: "tools/list" })
+    await h.send({ jsonrpc: "2.0", id: 2, method: "tools/list" })
     expect(hub.count()).toBe(2)
     expect(h.calls.at(-1)?.headers["x-agent-id"]).toBe("session-1")
     expect(h.calls.at(-1)?.headers["mcp-session-id"]).toBe("sess-2")
 
-    // 提示被插件删除（≥2 个顶层会话）→ 回落容器，同样重建（身份变了）。
-    rmSync(join(home, "agents", "dsh.current"))
+    // ③ 同值重写 → **不**重建（缓存命中）。
+    writeFileSync(join(home, "agents", "dsh.current"), "session-1\n")
+    await h.send({ jsonrpc: "2.0", id: 3, method: "tools/list" })
+    expect(hub.count()).toBe(2)
+    expect(h.calls.at(-1)?.headers["mcp-session-id"]).toBe("sess-2")
+
+    // ④ 指向另一个会话节点 → 必须重建（否则既有 Hub 会话仍是旧身份）。
+    writeFileSync(join(home, "agents", "dsh.current"), "session-2\n")
     await h.send({ jsonrpc: "2.0", id: 4, method: "tools/list" })
     expect(hub.count()).toBe(3)
-    expect(h.calls.at(-1)?.headers["x-agent-id"]).toBe("container-1")
-    expect(h.frames()).toHaveLength(4)
+    expect(h.calls.at(-1)?.headers["x-agent-id"]).toBe("session-2")
+    expect(h.calls.at(-1)?.headers["mcp-session-id"]).toBe("sess-3")
+
+    // ⑤ 提示被撤下（≥2 个顶层会话 / 有子代理在跑）→ 无身份，同样重建（身份变了），**不**回落容器。
+    rmSync(join(home, "agents", "dsh.current"))
+    await h.send({ jsonrpc: "2.0", id: 5, method: "tools/list" })
+    expect(hub.count()).toBe(4)
+    expect(h.calls.at(-1)?.headers["x-agent-id"]).toBeUndefined()
+    expect(h.calls.at(-1)?.headers["mcp-session-id"]).toBe("sess-4")
+    expect(h.frames()).toHaveLength(5)
   })
 
   it("400 agent_not_found：清缓存身份与会话，重读文件后只重试一次", async () => {
     const home = tempHome()
-    seedAgents(home, { "dsh.id": "stale-1\n" })
+    seedAgents(home, { "dsh.current": "stale-1\n" })
     let first = true
     // initialize 由 initCountingHub 统一应答（新会话 id）；这里只处理 tools/list。
     const hub = initCountingHub(() => {
       if (first) {
         first = false
-        // Hub 数据重置后本地 id 陈旧：第一次 tools/list 被拒；插件重注册后写出新 id。
-        writeFileSync(join(home, "agents", "dsh.id"), "fresh-1\n")
+        // Hub 数据重置后本地会话节点陈旧：第一次 tools/list 被拒；插件重注册后写出新节点 id。
+        writeFileSync(join(home, "agents", "dsh.current"), "fresh-1\n")
         return { status: 400, contentType: "application/json", body: JSON.stringify({ ok: false, error: "agent_not_found" }) }
       }
       return undefined
@@ -326,7 +336,7 @@ describe("出站身份：逐请求解析 + 身份变化重建 Hub 会话", () =>
 
   it("400 agent_not_found 持续存在 → 只重试一次（绝不循环），请求回 JSON-RPC error", async () => {
     const home = tempHome()
-    seedAgents(home, { "dsh.id": "stale-1\n" })
+    seedAgents(home, { "dsh.current": "stale-1\n" })
     const hub = initCountingHub((call) =>
       call.body["method"] === "tools/list"
         ? { status: 400, contentType: "application/json", body: JSON.stringify({ error: "agent_not_found" }) }

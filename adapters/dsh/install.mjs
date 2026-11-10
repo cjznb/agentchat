@@ -1,10 +1,10 @@
 /**
  * AgentChat × DSH 桌面端安装器：把本仓库的 DSH bundle（`adapters/dsh`）装进某个 DSH profile，
- * 并把 Hub 的 MCP 工具行写进该 profile 的**用户 patch 层**。
+ * 并（**可选**）把 Hub 的 MCP 桥工具行写进该 profile 的**用户 patch 层**。
  *
  * 用法：
  *   node adapters/dsh/install.mjs [--profile <name>] [--dsh-home <path>] [--agentchat-home <path>]
- *        [--dry-run] [--uninstall] [--help]
+ *        [--with-mcp-bridge] [--dry-run] [--uninstall] [--help]
  *
  * 安装四步（`--uninstall` 逐一反向）：
  *   1. **目录联接**：`<dshHome>/profiles/node_modules/@agentchat/dsh-adapter` → 适配器目录。
@@ -16,8 +16,11 @@
  *      路径写正斜杠，见 `install-plan.mjs` 的 `dependencyValue`），并把 `"@agentchat/dsh-adapter"`
  *      追加进 `dsh.profile.bundles`（bundle **选择**；loader 只对被选中的 bundle 合成其 patch，
  *      所以只建联结不登记是不够的）。
- *   3. **profile 用户 patch** `<dshHome>/profiles/<profile>/cordis.patch.yml`：追加**机器相关**的
- *      MCP 行（Hub 工具入口）。bundle 自带的 `cordis.patch.yml` 刻意不含任何绝对路径，两处分工见
+ *   3. **profile 用户 patch** `<dshHome>/profiles/<profile>/cordis.patch.yml`：**仅 `--with-mcp-bridge`
+ *      时**追加**机器相关**的 MCP 行（Hub 工具入口）。P7 起默认**不写**——工具面走插件的**原生工具**
+ *      （`agentchat_*`，逐调用 `x-agentchat-session` 身份，多会话/子代理天然精确）；默认模式还会把旧版
+ *      写入的该托管块**幂等摘除**，否则模型会同时看到两套同名工具（并可能挑到桥那条、在多会话下报
+ *      `identity_required`）。bundle 自带的 `cordis.patch.yml` 刻意不含任何绝对路径，两处分工见
  *      `adapters/dsh/cordis.patch.yml` 顶部注释。整块由 `MANAGED_HEAD` / `MANAGED_TAIL` 两个 marker
  *      界定：重复安装只替换块内文本（**不会重复追加**），`--uninstall` 只摘掉这一块。
  *   4. **Hub 厂商登记** `<agentchat home>/config.json` 的 `adapters` 追加 `dsh`
@@ -75,7 +78,7 @@ export { applyPlan, planHasChanges, planInstall, planUninstall, profileDir }
 /**
  * @param {string[]} argv
  * @returns {{ profile?: string, dshHome?: string, agentchatHome?: string, dryRun: boolean,
- *   uninstall: boolean, help: boolean, error?: string }}
+ *   uninstall: boolean, mcpBridge: boolean, help: boolean, error?: string }}
  */
 export function parseArgs(argv) {
   const args = {
@@ -84,6 +87,7 @@ export function parseArgs(argv) {
     agentchatHome: undefined,
     dryRun: false,
     uninstall: false,
+    mcpBridge: false,
     help: false,
     error: undefined,
   }
@@ -91,6 +95,7 @@ export function parseArgs(argv) {
     const arg = argv[i]
     if (arg === "--dry-run") args.dryRun = true
     else if (arg === "--uninstall") args.uninstall = true
+    else if (arg === "--with-mcp-bridge") args.mcpBridge = true
     else if (arg === "--help" || arg === "-h") args.help = true
     else if (arg === "--profile" || arg === "--dsh-home" || arg === "--agentchat-home") {
       const value = argv[i + 1]
@@ -103,7 +108,7 @@ export function parseArgs(argv) {
       else args.agentchatHome = value
       i += 1
     } else {
-      args.error = `未知参数：${arg}（支持 --profile <name>、--dsh-home <path>、--agentchat-home <path>、--dry-run、--uninstall、--help）`
+      args.error = `未知参数：${arg}（支持 --profile <name>、--dsh-home <path>、--agentchat-home <path>、--with-mcp-bridge、--dry-run、--uninstall、--help）`
       return args
     }
   }
@@ -113,17 +118,20 @@ export function parseArgs(argv) {
 const HELP =
   [
     "AgentChat × DSH 桌面端安装器",
-    "用法：node adapters/dsh/install.mjs [--profile <name>] [--dsh-home <path>] [--agentchat-home <path>] [--dry-run] [--uninstall] [--help]",
+    "用法：node adapters/dsh/install.mjs [--profile <name>] [--dsh-home <path>] [--agentchat-home <path>] [--with-mcp-bridge] [--dry-run] [--uninstall] [--help]",
     "  --profile <name>        DSH profile 名（默认：$DSH_PROFILE 或 desktop）",
     "  --dsh-home <path>       DSH home（默认：$DSH_HOME 或 ~/.dsh）",
     "  --agentchat-home <path> AgentChat 数据目录（默认：$AGENTCHAT_HOME 或 ~/.agentchat）",
+    "  --with-mcp-bridge       额外写入 Hub MCP 桥工具行（默认**不写**：工具面走插件的原生工具，逐调用身份更精确；",
+    "                          仅当宿主没有 tools 服务、或你想保留 mcp__agentchat__* 时才需要）",
     "  --dry-run               只打印将要写入的路径与内容，不落盘",
     "  --uninstall             反向执行四步（移除联接、file: 依赖与 bundle 选择、托管块、厂商登记），幂等",
     "  --help                  显示本帮助",
     "安装内容：",
     "  1. <dsh-home>/profiles/node_modules/@agentchat/dsh-adapter → 适配器目录（目录联接/符号链接）",
     "  2. <dsh-home>/profiles/<profile>/package.json：file: 依赖 + dsh.profile.bundles 选择项",
-    "  3. <dsh-home>/profiles/<profile>/cordis.patch.yml：托管块（Hub MCP 行，含 node 与桥的绝对路径）",
+    "  3. <dsh-home>/profiles/<profile>/cordis.patch.yml：仅 --with-mcp-bridge 时写托管块（Hub MCP 行）",
+    "     （默认会把旧版写入的该托管块**摘除**，避免模型同时看到两套工具）",
     "  4. <agentchat-home>/config.json：adapters 追加 dsh",
   ].join("\n") + "\n"
 
@@ -179,15 +187,24 @@ function printActions(actions) {
   }
 }
 
-function printNextSteps(paths) {
+function printNextSteps(paths, mcpBridge) {
   console.log("[agentchat] 后续步骤：")
   console.log("  1. 重启 DSH 桌面端（bundle 与 MCP 行都在启动时装配）。")
   console.log("  2. 打开 AgentChat，用 GET /api/roster 确认本节点已出现。")
   console.log("  3.（官方支持的替代做法）也可以让你的 DSH agent 调用 plugin_manager：")
   console.log(`     action: install_bundle，target: ${paths.adapterDir}`)
-  console.log(
-    `     注意：它只装 bundle；MCP 行里的绝对路径（${paths.nodeExe} / ${paths.bridgePath}）仍需本安装器写进 ${paths.patchPath}。`,
-  )
+  if (mcpBridge) {
+    console.log(
+      `     注意：它只装 bundle；MCP 行里的绝对路径（${paths.nodeExe} / ${paths.bridgePath}）仍需本安装器写进 ${paths.patchPath}。`,
+    )
+    console.log("     提示：MCP 桥工具行与原生工具面会同时出现（两套同名工具）——除非你需要 mcp__agentchat__*，否则建议去掉 --with-mcp-bridge 重装。")
+  } else {
+    console.log("     注意：它只装 bundle；工具面由插件原生注册（agentchat_*，逐调用身份），安装器不再写 MCP 行。")
+    console.log(
+      "     提示：若你仍装有旧的 MCP 桥工具行（模型会看到两套工具），用本安装器默认值重跑一次即可摘除；",
+    )
+    console.log("     若宿主没有 tools 服务（原生工具注册会告警），改用 --with-mcp-bridge 重装以保留桥工具行。")
+  }
 }
 
 function main() {
@@ -217,7 +234,7 @@ function main() {
     const manifestPath = join(dir, "package.json")
     const patchPath = join(dir, "cordis.patch.yml")
     const hubConfigPath = agentchatConfigPath({ AGENTCHAT_HOME: resolve(hubHome) })
-    if (!args.uninstall && !existsSync(join(adapterDir, BRIDGE_FILE))) {
+    if (!args.uninstall && args.mcpBridge && !existsSync(join(adapterDir, BRIDGE_FILE))) {
       console.error(`[agentchat] 警告：未找到 ${join(adapterDir, BRIDGE_FILE)}，MCP 行要等它存在后才可用`)
     }
     const context = {
@@ -227,6 +244,7 @@ function main() {
       agentchatHome: resolve(hubHome),
       nodeExe: process.execPath,
       env,
+      mcpBridge: args.mcpBridge,
       profilePackage: readIfExists(manifestPath),
       userPatch: readIfExists(patchPath),
       agentchatConfig:
@@ -249,7 +267,7 @@ function main() {
     }
     console.log(`[agentchat] ${action}完成（profile：${plan.paths.profile}）`)
     printActions(result.actions)
-    if (!args.uninstall) printNextSteps(plan.paths)
+    if (!args.uninstall) printNextSteps(plan.paths, args.mcpBridge)
     return 0
   } catch (error) {
     console.error(`[agentchat] 错误：${errorText(error)}`)

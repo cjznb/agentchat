@@ -17,3 +17,5 @@
         # busyInject: true      # 设 false = 回退旧行为（忙时停轮询，消息排队到回合结束）
         # busyPollMs: 5000      # 忙时轮询间隔（钳制 [1s, 1h]）
         # busyInjectMax: 1      # 每个忙回合最多注入几次（0 = 忙时只发心跳不注入）
+        # 原生工具面（P7 默认开）：逐调用按调用者会话注入身份，多会话/子代理精确；安装器默认不再写 MCP 桥行。
+        # nativeTools: true     # 设 false 时必须另有 MCP 桥工具行（安装器 --with-mcp-bridge），否则无可用工具

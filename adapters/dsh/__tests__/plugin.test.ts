@@ -412,13 +412,19 @@ describe("会话身份提示 dsh.current", () => {
     expect(await waitUntil(() => hintOf(h.home) === "agent-2")).toBe(true) // 只剩 sess-a → 写回它的节点 id
   })
 
-  it("子代理会话不参与计数：顶层会话的提示保持不变", async () => {
+  it("有子代理存活 → 提示撤下（绝不冒名父会话）；子代理释放 → 写回父会话节点", async () => {
     const h = await setup()
+    const child = fakeAgent(sessionHeader("sess-child", { origin: "subagent", parentSession: "sess-root" }))
     h.on("agent/created")({ agent: fakeAgent(sessionHeader("sess-root")) })
     expect(await waitUntil(() => registered(h.kit, "sess-root"))).toBe(true)
-    h.on("agent/created")({ agent: fakeAgent(sessionHeader("sess-child", { origin: "subagent", parentSession: "sess-root" })) })
+    expect(hintOf(h.home)).toBe("agent-2") // 恰一个顶层会话 → 桥的身份 = 该会话节点
+    h.on("agent/created")({ agent: child })
     expect(await waitUntil(() => registered(h.kit, "sess-child"))).toBe(true)
-    expect(hintOf(h.home)).toBe("agent-2") // 仍是顶层会话节点，而不是子代理节点 agent-3
+    // 桥只有进程级单身份、拿不到逐调用会话 → 子代理一存活就撤下：宁可父会话经桥无身份（走 native 面），
+    // 也绝不让子代理的发言被记到父会话名下。
+    expect(await waitUntil(() => hintOf(h.home) === undefined)).toBe(true)
+    h.on("agent/disposed")({ agent: child })
+    expect(await waitUntil(() => hintOf(h.home) === "agent-2")).toBe(true) // 子代理离场 → 唯一身份重新成立
   })
 
   it("唯一会话释放 → 提示删除；插件卸载 → 提示删除（桥不再带陈旧会话身份）", async () => {

@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { createIdleFlush, formatMessages } from "../lib/flush.js"
 import { createHubClient, HubError, HubToolError } from "../lib/hub.js"
 import { createFileLog } from "../lib/log.js"
+import { createMcpClient } from "../lib/mcp.js"
 import { IdlePoller, DEFAULT_POLL_MS, MAX_POLL_MS, MIN_POLL_MS, parsePollMs } from "../lib/poll.js"
 import { agentIdPath, clearToken, readToken, seenPath, tokenPath, writeJson, readJson, writeToken } from "../lib/token.js"
 import { createBoundedSet, createTaskQueue, describe as describeError, isRecord, parseCount, parseSwitch } from "../lib/util.js"
@@ -122,10 +123,23 @@ function sseFrame(text: string, isError = false): Record<string, unknown> {
 
 const REGISTER_PAYLOAD = JSON.stringify({ agent: { id: "agent-7" }, join_token: "jt-7" })
 
-/** 注入文本的两条固定前缀行（与 `flush.formatMessages` 的措辞一一对应）。 */
+/** 注入文本的固定行（与 `flush.formatMessages` 的措辞一一对应）。 */
 const FORMATTED_HEADER = "[AgentChat] 你收到了以下来自其他 agent 的消息，请据此继续工作："
-const FORMATTED_RULES = "沟通规则：消息须有信息增量；禁纯回执/寒暄与复读循环；确认请并入下一步（详见 README「沟通规范」）。"
-const FORMATTED_TWO_LINES = [FORMATTED_HEADER, FORMATTED_RULES, "- [m1] 来自 a1：第一条", "- [m2] 来自 a2：第二条"].join("\n")
+/** 三条沟通规则：信息增量 + R1（agent 对 agent 只回一次）+ R2（不对人类复述工具输出）。 */
+const FORMATTED_RULES = [
+  "沟通规则：消息须有信息增量；禁纯回执/寒暄与复读循环；确认请并入下一步（详见 README「沟通规范」）。",
+  "沟通规则：交流双方均为 agent 时，回复结果只写入 reply 一次，不要既 reply 又向会话重发一遍同样内容——没有观众。",
+  "沟通规则：agent 回复人类时工具输出已可见，回话后不要再把工具结果复述一遍。",
+]
+/** 回复指引（P7/D12：会话 id + 「要回复就用 send」）。 */
+const FORMATTED_FOOTER = "要回复就用 send 工具：私聊发给发送者 id，群消息发给会话（群）id —— 每条消息的会话标注里已给出。"
+const FORMATTED_TWO_LINES = [
+  FORMATTED_HEADER,
+  ...FORMATTED_RULES,
+  "- [m1] 来自 a1：第一条",
+  "- [m2] 来自 a2：第二条",
+  FORMATTED_FOOTER,
+].join("\n")
 
 interface Deps {
   readonly env: Record<string, string | undefined>
@@ -228,6 +242,64 @@ describe("MCP register 握手", () => {
     )
     expect((error as HubError).kind).toBe("protocol")
     expect(fake.calls).toHaveLength(1)
+  })
+})
+
+// ── 逐调用 MCP 客户端（原生工具面复用同一个 client 服务所有会话）──────────────
+
+describe("createMcpClient", () => {
+  /** 假传输：记录每条 JSON-RPC 请求体与请求头，按方法回最小合法响应。 */
+  function fakeTransport() {
+    const bodies: Record<string, unknown>[] = []
+    const headers: Record<string, string>[] = []
+    const send = async (
+      _path: string,
+      body: unknown,
+      header: Record<string, string>,
+    ): Promise<{ status: number; text: string; sessionId: string | undefined }> => {
+      const message = body as Record<string, unknown>
+      bodies.push(message)
+      headers.push(header)
+      if (message["method"] === "initialize") return { status: 200, text: "{}", sessionId: "sess-1" }
+      if (message["method"] === "tools/list") {
+        return {
+          status: 200,
+          text: JSON.stringify({ jsonrpc: "2.0", id: message["id"], result: { tools: [] } }),
+          sessionId: undefined,
+        }
+      }
+      return {
+        status: 200,
+        text: JSON.stringify({ jsonrpc: "2.0", id: message["id"], result: { content: [{ type: "text", text: "ok" }] } }),
+        sessionId: undefined,
+      }
+    }
+    return { send, bodies, headers }
+  }
+
+  it("JSON-RPC id 每 client 自增（initialize 恒为 1）：并发 tools/call 绝不撞 id", async () => {
+    const transport = fakeTransport()
+    const client = createMcpClient(transport, { authorization: "Bearer t" })
+    await client.list() // 建会话：initialize(id=1) + tools/list(id=2)
+
+    // 真机场景：阻塞 ask + 并发 respond_ask —— 旧版两条 tools/call 都是 id:2，Hub 侧错投/超时。
+    const results = await Promise.all([
+      client.call("send", { to: "a", body: "1" }, "sess-a"),
+      client.call("send", { to: "b", body: "2" }, "sess-b"),
+      client.call("ask", { to: "c" }, "sess-c"),
+    ])
+    expect(results).toEqual(["ok", "ok", "ok"])
+
+    const idsOf = (method: string) => transport.bodies.filter((body) => body["method"] === method).map((body) => body["id"])
+    expect(idsOf("initialize")).toEqual([1])
+    expect(idsOf("tools/list")).toEqual([2])
+    const callIds = idsOf("tools/call")
+    expect(callIds).toHaveLength(3)
+    expect(new Set(callIds).size).toBe(3) // 唯一
+    expect(callIds).toEqual([3, 4, 5]) // 且严格递增
+    // 逐调用身份头各自成对（同一会话承载多会话调用）
+    const callHeaders = transport.headers.filter((_header, index) => transport.bodies[index]?.["method"] === "tools/call")
+    expect(callHeaders.map((header) => header["x-agentchat-session"])).toEqual(["sess-a", "sess-b", "sess-c"])
   })
 })
 
@@ -850,22 +922,22 @@ describe("createIdleFlush 闭环", () => {
     expect(logs.some((line) => line.includes("result report failed: exhausted: retries exhausted"))).toBe(true)
   })
 
-  it("formatMessages：头部 + 规则行 + 每条一行，空白正文被丢弃", () => {
-    expect(formatMessages([])).toBe(
-      [
-        "[AgentChat] 你收到了以下来自其他 agent 的消息，请据此继续工作：",
-        "沟通规则：消息须有信息增量；禁纯回执/寒暄与复读循环；确认请并入下一步（详见 README「沟通规范」）。",
-      ].join("\n"),
-    )
+  it("formatMessages：头部 + 三条规则 + 每条一行（含会话 id）+ 回复指引；空白正文被丢弃", () => {
+    expect(formatMessages([])).toBe([FORMATTED_HEADER, ...FORMATTED_RULES, FORMATTED_FOOTER].join("\n"))
     const text = formatMessages([
-      { id: "m1", fromAgentId: "a1", body: "正文" },
+      { id: "m1", fromAgentId: "a1", body: "正文", conversationId: "conv-7" },
       { id: "m2", fromAgentId: "a2", body: "   " },
     ])
     expect(text.split("\n")).toEqual([
-      "[AgentChat] 你收到了以下来自其他 agent 的消息，请据此继续工作：",
-      "沟通规则：消息须有信息增量；禁纯回执/寒暄与复读循环；确认请并入下一步（详见 README「沟通规范」）。",
-      "- [m1] 来自 a1：正文",
+      FORMATTED_HEADER,
+      ...FORMATTED_RULES,
+      "- [m1] 来自 a1（会话 conv-7）：正文", // 前缀 `- [id] 来自 <from>` 原样，会话 id 追加在其后
+      FORMATTED_FOOTER,
     ])
+    // 无 conversationId（旧 Hub / 非会话消息）→ 省略括号，前缀契约不变（矩阵用它解析 messageId）
+    expect(formatMessages([{ id: "m3", fromAgentId: "a3", body: "正文" }])).toContain("- [m3] 来自 a3：正文")
+    expect(/^-\s+\[m3\]\s+来自\s/m.test(formatMessages([{ id: "m3", fromAgentId: "a3", body: "x" }]))).toBe(true)
+    expect(text).toContain("send") // D12：要回复就用 send
   })
 })
 

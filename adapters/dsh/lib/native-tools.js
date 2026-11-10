@@ -104,7 +104,12 @@ export function createNativeTools(options) {
       return 0
     }
     if (typeof service?.register !== "function") {
-      options.log("tools 服务不可用：跳过原生工具面（不影响 MCP 桥与消息投递）")
+      // **响亮告警**（P7）：默认工具面就是原生面；拿不到 tools 服务时本会话没有任何 AgentChat 工具，
+      // 必须让用户看见并给出可执行的补救（保留 MCP 桥工具行）——绝不静默降级。
+      options.log(
+        "原生工具面不可用：宿主没有 tools 服务（ctx.get('tools')）→ 本插件未注册任何 AgentChat 工具；" +
+          "若你依赖 MCP 桥工具行，请用 `node adapters/dsh/install.mjs --with-mcp-bridge` 重装（或升级 DSH）",
+      )
       return 0
     }
     const tools = await mcp().list()

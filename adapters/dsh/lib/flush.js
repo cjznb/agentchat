@@ -30,19 +30,33 @@ import { describe } from "./util.js"
 
 /**
  * 把认领到的消息渲染为注入文本：
- * 头部 + 沟通规则行 + 每条 `- [id] 来自 <fromAgentId>：<body>`；空白正文条目被丢弃。
+ * 头部 + 三条沟通规则（R1 = agent 对 agent 只回一次 / R2 = 不对人类复述工具输出）
+ * + 每条 `- [id] 来自 <fromAgentId>（会话 <conversationId>）：<body>` + 回复指引；空白正文条目被丢弃。
  *
- * @param {ReadonlyArray<{id: string, fromAgentId: string, body: string}>} messages
- * @returns {string} 注入文本（正文全空白时只剩头部与规则行）
+ * **前缀是外部契约**：`- [<id>] 来自 <from>` 必须保持原样（测试适配器 `host.mjs:injectedIds`
+ * 与矩阵 `assertInjectionPrefix` 用它解析 messageId）；会话 id 只能**追加在其后**的括号里。
+ * `conversationId` 缺失（旧 Hub / 非会话消息）时省略括号，不影响前缀。
+ *
+ * @param {ReadonlyArray<{id: string, fromAgentId: string, body: string, conversationId?: string}>} messages
+ * @returns {string} 注入文本（正文全空白时只剩头部、规则与指引）
  */
 export function formatMessages(messages) {
   const lines = messages
     .filter((message) => message.body.trim() !== "")
-    .map((message) => `- [${message.id}] 来自 ${message.fromAgentId}：${message.body}`)
+    .map((message) => {
+      const session =
+        typeof message.conversationId === "string" && message.conversationId !== ""
+          ? `（会话 ${message.conversationId}）`
+          : ""
+      return `- [${message.id}] 来自 ${message.fromAgentId}${session}：${message.body}`
+    })
   return [
     "[AgentChat] 你收到了以下来自其他 agent 的消息，请据此继续工作：",
     "沟通规则：消息须有信息增量；禁纯回执/寒暄与复读循环；确认请并入下一步（详见 README「沟通规范」）。",
+    "沟通规则：交流双方均为 agent 时，回复结果只写入 reply 一次，不要既 reply 又向会话重发一遍同样内容——没有观众。",
+    "沟通规则：agent 回复人类时工具输出已可见，回话后不要再把工具结果复述一遍。",
     ...lines,
+    "要回复就用 send 工具：私聊发给发送者 id，群消息发给会话（群）id —— 每条消息的会话标注里已给出。",
   ].join("\n")
 }
 

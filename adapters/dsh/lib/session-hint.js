@@ -8,10 +8,17 @@
  * `initialize` 时读该头（`server/routes/mcp.ts`），且 `role_tag=container` 的节点**不可作为
  * DM 收件方**（Hub `ContainerNotChatTargetError`）。若出站身份恒为实例容器，对端收到消息后
  * **无法回复**（适配器变单向）。故插件维护本文件：
- * - **恰好一个顶层会话**（父 = 实例节点；`origin==='subagent'` 的子代理不算）存活 → 写入该
- *   会话的 Hub 节点 id，桥用它作 `x-agent-id`：回复经 Hub 路由到该会话节点 → 插件唤醒它（双向）；
- * - **0 个或 ≥2 个顶层会话** → 删除该文件，桥回落到实例容器 id：出站调用仍可用，但**回复会被
- *   Hub 以「容器不是聊天对象」拒绝**（明确报错，绝不静默丢弃或改写收件方）。
+ * - **恰好一个顶层会话**（父 = 实例节点；`origin==='subagent'` 的子代理不算）存活、**且没有
+ *   任何子代理会话存活** → 写入该会话的 Hub 节点 id，桥用它作 `x-agent-id`：回复经 Hub 路由到
+ *   该会话节点 → 插件唤醒它（双向）；
+ * - 其余情况（0 个 / ≥2 个顶层会话，**或任一子代理存活**）→ 删除该文件：桥**不带身份**
+ *   （P7 起 fail-closed，Hub 对除 `register` 外的工具回 `identity_required`），
+ *   **绝不**把子代理的发言记到父会话名下、也绝不回落容器。
+ *
+ * **为什么子代理在跑就撤下**：桥拿不到逐调用会话信息（DSH 不把 session 注入工具入参），
+ * 一个进程级身份无法区分"是父会话在说话还是子代理在说话"。只要子代理活着，任何单一身份都会
+ * 让子代理**冒名**父会话（审计污染 + `ask` 授权错判）。故宁可让父会话经桥暂时无身份
+ * （父会话的首选通道是**原生工具面** `agentchat_*`，逐调用精确，不受影响）。
  *
  * ## 为什么记录 disposed / reopened（僵尸注册）
  * `ensureSession` 先 `await hub.register`（约 3 次 MCP 往返）再登记本地映射。若期间该会话的
@@ -93,6 +100,11 @@ export function createSessionHint(home, limit, log) {
   /** 当前存活**顶层**会话的 `sessionId → 节点 id`（`size` 即顶层会话数）。 */
   const live = new Map()
   /**
+   * 当前存活的**子代理**会话 id（有界 FIFO）：只要非空，`dsh.current` 就必须撤下——
+   * 桥的单进程身份无法区分父会话与子代理，留着它等于允许子代理冒名父会话（见模块头）。
+   */
+  const subagents = new Map()
+  /**
    * 最近一次写入/删除的值（`undefined` = 文件应不存在）：同值不重复触盘。
    *
    * **启动时取磁盘真值**（而不是留 `undefined`）：新进程里 `live` 为空，首次 `publish()` 算出的
@@ -114,19 +126,21 @@ export function createSessionHint(home, limit, log) {
   }
 
   /**
-   * 出站身份应当指向的节点 id：**只在"恰好一个顶层会话"时给出**，否则一律 `undefined`。
+   * 出站身份应当指向的节点 id：**只在"恰好一个顶层会话、且没有子代理存活"时给出**，否则一律
+   * `undefined`（桥据此**不带** `x-agent-id`，Hub 回 `identity_required`；P7 起不再回落容器）。
    *
    * **fail-closed**（真机事故，安全级）：曾经在"多于一个"时取"最近进入 `running`"的会话——
    * 那是跨会话的 last-writer-wins 全局指针，等于把**谁的回合最后开始**当成**谁在说话**：
    * 同机两个会话并跑时，A 发出的消息会被挂到 B 名下（Hub 侧的归属、回执、ask 授权判定全部跟着错），
-   * 即静默的**身份冒用**。任何"猜"都会制造这种污染，所以这里宁可**不给身份**：
-   * 桥回落实例容器 id，Hub 会明确拒绝以容器为收件方的 DM（`container_not_chat_target`），
-   * 错误显式可见、审计不被污染。
+   * 即静默的**身份冒用**。任何"猜"都会制造这种污染，所以这里宁可**不给身份**。
+   * 同理，**子代理存活时也必须撤下**：桥无法区分调用者是父会话还是子代理，留着父会话身份就是
+   * 让子代理冒名（见模块头）。
    *
    * 并发多会话下要精确归属，只有根治一条路：宿主原生工具面（每次调用天然带调用者上下文），
-   * 见 `docs/adapters-guide.md` §5 第 3 条。
+   * 见 `docs/adapters-guide.md` §5 第 3 条与 `lib/native-tools.js`（P7 起默认开启）。
    */
-  const currentNodeId = () => (live.size === 1 ? live.values().next().value : undefined)
+  const currentNodeId = () =>
+    live.size === 1 && subagents.size === 0 ? live.values().next().value : undefined
 
   /**
    * 依据 {@link currentNodeId} 写/删提示文件：有确定对象 → 写其节点 id；无 → 删除。
@@ -142,7 +156,7 @@ export function createSessionHint(home, limit, log) {
     const result = next === undefined ? clearToken(path) : writeToken(path, next)
     if (!result.ok) log(`会话提示写入失败（继续）：${result.error ?? "unknown"}`)
     published = next
-    log(next === undefined ? "会话提示已清除（顶层会话数为 0 或多于 1）" : `会话提示 = ${next}`)
+    log(next === undefined ? "会话提示已清除（顶层会话数为 0 或多于 1，或有子代理存活）" : `会话提示 = ${next}`)
   }
 
   return {
@@ -169,28 +183,39 @@ export function createSessionHint(home, limit, log) {
     /** 该会话是否正是提示文件当前指向的对象（释放时只回退提示，不误删后来者的提示）。 */
     isCurrent: (sessionId) => live.get(sessionId) === currentNodeId(),
     /**
-     * 注册成功：仅**顶层**会话纳入提示维护（子代理节点不参与「恰好一个」的计数，否则一个有子代理
-     * 的会话会让提示消失；子代理本身也不该成为出站身份），随后按存活数发布提示文件。
+     * 注册成功：**顶层**会话纳入「恰好一个」计数；**子代理**只记入 `subagents`（它一存活，
+     * 提示就必须撤下——桥无法区分父/子调用者，留着父会话身份就是允许子代理冒名）。
+     * 两种情况都要重算并发布提示文件。
      */
     onRegistered(sessionId, nodeId, topLevel) {
-      if (!topLevel) return
+      if (!topLevel) {
+        remember(subagents, sessionId, true)
+        publish()
+        return
+      }
       remember(live, sessionId, nodeId)
       publish()
     },
     /**
      * 释放：留「注册期被释放」标记（覆盖 `await` 竞态；只有新的 `agent/created` 能清除它），
-     * 再摘除节点；随后按存活数重算提示（剩一个时自动改写为它的节点 id，否则删除提示）。
+     * 再摘除节点；随后按存活数重算提示（剩一个且无子代理时自动改写为它的节点 id，否则删除提示）。
      */
     onDisposed(sessionId) {
       remember(disposed, sessionId, true)
+      const wasSubagent = subagents.delete(sessionId)
       const nodeId = live.get(sessionId)
-      if (nodeId === undefined) return
+      if (nodeId === undefined) {
+        // 子代理离场可能让"恰好一个"重新成立 → 必须重算（顶层会话走下面的分支）。
+        if (wasSubagent) publish()
+        return
+      }
       live.delete(sessionId)
       publish()
     },
     /** 插件卸载：不再有存活会话 → 删除提示文件（键 = 节点 id，故整体清空）。 */
     clear() {
       live.clear()
+      subagents.clear()
       publish()
     },
   }

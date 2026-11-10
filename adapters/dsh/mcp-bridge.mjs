@@ -21,17 +21,20 @@
  *    `/KEY|PASSWORD|SECRET|TOKEN/i` 的变量与全部 `DSH_*` 都被删除，故 `HUB_TOKEN` 常常**不可见**。
  *    桥因此按 `resolveHubToken` 解析：`HUB_TOKEN`（非空优先）→ `<home>/hub_token`，且**逐请求**读盘
  *    （Hub 换 token 后无需重启桥即可自愈）。
- * 2. **出站身份（逐请求解析）**：`x-agent-id` 按 **`<home>/agents/dsh.current`（当前顶层会话节点，
- *    由插件维护）→ `<home>/agents/dsh.id`（实例容器，兜底）** 的判序解析（`lib/token.js` 的
- *    `currentPath` / `agentIdPath`）。为什么必须这样：DSH 的 MCP 客户端在**宿主开机时**就 spawn 本桥，
- *    那时插件还没注册、两个文件都不存在，而 Hub **只在 `initialize` 时**读该头并把它固定给整个会话
- *    （`server/routes/mcp.ts`）——故桥逐请求重读（小文件，命中缓存不触盘），并在**解析值变化**时丢弃
- *    缓存的 `mcp-session-id`，让下一次请求重建会话并带上新身份。`register` 不需要身份；其余工具没有
- *    身份会被 Hub 拒（`identity_required`），这正是必须重建会话的原因。
- *    （容器节点是「分组容器、非聊天对象」：Hub 拒绝以容器为**收件方**的 DM。故只要有一个顶层会话，
- *    身份就是那个会话节点——对端因此可以回复，适配器双向可用；≥2 个顶层会话时提示文件被插件删除，
- *    桥回落到容器：出站调用仍可用，但**回复会被 Hub 拒绝**（对端收到明确错误）。这是本适配器的
- *    已知局限，绝不静默改写收件方。）
+ * 2. **出站身份（逐请求解析，P7 起 fail-closed）**：`x-agent-id` 的**唯一**来源是
+ *    `<home>/agents/dsh.current`（当前顶层会话节点，由插件维护）——文件存在时用它；**不存在时
+ *    不发该头**（Hub 对除 `register` 外的工具回 `identity_required`，显式失败）。
+ *    为什么必须这样：DSH 的 MCP 客户端在**宿主开机时**就 spawn 本桥，那时插件还没注册、文件也不存在，
+ *    而 Hub **只在 `initialize` 时**读该头并把它固定给整个会话（`server/routes/mcp.ts`）——故桥逐请求
+ *    重读（小文件，命中缓存不触盘），并在**解析值变化**时丢弃缓存的 `mcp-session-id`，让下一次请求
+ *    重建会话并带上新身份。`register` 不需要身份；其余工具没有身份会被 Hub 拒（`identity_required`），
+ *    这正是必须重建会话的原因。
+ *    ⚠️ **不再回落 `<home>/agents/dsh.id`（实例容器）**：容器是「分组容器、非聊天对象」，Hub 拒绝以
+ *    它为发件人（P5 起视为无身份）与收件方；陈旧 `dsh.id` 还会把消息**冒名记到旧会话节点**上。
+ *    容器兜底唯一的"效果好"是掩盖问题，故 P7 把它删掉：**能唯一确定才给身份，否则不带身份**。
+ *    每次不带身份地转发都是**显式告警**（日志），模型侧则看到 Hub 的 `identity_required` 错误。
+ *    多会话/子代理场景下要精确身份，请用**原生工具面**（`agentchat_*`，逐调用 `x-agentchat-session`，
+ *    见 `lib/native-tools.js`）——本桥拿不到逐调用会话信息（DSH 不会把 session 注入工具入参）。
  * 3. **逐调用会话提示（转发兼容；本适配器目前无注入方，故为惰性保留）**：`tools/call` 入参里的
  *    `x-agentchat-session` 由桥**原地剥离**（Hub 绝不能看到，否则撞 MCP 入参校验）并转请求头
  *    `x-agentchat-session`，供 Hub 按会话节点 `task_ref` 解析真实发送方。今天没有东西注入该键，
@@ -143,12 +146,12 @@ export function createBridge(options) {
   }
 
   /**
-   * 逐请求解析出站身份：**先 `<home>/agents/dsh.current`（当前顶层会话节点，可回复），
-   * 后 `<home>/agents/dsh.id`（实例容器，兜底）**；两者都读不到 → `undefined`（不带该头）。
+   * 逐请求解析出站身份：**唯一来源 `<home>/agents/dsh.current`**（当前顶层会话节点，可回复）；
+   * 文件不存在/为空 → `undefined`（本次请求**不带** `x-agent-id`，绝不回落容器）。
    *
    * 开销控制：**提示文件逐请求重读**（很小一行），但**只有它变化时**才丢弃缓存去重解析
-   * （缓存值 = 上次命中的身份）。这样「身份从无到有 / 换成别的会话节点」都能立刻生效，而
-   * 不变时既不触盘第二个文件，也**不会**误触发重建会话（重建由 `forward` 比较记录值决定）。
+   * （缓存值 = 上次命中的身份）。这样「身份从无到有 / 换成别的会话节点 / 被撤下」都能立刻生效，
+   * 而不变时既不触盘第二个文件，也**不会**误触发重建会话（重建由 `forward` 比较记录值决定）。
    *
    * @returns {string | undefined} 本次请求应带的 `x-agent-id`
    */
@@ -158,16 +161,15 @@ export function createBridge(options) {
     hintResolved = true
     hintValue = hint
     if (!hintChanged && identityResolved) return identity
-    const value = hint ?? readToken(idFile, { log })
-    if (value === NO_IDENTITY) {
+    if (hint === NO_IDENTITY) {
       identity = NO_IDENTITY
       identityResolved = false
       return NO_IDENTITY
     }
-    identity = value
+    identity = hint
     identityResolved = true
-    log(`出站身份 ${value}（取自 ${hint === NO_IDENTITY ? idFile : hintFile}）`)
-    return value
+    log(`出站身份 ${hint}（取自 ${hintFile}）`)
+    return hint
   }
 
   /**
@@ -208,7 +210,16 @@ export function createBridge(options) {
     }
     if (token === "") throw new Error(`读不到 Hub 传输门 token（${hubTokenPath(env)}）；请先启动 Hub 生成 hub_token 后再调用工具`)
     const id = resolveIdentity()
-    if (id !== undefined) headers["x-agent-id"] = id
+    if (id === undefined) {
+      // P7 fail-closed：**绝不回落容器**。每次不带身份地转发都落一条显式告警（可见性优先于日志量）——
+      // 模型侧会同时看到 Hub 的 `identity_required` 错误，两者互为证据。
+      log(
+        `出站身份缺失（未附带 x-agent-id）：${hintFile} 不存在或为空（0 个或 ≥2 个顶层会话，或有子代理在跑）→ ` +
+          "除 register 外的工具会被 Hub 拒（identity_required）；多会话/子代理下请用原生工具面（agentchat_*，逐调用身份）",
+      )
+      return headers
+    }
+    headers["x-agent-id"] = id
     return headers
   }
 
@@ -238,7 +249,7 @@ export function createBridge(options) {
     if (response.status === 401) throw new Error(`Hub 拒绝（401 unauthorized）：${hubTokenPath(env)} 与 Hub 的 token 不一致；请重启 Hub 或重新比对 token 文件`)
     if (response.status === 400 && text.includes("agent_not_found")) {
       throw new AgentNotFoundError(
-        `Hub 返回 400 agent_not_found：${hintFile} / ${idFile} 中的 id 陈旧或尚未注册；已丢弃缓存身份并重试一次，若仍失败请等插件重新注册`,
+        `Hub 返回 400 agent_not_found：${hintFile}（会话节点提示）中的 id 陈旧或尚未注册（实例容器 id ${idFile} 不再作身份，仅留痕）；已丢弃缓存身份并重试一次，若仍失败请等插件重新注册`,
       )
     }
     // 仅「会话被 TTL 淘汰 / Hub 重启」才自愈重 init；其它 404 按普通错误返回，不误开新会话。

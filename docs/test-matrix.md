@@ -67,7 +67,7 @@ L0 用例的注入录音（`host.deliveries`）与库内原始行（`GET /api/te
 | N08 | L0 | @ 命中/未命中/`"*"`/名字与 id 混写；无人被 @ 时 human 回落全员、agent 0 job | ✅（**现行规格**，见 §4-D03） | 2 |
 | N09 | L0 | 广播会话 `key='shout'` 无 participants；容器排除；logical 不建 job 但可取件；逐节点送达 | ✅ | 4 |
 | N10 | L0 | 群 3 人 + shout 多人：每收件方各自注入恰一次、各自回执；未注入方不得假 delivered | ✅（P1 正面验证） | 2 |
-| N11 | L0 | busy 期间只能排队（`pending_reason='busy'`）→ 忙时取件即送达；**urgency 档位未落地**（P6/task-12） | ⚠️ 部分：P3 语义 ✅；`urgency` 正向断言待 P6 | 8 |
+| N11 | L0 | busy 期间只能排队（`pending_reason='busy'`）→ 忙时取件即送达；`urgency` 三档写入 `meta.urgency`（`urgent`/`low` 写、`normal`/缺省不写） | ✅（P3 语义 + P6 三档，**已翻转为正向断言**） | 8 |
 | N12 | L0 | 离线仍建 `pending_reason=null` job；回 online 的 `makeJobsDue` 才解锁（用远期 `retry_at` 反证） | ✅ | 3 |
 | N13 | L0 | refused 不写 seen、不置 accepted、后续重投；达 `REFUSAL_LIMIT=2` 转终态后不再投 | ✅ | 4 |
 | N14 | L0 | 认领未回执 → 租约 `CLAIM_TIMEOUT_MS≈30s` 内不重复认领；过期重投且 seen 去重只补回执 | ✅ | 4 |
@@ -106,16 +106,20 @@ L0 用例的注入录音（`host.deliveries`）与库内原始行（`GET /api/te
 | D09 | L0 | 容器 `x-agent-id` → `identity_required`、零容器署名消息/会话；`register` 免身份 | ✅ | P5/task-11 已修 |
 | D10 | L0 | busy 下仍可认领并回报 `delivered`，状态全程 busy | ✅（协议层，见 §5-②） | P3/task-9 |
 | D11 | L0 | busy 心跳保持 busy（Hub 侧不变量） | ✅（适配器侧见 §5-②） | P3/task-9 |
-| D12 | L0 | 注入头含**会话 id** 与「要回复就用 send」指引 | 🔴 **`it.fails`（`flush.js` 注入头尚未落地）** | **task-14（P7）**（落地后翻转；该半条已从 P4/task-10 转出） |
+| D12 | L0 | 注入头含**会话 id** 与「要回复就用 send」指引 | ✅ **已翻转**（`formatMessages` 落地；`- [<id>] 来自 <from>` 前缀保留） | P7/task-14 已修 |
 | D12b | L0 | 错误文案 `[code]` 仍在行尾（`lib/mcp.js:64` 解析契约，恒须成立） | ✅ | 契约锁 |
 
-### 4.1 `it.fails` 清单（3 条，全部待修、非静默跳过）
+### 4.1 `it.fails` 清单（2 条，全部待修、非静默跳过）
 
 | 用例 | 失败根因（当前实测） | 翻转条件 |
 |---|---|---|
 | `D05-期望` | 48h 后 job 仍 `pending`（`NULL`/`offline` 两类 `pending_reason` 都没有 TTL；dispatcher 只对 `busy` 做 24h 过期） | 给 `offline`/`NULL` 积压加 TTL + 失败通知后改回普通 `it` |
 | `D06-期望` | 陈旧 nodeId 下真 flush 返回 false，库内零 agents（无任何补注册） | DSH 适配器实现 404 自愈补注册后改回普通 `it`（并补真机 L2 证据） |
-| `D12` | `adapters/dsh/lib/flush.js` 的 `formatMessages` 仍不渲染会话 id、无 send 指引 | **task-14（P7）** 落地注入头后改回普通 `it`；必须保留 `- [<id>] 来自 <from>` 前缀（矩阵用 `assertInjectionPrefix` 锁它） |
+
+> **D12 已于 P7/task-14 翻转**（原第 3 条 `it.fails`）：`adapters/dsh/lib/flush.js` 的 `formatMessages`
+> 现在在 `- [<id>] 来自 <from>` 前缀后追加 `（会话 <conversationId>）`，并补三条沟通规则与
+> 「要回复就用 send」指引。前缀本身仍是**解析契约**（`host.mjs:injectedIds` 与
+> `assertInjectionPrefix`），故会话 id 只能追加在其后。
 
 ### 4.2 规格 vs 现状（不要误判为 bug）
 
@@ -123,8 +127,10 @@ L0 用例的注入录音（`host.deliveries`）与库内原始行（`GET /api/te
   若要改成"agent 也全员投递"，**必须先改规格**（spec §2/§14.4）再改实现与矩阵。
 - **N04 的 `offline→busy` 409 `transition_rejected`**：有意裁决（展示态离线后必须先用 online/idle 重激活）。
 - **N17 读位点**：purge 只删 `messages` + `wake_jobs`，**保留** `read_states`/会话/成员（现状口径，非缺陷）。
-- **N11 `/ urgency`**：P6（task-12）未落地，`urgency` 还不是契约字段（zod 静默剥离）→ 当前断言"库内无 urgency 痕迹"，
-  P6 落地后需**翻转为正向断言**（三档 + 插队/打断映射）。
+- **N11 `/ urgency`**：P6（task-12）Hub 侧**已落地**（`meta.urgency` 会写库，`normal` 不写）；
+  该用例已**翻转为正向断言**（urgent/low 写、normal 不写）。适配器侧的三档映射（`prepend` 插队 /
+  `busyUrgentMax` 护栏 / `low` 忙时不投）属 **P6-适配器阶段**，尚未落地，届时在 `adapters/dsh/__tests__`
+  补断言（本矩阵只锁 Hub 契约面）。
 
 ## 5. 未覆盖 / 近似（如实列出，勿当成已覆盖）
 
@@ -145,8 +151,8 @@ L0 用例的注入录音（`host.deliveries`）与库内原始行（`GET /api/te
 
 1. **`adapters/dsh/lib/mcp.js` 的 `rpc()` 每条调用硬编码 JSON-RPC `id: 2`** → 同一条 MCP 会话上的**并发** `tools/call`
    会撞 id：实测"阻塞 `ask` + 并发 `respond_ask`"时，应答被错投/阻塞，`ask` 直到超时才返回（`timedOut=true`）。
-   真实世界"等待方/应答方"是不同进程不同连接，故矩阵改用第二条连接并保持全绿；但**同一适配器进程内并发工具调用**是
-   真实风险面（尤其 P6 之后的异步化）。建议在 `adapters/dsh/lib/mcp.js` 改为自增 id。
+   ✅ **P7/task-14 已修**：`rpc()` 改为**每 client 自增 id**（`initialize` 恒为 1），并加并发 id 唯一性用例
+   （`adapters/dsh/__tests__/lib.test.ts` 的 `createMcpClient`）。
 2. **D05 的观察**：dispatcher 的 `deferWakeJob` 会把 `pending_reason=NULL` 改写成 `offline`（`offline` 同样无 TTL），
    所以 R7 的准确表述是"**NULL 与 offline 两类积压都没有超时/通知**"，而不只是 NULL。
 
@@ -154,7 +160,7 @@ L0 用例的注入录音（`host.deliveries`）与库内原始行（`GET /api/te
 
 | 项 | 数值 / 结果 |
 |---|---|
-| 矩阵用例总数 | **45**（普通 `it` 42 条 + `it.fails` 3 条） |
+| 矩阵用例总数 | **45**（普通 `it` 42 条 + `it.fails` 3 条）→ **P7/task-14 翻转 D12 后：43 普通 + 2 `it.fails`** |
 | 矩阵（L0/L1） | `npx vitest run adapters/test/__tests__` → **9 文件全绿 / 58 passed + 3 expected fail**（含 T6 `host.test.ts` 16 条） |
 | 交付验收两跑 ① | `npx vitest run adapters/test/__tests__ tests/integration` → **EXIT=0，40 文件全绿，508 passed + 3 expected fail**（原始日志：`.artifacts/t13-full-vitest.log`） |
 | 交付验收两跑 ② | `node adapters/test/cli.mjs --scenario all --spawn` → **9/9 场景 PASS，EXIT=0**（dm 11/11、group 8/8、busy 7/7、refused 6/6、lease 9/9、offline 6/6、shout 6/6、logical 6/6、states 5/5；日志 `.artifacts/t13-cli-all.log`） |
@@ -163,11 +169,14 @@ L0 用例的注入录音（`host.deliveries`）与库内原始行（`GET /api/te
 | 单文件纯行 | 全部 ≤ 250（最大 `matrix-kit.ts` 231） |
 | 生产码改动 | **零**（本任务只新增 `adapters/test/__tests__/matrix-*` 与 `docs/test-matrix.md`） |
 | 未覆盖 | N25（client 侧覆盖）、N29 实例根注册半句、D10/D11 适配器侧、L2 真机（见 §5） |
-| `it.fails`（待修） | D05-期望（R7）、D06-期望（R8）、D12（task-14/P7 注入头）—— 见 §4.1 |
+| `it.fails`（待修） | D05-期望（R7）、D06-期望（R8）—— 见 §4.1（**D12 已由 P7/task-14 翻转**，从 3 条降到 2 条） |
 
 > 定稿时（2026-11-10 10:30 前后）P3（task-9）与 P4（task-10）正在并发落地：
 > D10/D11/N26 已可断言"正确行为"且通过。
-> **D12 仍未落地**：P4 只做了 Hub/MCP 侧（描述/instructions/参数描述），DSH 注入头那半条已按 lead 决定
-> **转给 task-14（P7）**，故 D12 标 `it.fails`。task-14 落地后 D12 会由"预期失败"变成"意外通过"而报红
-> —— 那是**要求翻转的信号**，按 §4.1 改回普通 `it`。
+> **D12 已落地（P7/task-14）**：注入头补齐会话 id + 三条沟通规则 + 「要回复就用 send」指引，
+> 故 `it.fails` 中的 D12 已改回普通 `it`（见 §4.1 的说明）。
+> **N11 已翻转（P6/task-12 Hub 侧）**：`urgency` 三档现在会写 `meta.urgency`（`normal`/缺省不写，
+> 保既有 golden），故该用例已从"库内无 urgency 痕迹"的现状锁改为**正向三档断言**（urgent/low 写、
+> normal 不写）。适配器侧的插队/打断映射仍属 **P6-适配器阶段**（`prepend` 插队 / `busyUrgentMax` 护栏 /
+> `low` 忙时不投），本矩阵覆盖的是 Hub 契约面。
 

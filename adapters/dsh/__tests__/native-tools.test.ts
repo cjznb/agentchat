@@ -63,6 +63,8 @@ function setup(tools: unknown[] = defaultTools) {
   const sessions = new Map([
     ["session-aaaa", { nodeId: "node-A" }],
     ["session-bbbb", { nodeId: "node-B" }],
+    // 子代理会话：**自己的**会话节点（P7：子代理绝不冒名父会话）。
+    ["session-child", { nodeId: "node-child" }],
   ])
   const native = createNativeTools({
     ctx: { get: () => undefined },
@@ -122,6 +124,29 @@ describe("原生工具面（逐调用身份）", () => {
     expect(transport.sent.filter((entry) => entry.method === "initialize")).toHaveLength(1)
   })
 
+  it("子代理调用用**它自己的**会话节点身份（绝不冒名父会话）", async () => {
+    const { native, registered, transport } = setup()
+    await native.registerAll()
+    const send = registered.find((d) => d["name"] === `${TOOL_PREFIX}send`) as {
+      execute: (args: unknown, exec: unknown) => Promise<{ text: string }>
+    }
+    // DSH 逐调用把**调用方自己的** header 交给工具：子代理的 header 带 origin/parentSession，
+    // 但 id 是子代理自己的会话 id → 身份 = 子代理节点，与父会话（session-aaaa）无关。
+    const execChild = {
+      agent: { session: { header: { id: "session-child", origin: "subagent", parentSession: "session-aaaa" } } },
+    }
+    const [child, parent] = await Promise.all([
+      send.execute({ to: "父会话" }, execChild),
+      send.execute({ to: "子代理" }, { agent: { session: { header: { id: "session-aaaa" } } } }),
+    ])
+    expect([child.text, parent.text]).toEqual(["ok:send", "ok:send"])
+    const calls = transport.sent.filter((entry) => entry.method === "tools/call")
+    expect(calls.map((entry) => entry.headers["x-agentchat-session"])).toEqual(["session-child", "session-aaaa"])
+    // 子代理的调用**只**带它自己的身份（父会话身份只出现在父会话那次调用上）
+    expect(calls[0]?.args).toEqual({ to: "父会话" })
+    expect(calls[1]?.args).toEqual({ to: "子代理" })
+  })
+
   it("拿不到调用者会话 → **拒发**（不猜、不回落容器），且不产生任何 tools/call", async () => {
     const { native, registered, transport } = setup()
     await native.registerAll()
@@ -148,7 +173,7 @@ describe("原生工具面（逐调用身份）", () => {
     expect(logs.some((line) => line.includes("原生工具 boom 调用失败"))).toBe(true)
   })
 
-  it("tools 服务不可用 / 注册被拒 → 只记日志、不抛、逐个跳过", async () => {
+  it("tools 服务不可用 → **响亮告警**（P7：默认工具面就是原生面）且不抛；注册被拒 → 逐个跳过", async () => {
     const transport = fakeTransport()
     const logs: string[] = []
     const noService = createNativeTools({
@@ -158,7 +183,11 @@ describe("原生工具面（逐调用身份）", () => {
       log: (m) => void logs.push(m),
     })
     expect(await noService.registerAll()).toBe(0)
-    expect(logs.some((line) => line.includes("tools 服务不可用"))).toBe(true)
+    // 绝不静默降级：告警必须说清后果与补救（--with-mcp-bridge 重装保留桥工具行）
+    const warning = logs.find((line) => line.includes("原生工具面不可用"))
+    expect(warning).toBeDefined()
+    expect(warning).toContain("tools 服务")
+    expect(warning).toContain("--with-mcp-bridge")
 
     const partial = createNativeTools({
       ctx: { get: () => undefined },

@@ -1,18 +1,19 @@
 # AgentChat — DSH 桌面端适配器（bundle）
 
 把 **DSH（DeepSeek Harness）桌面端**接入 AgentChat Hub。每个打开过的 DSH 会话在 AgentChat 里是
-**一个联系人（节点）**：会话加入 roster、回合始/末上报 `busy`/`idle`、**空闲时取件**并把其他 agent
-发来的消息注入该会话，注入成功后回执 `delivered`。
+**一个联系人（节点）**：会话加入 roster、回合始/末上报 `busy`/`idle`、**空闲与忙时都取件**并把其他 agent
+发来的消息注入该会话（忙时经 `steer` 在最近 step 边界交付），注入成功后回执 `delivered`。
 
 适配器是 **`adapters/opencode`（已验证的「进程外插件 + MCP 桥」方案）的 DSH 版**，只是宿主扩展点与
-安装方式换成 DSH 的 **Cordis bundle / Host 插件面**：
+安装方式换成 DSH 的 **Cordis bundle / Host 插件面**，并且**工具面默认走宿主原生工具**（逐调用身份）：
 
 ```
 AgentChat Hub ──HTTP(/internal/*)+MCP──> adapters/dsh/index.js（Host 插件，进程内）
                     ▲                              │
                     │                    DSH 事件：agent/created ・ agent/status ・ agent/disposed
                     │                              ▼
-                    └── mcp-bridge.mjs（stdio MCP）──> DSH agent 的 mcp__agentchat__* 工具
+                    │                    agentchat_* 原生工具（默认；逐调用 x-agentchat-session 身份）
+                    └── mcp-bridge.mjs（stdio MCP，可选回退 --with-mcp-bridge）──> mcp__agentchat__* 工具
 ```
 
 > 本文是**自包含**页（设计理由 + 取舍 + 扩展点核实结论）；`adapters/dsh/README.md` 是**更短的运维导读**
@@ -26,10 +27,12 @@ AgentChat Hub ──HTTP(/internal/*)+MCP──> adapters/dsh/index.js（Host �
   **实例容器（根）→ 会话节点 → 子代理会话节点**。
 - **状态镜像**：`agent/status` 的 `running`/`idle` 分别上报 `busy`/`idle`；Hub roster 上能直接看到
   哪个会话在跑、哪个空闲。
-- **空闲取件注入**：会话空闲时拉取 Hub 上排队的消息，合并为一条 `[AgentChat] …` 文本注入该会话，
-  模型据此继续工作；回执按 `delivered`/`refused` 逐条上报。
-- **工具面**：本地 stdio MCP 桥把 Hub 的 `POST /mcp` 工具面暴露为 DSH agent 可直接调用的
-  `mcp__agentchat__*` 工具（`send` / `ask` / `roster` / …）。
+- **空闲/忙时取件注入**：会话空闲时拉取 Hub 上排队的消息，合并为一条 `[AgentChat] …` 文本注入该会话；
+  `running` 期间也按忙时间隔取件，命中新消息经 `agent.steer` 在**最近的 step 边界**交付（每回合有配额）。
+  回执按 `delivered`/`refused` 逐条上报。
+- **工具面（默认原生）**：插件把 Hub 的 `POST /mcp` 工具面注册为宿主原生工具 `agentchat_*`，
+  **逐调用**按调用者会话注入 `x-agentchat-session`（多会话/子代理天然精确）；可选 `--with-mcp-bridge`
+  装本地 stdio MCP 桥，暴露 `mcp__agentchat__*`（进程级单身份，仅在宿主没有 tools 服务时需要）。
 
 **什么时候选它**
 
@@ -38,8 +41,8 @@ AgentChat Hub ──HTTP(/internal/*)+MCP──> adapters/dsh/index.js（Host �
 | 主要用 **DSH 桌面端**当 agent，希望它能被别的 agent 找到、被派活、能回信 | ✅ | 会话级节点 + 工具面，两个方向都通 |
 | 想让 **DSH 里的多个会话**（不同工作目录 / 子代理）在通讯录里**各自是一个联系人** | ✅ | 会话节点按 `task_ref = session.header.id` 稳定；子代理会话再嵌套其下 |
 | 只是在 CLI 里跑一次性命令、不需要常驻会话 | ❌ | 适配器跟随**会话生命周期**；没有会话就没有节点 |
-| 需要**逐会话精确的出站记账**（回复从会话节点发出，而不是实例容器） | ⚠️ 部分 | 见「设计取舍与已知限制 (b)」：DSH 禁止改写工具入参，故用磁盘提示兜底——**单会话精确、≥2 个顶层会话退回容器**（此时 Hub 拒绝以容器为收件方的回复） |
-| 用的是 OpenCode / Claude Code | ❌ | 见 [`docs/adapters-opencode.md`](adapters-opencode.md) / [`docs/adapters-claude-code.md`](adapters-claude-code.md) |
+| 需要**逐会话精确的出站记账**（回复从会话节点发出，而不是实例容器） | ✅ | 原生工具面（默认开启）**逐调用**按调用者会话记账，含子代理；见「设计取舍与已知限制 (b)」 |
+| 用的是 OpenCode | ❌ | 见 [`docs/adapters-opencode.md`](adapters-opencode.md) |
 
 前置：Node ≥ 22；Hub 可启动（`npm start`，默认 `http://127.0.0.1:4646`，首次启动写出
 `<AGENTCHAT_HOME>/hub_token`）；**DSH 桌面端已安装**并至少创建过一个 profile。
@@ -50,11 +53,14 @@ AgentChat Hub ──HTTP(/internal/*)+MCP──> adapters/dsh/index.js（Host �
 
 ```
 实例节点 dsh@<host>            ← 根，role_tag=container（分组容器，不是聊天对象）
-                                 join_token 认领；MCP 出站身份的**兜底**（<home>/agents/dsh.id）
-                                 单会话时实际出站身份取 <home>/agents/dsh.current（见「设计取舍 (b)」）
 └─ 会话节点 <cwd 目录名>-<id8>  ← task_ref = session.header.id（Hub 侧幂等稳定）
    └─ 子代理会话节点            ← header.origin === 'subagent'，parent_ref = 父会话节点
 ```
+
+**出站身份（P7 根治）**：每个会话的发言恒等于**它自己的会话节点**——原生工具面按**每次调用**注入
+`x-agentchat-session = session.header.id`（子代理也用它自己的会话 id，绝不挂到父会话名下）；拿不到调用者
+会话就**拒发**（不猜、不回落容器）。`<home>/agents/dsh.current` 只服务于**可选的 MCP 桥**（进程级单身份）：
+仅当恰好一个顶层会话**且没有子代理存活**时才存在，否则撤下（桥不带身份 → Hub 回 `identity_required`）。
 
 | 层 | 注册参数 | 说明 |
 |---|---|---|
@@ -79,8 +85,8 @@ AgentChat Hub ──HTTP(/internal/*)+MCP──> adapters/dsh/index.js（Host �
 | DSH 扩展点 | 适配器动作 |
 |---|---|
 | `agent/created` | **懒注册实例节点**（首次；`role_tag=container`，`join_token` 落盘 `<home>/agents/dsh.token`）；把该会话注册为实例节点的**子节点**（`task_ref=<session.header.id>`），上报 `online` |
-| `agent/status` = `running` | 会话节点上报 `busy`，**停**空闲轮询 |
-| `agent/status` = `idle` | 会话节点上报 `idle` → 走一次取件闭环 → 启动空闲轮询（默认 10s） |
+| `agent/status` = `running` | 会话节点上报 `busy`，并切到**忙时轮询**（`busyPollMs`，默认 5s）：回合进行中认领到的消息经 `agent.steer` 在最近 step 边界交付（每回合最多 `busyInjectMax`=1 次，其余排队到回合结束） |
+| `agent/status` = `idle` | 会话节点上报 `idle` → 走一次取件闭环 → 启动空闲轮询（默认 10s）；忙时配额在本回合切换时复位 |
 | `agent/disposed` | **只停本地跟踪（停轮询、丢映射），不退役节点**（理由见「设计取舍 (a)」） |
 | 插件卸载（`ctx.effect` 清理） | 停全部轮询；**实例节点（根）上报 `offline`**；会话子节点不报 offline |
 | `mcp-bridge.mjs`（stdio MCP 桥） | 把 Hub 的 `POST /mcp` 工具面暴露为 DSH 的 `mcp__agentchat__*` 工具 |
@@ -88,14 +94,19 @@ AgentChat Hub ──HTTP(/internal/*)+MCP──> adapters/dsh/index.js（Host �
 取件闭环（`lib/flush.js`，与宿主解耦，宿主相关操作只有注入函数）：
 
 ```
-idle 心跳（会话节点 + 实例节点各一次 idle，实例根不搭车会被判 offline）
+心跳（会话节点 + 实例节点各一次；**状态 = 本轮忙闲**：忙时报 busy，绝不把 Hub 的 busy 反翻成 online）
   → POST /internal/wake（按**会话节点** id 认领积压）
-  → 有消息 → 合并渲染成一条注入文本 → agent.followup/steer
+  → 有消息 → 合并渲染成一条注入文本 → agent.followup（空闲）/ agent.steer（running）
   → 逐条 POST /internal/result（delivered / refused）
 ```
 
-去重的唯一权威是**有界 `seen` 集**（上限 256，FIFO 淘汰）：Hub 的在途租约到期重投同一 `messageId` 时**绝不
-重复注入**，只幂等补回执；`refused` **不写入 `seen`**（注入被拒 = 尚未注入，下一轮仍会尝试）。
+去重的唯一权威是**按收件方分键的有界 `seen` 集**（每个 Hub 节点一份，上限 256，FIFO 淘汰）：Hub 的在途租约
+到期重投同一 `messageId` 时**绝不重复注入**，只幂等补回执；`refused` **不写入 `seen`**（注入被拒 = 尚未注入，
+下一轮仍会尝试）。按收件方分键是必须的——同一条群消息对多个会话各有 job，全局共享 `seen` 会让第二个会话
+被判「已注入」而不注入却直接回 `delivered`（假投递）。
+
+忙时配额用尽后，`flush` 走 `claim: false`：**只发心跳、不认领**——既不让节点假离线，也绝不出现
+「认领了却投不出去」（那会留下未回执租约或把消息误报 `refused` 而累计成 Hub 侧终态）。
 
 ### 为什么注入用 `followup` / `steer`，而**不用** `inject`
 
@@ -110,11 +121,14 @@ idle 心跳（会话节点 + 实例节点各一次 idle，实例根不搭车会�
 取件必须**唤醒**，所以：
 
 - 会话**空闲** → `followup`（开新回合并唤醒，符合「唤醒即续跑」语义）；
-- 注入时该会话**恰好已 `running`** → `steer`（在下一个 step 边界即被看到，不额外插一个回合）；
+- 注入时该会话**恰好已 `running`** → `steer`（在下一个 step 边界即被看到，不额外插一个回合）——P3 起
+  **忙时也取件**，所以这条分支是常规路径而不是竞态兜底；边界：`steer` **不抢占正在执行的工具**，
+  `cancel` 之后紧接的 `steer` 会被 DSH 降级为 next-turn，故承诺的是「下一个 step 边界」而非「即时打断」；
 - **绝不**用 `inject` 取件——它不会唤醒，消息会被静默滞留。
 
-注入消息的来源标为 **`{kind:'plugin', plugin:'agentchat', form:'relay'}`**——`form: 'relay'` 的 DSH 语义正是
-「另一个 agent 发来的消息」，与 AgentChat 的中继投递完全对应（见附录 C 的 `MessageSource`/`ContextForm`）。
+注入消息的来源标为 **`{kind:'plugin:agentchat', form:'relay'}`**（生产者自有 kind；v4 会拒绝已废弃的
+`kind:'plugin'` 包装）——`form: 'relay'` 的 DSH 语义正是「另一个 agent 发来的消息」，与 AgentChat 的中继投递
+完全对应（见附录 C 的 `MessageSource`/`ContextForm`）。
 
 消息对象优先用 `@deepseek-ai/dsh-llm` 的 `createUserMessage({content, source})` 构造；该模块不可用时
 **退化为自带 `randomUUID()` 的最小 UserMessage**（同形状：`{id, role:'user', content:[{type:'text',text}], source}`），
@@ -129,15 +143,20 @@ idle 状态**同一条 `flush` 路径**。轮询器纪律（`lib/poll.js`）：
 - **无重叠执行**：`run()` 未落定前不排下一个定时器；定时器 `unref()`（尽力而为）不阻塞宿主退出；
 - 失败**指数退避**（`interval · 2^failures`，上限 60s），成功立即复位基础间隔——Hub 不可达时不刷屏不自旋；
 - 间隔**钳制**到 `[1000, 3600000]`ms，非法值回落 10s；
-- `running` 时停轮询（busy 期间靠 `steer`/下一轮完场，不需要空转）。
+- `running` 时**不停轮询**（P3）：切到 `busyPollMs`（默认 5s）继续取件，否则 DSH 是 pull 厂商、忙时没有
+  任何取件触发者，消息只能等回合结束（真机症状「忙时完全收不到」）。忙/闲间隔不同 → 状态切换时重启轮询器
+  （代价只是重置失败退避计数）。
 
 ## 安装
 
 ```powershell
 # 1) 安装（幂等；--dry-run 只打印；--uninstall 精确回退）
 node adapters/dsh/install.mjs --profile desktop
+#    默认**不写** MCP 桥行（工具面走插件原生工具 agentchat_*，逐调用身份）；
+#    只有宿主没有 tools 服务、或你想保留 mcp__agentchat__* 时才加 --with-mcp-bridge。
+#    默认模式还会把旧版写下的 MCP 托管块**幂等摘除**（避免模型同时看到两套工具）。
 
-# 2) 重启 DSH 桌面端（bundle 选择与 MCP 行都在启动时装配）
+# 2) 重启 DSH 桌面端（bundle 选择与（可选）MCP 行都在启动时装配）
 
 # 3) 验证节点出现
 curl http://127.0.0.1:4646/api/roster
@@ -152,7 +171,7 @@ curl http://127.0.0.1:4646/api/roster
 |---|---|---|---|
 | 1 | `<DSH_HOME>/profiles/node_modules/@agentchat/dsh-adapter` | **目录联接** → 本适配器目录（Windows 用 `junction`，无需提权；其它平台 `dir`） | DSH 启动器在 `<DSH_HOME>/profiles/node_modules` 维护**共享扁平模块根**，profile manifest 里的 `file:` 依赖靠它解析 |
 | 2 | `<DSH_HOME>/profiles/<profile>/package.json` | `dependencies["@agentchat/dsh-adapter"] = "file:<适配器绝对目录>"`（路径**一律写成正斜杠**，Windows 原生反斜杠在 manifest 里会被转义）**且**把包名追加进 `dsh.profile.bundles` | 只建联结不登记是不够的：loader 只对**被选中**的 bundle 合成其 patch |
-| 3 | `<DSH_HOME>/profiles/<profile>/cordis.patch.yml` | **受管块**（`MANAGED_HEAD`/`MANAGED_TAIL` 两个 marker 界定），插入 Hub 的 MCP 工具行 | MCP 行含**机器相关**的绝对路径，不能随包发布；重复安装只替换块内文本，`--uninstall` 只摘这一块 |
+| 3 | `<DSH_HOME>/profiles/<profile>/cordis.patch.yml` | **仅 `--with-mcp-bridge`** 时插入**受管块**（`MANAGED_HEAD`/`MANAGED_TAIL` 两个 marker 界定）承载 Hub 的 MCP 工具行；默认模式则**摘除**旧块的托管块 | MCP 行含**机器相关**的绝对路径，不能随包发布；P7 起默认工具面是插件的原生工具（逐调用身份），两套工具同时出现会让模型挑错面 |
 | 4 | `<AGENTCHAT_HOME>/config.json` | `adapters` 追加 `dsh` | 显式厂商登记（免手动设 `AGENTCHAT_ADAPTERS`）；Hub 也会在首次收到该厂商 `/internal/wake` 时自动识别为 pull 适配器，故**未登记也不丢消息** |
 
 受管块的形状（写入 profile 用户 patch 层；`<node>` = 安装时的 `process.execPath`，`<bridge>` = 本目录
@@ -217,6 +236,10 @@ DSH 桌面端自己带一个 `plugin_manager` 工具（**Desktop 宿主的工具
 | 字段 | 默认 | 含义 |
 |---|---|---|
 | `pollMs` | `AGENTCHAT_POLL_MS` → `10000` | 空闲轮询间隔（毫秒）。消息在「已经 idle 之后」到达时靠它补拉 |
+| `busyInject` | `AGENTCHAT_BUSY_INJECT` → `true` | 忙时（`running`）是否继续取件并经 `steer` 交付。设 `false` 回退旧行为（忙时停轮询，消息排队到回合结束） |
+| `busyPollMs` | `AGENTCHAT_BUSY_POLL_MS` → `5000` | 忙时轮询间隔（钳制 `[1s, 1h]`）。`steer` 在**最近 step 边界**交付，**不能**抢占正在执行的工具 |
+| `busyInjectMax` | `AGENTCHAT_BUSY_INJECT_MAX` → `1` | **每个忙回合**最多注入几次（`0` = 忙时只发心跳不注入）。配额用尽只发心跳、不认领，其余排队到回合结束 |
+| `nativeTools` | `AGENTCHAT_NATIVE_TOOLS` → `true` | 注册宿主**原生工具面**（`agentchat_*`，逐调用身份）。设 `false` 时必须另有 MCP 桥工具行，否则 agent 没有 AgentChat 工具 |
 | `name` | `dsh@<host>` | 实例节点可读名。同一台机器跑多个不同 `AGENTCHAT_HOME` 的实例时用它避重名 |
 
 > 该 patch **只插入插件行**，不含任何机器路径——所以同一份包可以被任意路径安装
@@ -231,6 +254,10 @@ DSH 桌面端自己带一个 `plugin_manager` 工具（**Desktop 宿主的工具
 | `HUB_TOKEN` | 自动读磁盘 | 插件 + 桥 | 传输门 token **覆盖**：非空时优先（trim 后判空）。缺省时两者都自动读 `<AGENTCHAT_HOME>/hub_token` |
 | `AGENTCHAT_HOME` | `~/.agentchat` | 插件 + 桥 | 数据目录：`hub_token`、`agents/dsh.*`、`logs/dsh-adapter.log` 的落盘根（与 Hub 一致） |
 | `AGENTCHAT_POLL_MS` | `10000` | 插件 | 空闲轮询间隔（钳制 `[1s, 1h]`，非法回落 10s）；bundle 行 `config.pollMs` 优先 |
+| `AGENTCHAT_BUSY_INJECT` | `true` | 插件 | 忙时取件开关（`0/false/off/no` 关闭）；bundle 行 `config.busyInject` 优先 |
+| `AGENTCHAT_BUSY_POLL_MS` | `5000` | 插件 | 忙时轮询间隔（钳制 `[1s, 1h]`）；bundle 行 `config.busyPollMs` 优先 |
+| `AGENTCHAT_BUSY_INJECT_MAX` | `1` | 插件 | 每忙回合最多注入几次（`0` = 只心跳不注入）；bundle 行 `config.busyInjectMax` 优先 |
+| `AGENTCHAT_NATIVE_TOOLS` | `true` | 插件 | 原生工具面开关（`0/false/off/no` 关闭）；bundle 行 `config.nativeTools` 优先 |
 | `AGENTCHAT_TIMEOUT_MS` | `3000` | 插件 | 插件对 Hub 的**单次 HTTP 超时**（仅测试用途；生产恒 3s）。可重试失败按 `min(30s, 250ms·2^attempt)+jitter` 退避，最多 4 次尝试 |
 | `AGENTCHAT_MCP_TIMEOUT_MS` | `30000` | 桥 | 桥转发到 Hub 的**单次上游请求超时**，钳制 `[100ms, 600000ms]`，非法回落 30s |
 | `AGENTCHAT_LOG` | （落文件） | 插件 + 桥 | 设为 `console` 时诊断改打 **stderr**（调试回退，默认关闭）；缺省写 `<AGENTCHAT_HOME>/logs/dsh-adapter.log` |
@@ -295,8 +322,9 @@ DSH 桌面端自己带一个 `plugin_manager` 工具（**Desktop 宿主的工具
 | MCP 工具 `mcp__agentchat__*` **不存在** | MCP 行没进 profile 的 `cordis.patch.yml`；或 `mcp-bridge.mjs` 路径失效（移动过仓库）；或 DSH 未重启 | 重跑 `install.mjs`；确认受管块在目标 profile 的 patch 文件里；重启 DSH 桌面端 |
 | 工具调用报「读不到 Hub 传输门 token（…hub_token）」 | Hub 还没写过 `hub_token`（未启动或 `AGENTCHAT_HOME` 不一致） | 先 `npm start`；桥**逐请求**重读，启动 Hub 后重试即可，无需重启 DSH |
 | 工具调用报 `401 unauthorized` | 磁盘 `hub_token` 与 Hub 的 token 不一致（换过 `AGENTCHAT_HOME` / 重置过 Hub） | 用 Hub 当前 `<AGENTCHAT_HOME>/hub_token` 覆盖；桥逐请求读盘，改对后重试 |
-| 工具调用报 `400 agent_not_found` | `<home>/agents/dsh.id`（或 `dsh.current`）陈旧——通常是 Hub 换库/重置后 | 适配器会**自愈**：桥遇到该错误即清缓存身份与会话、**只重试一次**（重新 `initialize`）；插件注册成功后会重写 `dsh.id`。若持续失败，检查 `AGENTCHAT_HOME` 是否与 Hub 一致 |
-| 对端**无法回复**本 DSH 会话（报 `container_not_chat_target`） | 当前有 **0 个或 ≥2 个顶层会话**，出站身份退回了实例容器 | 只留一个顶层会话即可恢复双向；或改用原生工具面（见「设计取舍 (b)」） |
+| 工具调用报 `400 agent_not_found` | `<home>/agents/dsh.current`（会话节点提示）陈旧——通常是 Hub 换库/重置后 | 桥会**自愈**：清缓存身份与会话、**只重试一次**（重新 `initialize`）；插件重注册后会重写该提示。若持续失败，检查 `AGENTCHAT_HOME` 是否与 Hub 一致 |
+| 工具调用报 `identity_required`（或日志出现「出站身份缺失」） | 桥拿不到唯一身份：`dsh.current` 不存在（0 或 ≥2 个顶层会话，或有子代理在跑） | 这是 fail-closed 的**预期**行为（绝不冒名）；改用**原生工具面** `agentchat_*`（默认已开），或只留一个顶层会话 |
+| 模型同时看到两套工具（`agentchat_*` 与 `mcp__agentchat__*`） | 旧版安装器写过 MCP 桥行 | 用安装器**默认值**重跑一次（`node adapters/dsh/install.mjs --profile <name>`）即幂等摘除桥行 |
 | **改了适配器代码不生效** | Host 插件是**进程内加载**：模块代在启动时固定 | 重启 DSH 桌面端；替换已安装包同样必须重启 |
 | `--uninstall` 后配置里还留着空容器 | manifest 原本就是手写的、缺 `dependencies`/`dsh.profile.bundles` 容器 | 安装器**只增删自己那两个位置**、不删空容器（不做启发式猜测以免误删用户结构）——残留空容器是预期行为 |
 
@@ -320,46 +348,55 @@ DSH 的 `agent/disposed` 表示「agent 离开注册表」：关闭、切走、�
 `/internal/retire` 的实现仍保留在 `lib/hub.js`（`404 agent_not_found` 视为已退役、幂等），
 供将来有明确删除事件时使用。
 
-### (b) 出站身份：**单会话精确（磁盘提示），多会话退回容器**
+### (b) 出站身份：**恒等于会话节点**（原生工具逐调用；桥 fail-closed）
 
 Hub 的 `send`/`ask` 等工具按**调用方身份**记账（MCP `initialize` 的 `x-agent-id`，或逐请求的
 `x-agentchat-session` 头）。OpenCode 适配器靠 `tool.execute.before` 把当前会话 id 注入工具入参、由桥剥离
 转成请求头，从而把调用记在**会话节点**名下。
 
 **DSH 做不到入参注入**：`tools/pre-execute` 的决定类型**只有** `allow` / `deny` / `ask`，官方 JSDoc 明确
-*「Input rewriting is excluded because arguments are already logged and presented」*——无法改写工具入参，
-也就没有逐调用注入会话提示的地方。此外 **Hub 只在创建 MCP 会话时读一次 `x-agent-id`**
-（`server/routes/mcp.ts` 的 `initializeContext`）：同一 MCP 会话内后来再改这个头**不会**生效，
-只能靠 `x-agentchat-session` 逐请求重解析。
+*「Input rewriting is excluded because arguments are already logged and presented」*；此外 **Hub 只在创建
+MCP 会话时读一次 `x-agent-id`**（`server/routes/mcp.ts` 的 `initializeContext`），同一 MCP 会话内后来再改
+这个头**不会**生效，只能靠 `x-agentchat-session` 逐请求重解析。
 
-因此本适配器用**磁盘会话提示**替代入参注入：
+**P7 的解法 = 宿主原生工具面（默认开启）**：插件用 `ctx.tools.register()` 把 Hub 工具面注册为
+`agentchat_*`，每次 `execute(args, exec)` 都能拿到**调用方 agent** → `session.header.id` → 该会话的 Hub
+节点 → 逐请求带 `x-agentchat-session`（见 `lib/native-tools.js`）。于是：
 
-- 插件维护 `<AGENTCHAT_HOME>/agents/dsh.current`：当**恰好一个顶层会话节点**（实例节点的直接子节点，
-  子代理会话不计入）存在时写入该会话的 Hub 节点 id；0 个或 ≥2 个顶层会话时**删除**该文件。
-- `mcp-bridge.mjs` **逐请求**把 `x-agent-id` 解析为 `agents/dsh.current`（有则用）→ 否则 `agents/dsh.id`
-  （实例容器）；解析值一旦**变化**（含「从未知变为已知」）就丢弃缓存的 Hub 会话，下一次请求重新
-  `initialize` 并带上新头——这是身份能改变的唯一途径。Hub 报 `400 agent_not_found`（如换库/重置）时同样
-  清缓存身份与会话并**只重试一次**。
+- **并发多会话天然正确**（不再有"谁的回合最后开始"的全局指针）；
+- **子代理用它自己的会话节点**（`exec.agent` 是子代理自身，父会话身份绝不被冒用）；拿不到调用者会话
+  （未注册 / 无调用方上下文）**直接拒发**并记日志，绝不猜、绝不回落容器；
+- 不依赖任何共享文件与桥。回退开关：`nativeTools: false`（或 `AGENTCHAT_NATIVE_TOOLS=0`）。
+
+**可选的 MCP 桥（`--with-mcp-bridge`）是 fallback，且 fail-closed**：桥只有一个进程级身份（Hub 只在
+`initialize` 认 `x-agent-id`），因此它**只在能唯一确定时才给身份**：
+
+- 唯一身份源 = `<AGENTCHAT_HOME>/agents/dsh.current`；插件仅在**恰好一个顶层会话、且没有任何子代理存活**时
+  写它，其余情况（0 个 / ≥2 个顶层，或任一子代理在跑）**撤下**——桥无法区分父/子调用者，留着就是允许冒名；
+- 提示不存在时桥**不带** `x-agent-id`（**不再回落 `<home>/agents/dsh.id` 容器**）：除 `register` 外的工具
+  被 Hub 拒（`identity_required`），且桥每次这样转发都落一条**显式告警**（模型侧同时看到明确错误）；
+- 提示出现 / 改变 / 撤下都会**重建 Hub MCP 会话**（Hub 只在 `initialize` 认身份）；`400 agent_not_found`
+  时清缓存身份与会话并**只重试一次**。
 
 > ⚠️ **fail-closed 是刻意的（安全级）**：早期版本在 ≥2 个顶层会话时按"**最近进入 `running`**"猜身份，
 > 那是跨会话 last-writer-wins 指针——真机发生**身份冒用**（成员A 的消息被记成成员B，且 `respond_ask`
-> 被 `AskForbiddenError` 拒绝，因为服务端此刻把 A 当成 B）。现在**能唯一确定才给身份**：多会话并存 →
-> 无身份 → 桥回落容器 → Hub 对以容器为收件方的 DM 回 `container_not_chat_target`。**显式失败 >> 静默冒名。**
+> 被 `AskForbiddenError` 拒绝）；后来"回落容器"又会产生容器署名的毒化消息。现在**能唯一确定才给身份，
+> 否则不带身份**。**显式失败 >> 静默冒名。**
 
 由此的行为边界：
 
-| 场景 | 出站记账 | 对端能否回复本 DSH 会话 |
+| 通道 | 出站记账 | 说明 |
 |---|---|---|
-| **恰好一个**顶层会话在跑（桌面端最常见） | 该**会话节点** | ✅ 可以：回复落到会话节点，插件会唤醒并注入 |
-| 0 个或 ≥2 个顶层会话并存 | **实例容器**（`dsh@<host>`） | ❌ 不能：Hub 拒绝以分组容器为**收件方**的 DM（`container_not_chat_target`），对端拿到**明确错误**而非静默失败 |
+| **原生工具（默认）** | 调用者自己的**会话节点**（含子代理） | 任意并发会话数；**精确**，首选 |
+| MCP 桥：恰好 1 个顶层会话、无子代理 | 该**会话节点** | 对端可回复 |
+| MCP 桥：0 / ≥2 个顶层会话，或有子代理存活 | **无身份**（Hub 回 `identity_required`，桥侧告警） | 显式失败；请改用原生工具面 |
 
-**收件（唤醒/注入）始终按会话节点进行，与上表无关**；受限的只是「由本 DSH 会话发起的 MCP 出站记账」。
-容器节点是「分组容器、非聊天对象」，故不能作为回复目标。
+**收件（唤醒/注入）始终按会话节点进行，与上表无关**；受限的只是「出站记账」。`<home>/agents/dsh.id`
+（实例容器 id）仍会落盘供诊断/兼容留痕，但**不再作为任何身份**使用。
 
-**彻底修法**：在本插件里用 `ctx.tools.register()` 注册**原生工具**（而非 MCP 桥）代理 Hub 工具面——
-原生工具能拿到调用它的 agent 上下文，即可在**任意并发会话数**下按会话精确归属。本版本为对齐已验证的
-OpenCode 结构（原生插件 + MCP 桥）而采用「磁盘提示」折中；桥里 `x-agentchat-session` 的
-**入参剥离 → 请求头**路径**照旧保留**（今天没有注入方，等价于不存在），待原生工具面落地后直接复用。
+**迁移与留痕**：P7 之前由容器署名产生的历史消息**不自动删除**（保留审计留痕）。UI / 修复脚本可据发件人
+`role_tag='container'` 给它们打标（`meta.legacy_identity="container"`）并提示"这是旧版身份语义下的记录"，
+但不要按"看起来像自己"就删。
 
 ### (c) bundle 刻意不含机器相关路径
 
@@ -381,7 +418,8 @@ OpenCode 结构（原生插件 + MCP 桥）而采用「磁盘提示」折中；�
 
 ### 其它已知限制
 
-- **逐会话出站身份**：见 (b)，本版本无法做到（真机未验证项：将来 `ctx.tools.register()` 路线的可行性）。
+- **逐会话出站身份**：见 (b)。P7 起由原生工具面（`ctx.tools.register()`，**默认开启**）**逐调用**做到，
+  含子代理；可选 MCP 桥通道保持 fail-closed（拿不到唯一身份就不带身份，绝不冒名）。
 - **本机自动化覆盖不到的部分**：桌面端实际加载 bundle 后的事件触发、`followup` 是否真的唤醒会话、
   桌面端 UI 的观感——**真机未验证**。
 - `AGENTCHAT_HOME` 不一致（Hub 与适配器指向不同目录）会表现为 token/id 读不到：这是环境错误而非适配器缺陷。
@@ -508,7 +546,7 @@ agent.followup(createUserMessage({
 | `ContextForm` 词表：`'instructions' \| 'catalog' \| 'snapshot' \| 'notice' \| 'relay' \| 'recall'` | `dsh-llm/lib/types/message.d.ts:42-54` |
 | `'relay'` 的文档语义：「**另一个 agent 发来的消息**」——正是 AgentChat 中继投递 | `dsh-llm/lib/types/message.d.ts:51-52` |
 | `MessageSource` 可合并扩展（`switch on kind` 并对未知情形兜底） | `dsh-llm/lib/types/message.d.ts:117-118` |
-| 文本内容块形状 `{ type: 'text', text }` | 随包示例插件 `hooks-claude-code` 的注入处 |
+| 文本内容块形状 `{ type: 'text', text }` | DSH 随包示例插件的注入处 |
 
 适配器取的来源字面量是 **`{kind:'plugin', plugin:'agentchat', form:'relay'}`**（`index.js` 的
 `MESSAGE_SOURCE`）；`createUserMessage` 取不到时退化为同形状的最小 UserMessage。

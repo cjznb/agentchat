@@ -151,6 +151,14 @@ export async function mcpRegister(transport, bearer, args) {
 export function createMcpClient(transport, bearer, options = {}) {
   const base = options.identity === undefined ? bearer : { ...bearer, "x-agent-id": options.identity }
   let sessionId
+  /**
+   * JSON-RPC 请求 id **每 client 自增**（`initialize` 恒为 1）。
+   *
+   * 绝不能像旧版那样把 `tools/*` 恒写成 `id: 2`：原生工具面**缓存同一个 client** 服务所有会话，
+   * 两个会话并发 `tools/call`（实测：阻塞 `ask` + 并发 `respond_ask`）会撞同一 id，
+   * Hub 侧按 id 关联在途请求时**错投/超时**。id 只需在「同一 client 的同一 MCP 会话」内唯一。
+   */
+  let nextId = 2
   async function ensureSession() {
     if (sessionId !== undefined) return sessionId
     const init = await transport.send(
@@ -183,7 +191,7 @@ export function createMcpClient(transport, bearer, options = {}) {
     const sid = await ensureSession()
     const response = await transport.send(
       "/mcp",
-      { jsonrpc: "2.0", id: 2, method, params },
+      { jsonrpc: "2.0", id: nextId++, method, params },
       mcpHeaders({ ...bearer, ...extra }, sid),
     )
     const parsed = parseSseJson(expectStatus(200, response, `POST /mcp ${method}`))
@@ -213,8 +221,9 @@ export function createMcpClient(transport, bearer, options = {}) {
  * 归一化 `/internal/wake` 的 `messages`：逐项守卫 `id`/`fromAgentId`/`body` 均为字符串，
  * **静默丢弃**形状不符项（一条坏消息不得拖垮整轮注入）。
  *
- * 与 `adapters/opencode/hub.ts` 的差异：OpenCode 还会校验 `conversationId`，本适配器的注入
- * 文本（`flush.formatMessages`）不渲染会话 id，故**不要求**该字段（仍原样保留，若有）。
+ * 与 `adapters/opencode/hub.ts` 的差异：两者都保留可选的 `conversationId`；本适配器的对称约束是
+ * **不把它列为必需**——旧 Hub 或非会话消息可能缺该字段，`flush.formatMessages` 会省略 `（会话 …）`
+ * 括号而不是渲染 `undefined`（前缀 `- [<id>] 来自 <from>` 是外部解析契约，必须恒成立）。
  *
  * @param {unknown} raw 已 `JSON.parse` 的响应体
  * @returns {Array<{id: string, fromAgentId: string, body: string, conversationId?: string}>}

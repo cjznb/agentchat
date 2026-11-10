@@ -79,7 +79,7 @@ export const DEFAULT_MAX_DELAY_MS = 30_000
 
 /**
  * 解析超时覆盖：`AGENTCHAT_TIMEOUT_MS` 为整数且 > 0 才生效，否则回落默认（**缺失即 3000**）。
- * 与 Claude Code 适配器的 `AGENTCHAT_HOOK_TIMEOUT_MS` 同用途（仅测试缩短窗口，生产恒 3s）。
+ * 与历史 hooks 式适配器的 `AGENTCHAT_HOOK_TIMEOUT_MS` 同用途（仅测试缩短窗口，生产恒 3s）。
  */
 export function resolveTimeoutMs(env, override) {
   if (typeof override === "number" && Number.isFinite(override) && override > 0) return override

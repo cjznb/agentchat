@@ -9,7 +9,7 @@
  * - `<home>/agents/dsh.seen.json` — 已注入 messageId 去重集合（见 `seenPath`）
  *
  * 0600 **尽力而为**：Windows 上 `chmodSync` 调用成功但权限位可能不生效（与 server 侧
- * `writeTokenFile`、Claude Code / OpenCode 适配器同策略）。
+ * `writeTokenFile`、OpenCode 适配器同策略）。
  *
  * 纪律：**所有文件操作都不抛错**——`readToken`/`readJson` 读不到一律视为「无」，
  * 写入返回 `{ok, error}` 由调用方报告后继续（不得因本地文件问题中断注册或阻塞宿主）。

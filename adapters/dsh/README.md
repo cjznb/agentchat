@@ -81,6 +81,7 @@ bundle 行 `config`（写进 `cordis.patch.yml`）：
 | `busyInject` | `AGENTCHAT_BUSY_INJECT` → `true` | 忙时（`agent/status=running`）是否继续取件并 `steer` 注入。设 `false` 回退旧行为（忙时停轮询，消息排队到回合结束） |
 | `busyPollMs` | `AGENTCHAT_BUSY_POLL_MS` → `5000` | 忙时轮询间隔（毫秒，钳制 `[1s, 1h]`）。`steer` 在**最近的 step 边界**交付，**不能**抢占正在执行的工具 |
 | `busyInjectMax` | `AGENTCHAT_BUSY_INJECT_MAX` → `1` | **每个忙回合**最多注入几次（`0` = 忙时只发心跳不注入）。配额用尽只发心跳、不认领，其余消息排队到回合结束 |
+| `nativeTools` | `AGENTCHAT_NATIVE_TOOLS` → **`true`** | 注册宿主**原生工具面** `agentchat_*`（**逐调用身份**，多会话/子代理精确）。设 `false` 时必须另有 MCP 桥工具行（安装器 `--with-mcp-bridge`），否则 agent 没有 AgentChat 工具 |
 | `name` | `dsh@<host>` | 实例节点可读名；同一台机器跑多个不同 `AGENTCHAT_HOME` 的实例时用它避重名（`agents.name` 有唯一索引） |
 | `titleAsName` | `true` | 把 **DSH 会话标题**写进 Hub **展示名**（`custom_name`）；设 `false` 则始终显示机器唯一名 |
 | `nativeTools` | `false` | 开启 DSH **原生工具面**（`ctx.tools.register`）：**逐调用**按调用者会话注入身份，多会话并发也精确；开启后建议去掉 MCP 行（否则模型会看到两套工具） |
@@ -101,9 +102,9 @@ Hub 里**显示**的是 `COALESCE(custom_name, name)`。适配器默认为每个
 环境变量（与其它适配器一致）：`AGENTCHAT_URL` / `AGENTCHAT_PORT`（默认 `127.0.0.1:4646`）、
 `HUB_TOKEN`（缺省回退 `<AGENTCHAT_HOME>/hub_token`）、`AGENTCHAT_HOME`（默认 `~/.agentchat`）、
 `AGENTCHAT_POLL_MS`、`AGENTCHAT_BUSY_INJECT`、`AGENTCHAT_BUSY_POLL_MS`、`AGENTCHAT_BUSY_INJECT_MAX`、
-`AGENTCHAT_TIMEOUT_MS`（HTTP 超时，默认 3000ms）。
+`AGENTCHAT_NATIVE_TOOLS`、`AGENTCHAT_TIMEOUT_MS`（HTTP 超时，默认 3000ms）。
 
-## 已知限制：MCP 出站身份只能「单会话精确，多会话退回容器」
+## 已知限制：MCP 桥的出站身份是**进程级单身份**（原生工具面已逐调用精确）
 
 Hub 的 `send`/`ask` 等工具按调用方身份记账（MCP `initialize` 的 `x-agent-id`，或逐请求的
 `x-agentchat-session` 头）。**Hub 只在创建 MCP 会话时读一次 `x-agent-id`**（`server/routes/mcp.ts`
@@ -111,29 +112,36 @@ Hub 的 `send`/`ask` 等工具按调用方身份记账（MCP `initialize` 的 `x
 `tools/pre-execute` 决定类型只有 allow/deny/ask，官方 JSDoc 明确 "Input rewriting is excluded"，
 **无法**像 OpenCode 适配器那样把会话 id 注入工具入参。
 
-本适配器因此用**磁盘会话提示**替代入参注入：
+本适配器的解法分两条：
 
-- 插件维护 `<AGENTCHAT_HOME>/agents/dsh.current`：当**恰好一个顶层会话节点**（实例节点的直接子节点，
-  子代理不算）存在时写它的 Hub 节点 id；0 个或 ≥2 个顶层会话时**删除该文件**。
-- `mcp-bridge.mjs` 逐请求把 `x-agent-id` 解析为 `dsh.current`（有则用）→ 否则 `agents/dsh.id`（实例容器）。
-  解析值一旦**变化**，桥就丢弃缓存的 Hub 会话、下一次请求重新 `initialize` 并带上新头
-  （Hub 只在 `initialize` 认身份，这是身份能改变的唯一途径）；Hub 报 `400 agent_not_found`
-  （例如 Hub 换库）时同样清缓存并**只重试一次**。
+**① 原生工具面（P7 起默认开启，首选）**：插件用 `ctx.tools.register()` 把 Hub 工具面注册为 `agentchat_*`，
+每次调用都能拿到**调用方 agent** → `session.header.id` → 该会话的 Hub 节点 → 逐请求带
+`x-agentchat-session`。并发多会话、子代理全部精确；拿不到调用者会话就**拒发**（不猜、不回落容器）。
 
-> ⚠️ **为什么"多会话时不给身份"而不是"猜一个"（fail-closed，安全级）**
+**② MCP 桥（`--with-mcp-bridge` 可选）保持 fail-closed**：桥只有进程级单身份，因此只在能唯一确定时给身份：
+
+- 插件维护 `<AGENTCHAT_HOME>/agents/dsh.current`：仅当**恰好一个顶层会话节点**存在、**且没有子代理存活**时
+  写它的 Hub 节点 id；其余情况（0 个 / ≥2 个顶层，或任一子代理在跑）**删除该文件**。
+- `mcp-bridge.mjs` 逐请求把 `x-agent-id` 解析为 `dsh.current`；**没有提示就不带该头**
+  （**不再回落 `agents/dsh.id` 容器**），Hub 对除 `register` 外的工具回 `identity_required`，且桥每次这样
+  转发都落一条**显式告警**。解析值一旦**变化**，桥就丢弃缓存的 Hub 会话、下一次请求重新 `initialize`
+  （Hub 只在 `initialize` 认身份，这是身份能改变的唯一途径）；Hub 报 `400 agent_not_found`（例如 Hub 换库）
+  时同样清缓存并**只重试一次**。
+
+> ⚠️ **为什么"多会话/有子代理时不给身份"而不是"猜一个"（fail-closed，安全级）**
 > 曾经的版本在 ≥2 个顶层会话时取"**最近进入 `running`**"的那个——那是跨会话的 last-writer-wins
 > 全局指针，等于把"谁的回合最后开始"当成"谁在说话"。真机已发生**身份冒用**：同机两个 DSH 会话并跑时，
-> 成员A 发出的消息被 Hub 记成成员B（归属、回执、**ask 授权判定**全部跟着错，审计被污染）。
-> 因此现在**只在能唯一确定时给身份**：多会话并存 → 无身份 → 桥回落实例容器 → Hub 对以容器为收件方的
-> DM 回 `container_not_chat_target`（**显式失败**）。宁可报错，绝不静默冒名。
-> 并发多会话下要精确归属，唯一正解是宿主原生工具面（`ctx.tools.register`），见下方「已知限制」末段。
+> 成员A 发出的消息被 Hub 记成成员B（归属、回执、**ask 授权判定**全部跟着错，审计被污染）；
+> 回落容器则会产生容器署名的毒化消息。因此现在**能唯一确定才给身份，否则不带身份**——**显式失败**。
+> 要精确归属就用原生工具面（①，默认已开）。
 
 由此得到的行为：
 
-| 场景 | 出站记账 | 对端能否回复本 DSH 会话 |
+| 通道 | 出站记账 | 对端能否回复本 DSH 会话 |
 |---|---|---|
-| **只有一个**会话在跑（桌面端最常见） | 该**会话节点** | ✅ 可以：回复落到会话节点，插件会唤醒它并注入 |
-| 0 个或 ≥2 个上层会话并存 | **实例容器节点**（`dsh@<host>`） | ❌ 不能：Hub 拒绝「以分组容器为收件方」的 DM（`container_not_chat_target`），对端会拿到明确错误而不是静默失败 |
+| **原生工具（默认）** | 调用者自己的**会话节点**（含子代理） | ✅ 可以 |
+| MCP 桥：恰好 1 个顶层会话、无子代理 | 该**会话节点** | ✅ 可以 |
+| MCP 桥：0 / ≥2 个顶层会话，或有子代理在跑 | **无身份**（`identity_required`，桥侧告警） | ❌ 显式失败；请改用原生工具面 |
 
 **收件（唤醒/注入）始终按会话节点进行，与上表无关**；受限的只是「由本 DSH 会话发起的 MCP 出站记账」。
 

@@ -89,6 +89,8 @@ const BUSY_INJECT_MAX = 1
  *   - `busyInject`（覆盖 `AGENTCHAT_BUSY_INJECT`，默认 `true`）：忙时是否取件（`false` = 回退「忙时停轮询」）；
  *   - `busyPollMs`（覆盖 `AGENTCHAT_BUSY_POLL_MS`，默认 `5000`）：忙时轮询间隔；
  *   - `busyInjectMax`（覆盖 `AGENTCHAT_BUSY_INJECT_MAX`，默认 `1`）：每个 busy 回合最多注入几次；
+ *   - `nativeTools`（覆盖 `AGENTCHAT_NATIVE_TOOLS`，**默认 `true`**）：注册宿主原生工具面（逐调用身份）；
+ *     设 `false` 时须另有 MCP 桥工具行，否则 agent 没有 AgentChat 工具；
  *   - `name`（覆盖实例节点可读名 `dsh@<host>`，同一台机器跑多个不同 `AGENTCHAT_HOME` 的实例时用它避重名）
  */
 export function apply(ctx, config) {
@@ -259,8 +261,19 @@ export function apply(ctx, config) {
   /** 会话标题 → Hub 展示名（`custom_name`；`name` 不动）：见 `lib/title.js`。`config.titleAsName: false` 可关。 */
   const syncTitle = createTitleSync({ ctx, hub, log: warn, enabled: cfg["titleAsName"] !== false })
 
-  /** 原生工具面（可选，`config.nativeTools: true`）：逐调用按调用者会话注入身份，见 `lib/native-tools.js`。 */
-  const nativeTools = cfg["nativeTools"] === true ? createNativeTools({ ctx, hub, sessions, log: warn }) : undefined
+  /**
+   * 原生工具面（**P7 起默认开启**）：逐调用按调用者会话注入身份（`x-agentchat-session`）——多会话与
+   * 子代理天然精确，且不依赖共享的 `dsh.current`。见 `lib/native-tools.js`。
+   *
+   * 回退：`config.nativeTools: false`（或 env `AGENTCHAT_NATIVE_TOOLS=0`）关闭原生面——此时必须另有
+   * MCP 桥工具行（安装器 `--with-mcp-bridge`），否则 DSH agent 没有 AgentChat 工具可用。
+   */
+  const nativeTools = parseSwitch(
+    cfg["nativeTools"] === undefined ? env["AGENTCHAT_NATIVE_TOOLS"] : cfg["nativeTools"],
+    true,
+  )
+    ? createNativeTools({ ctx, hub, sessions, log: warn })
+    : undefined
 
   /** 注入消息工厂（宿主 `createUserMessage` → profile 农场绝对路径 → 最小 UserMessage 兜底）。 */
   const buildMessage = createMessageBuilder(env, warn)

@@ -151,16 +151,16 @@ describe("T13-B 暴露问题回归 B（R9/P3/P4/P6 与工具面）", () => {
     expect(true).toBe(true)
   })
 
-  it.fails("D12 （P4/task-10，待修 → 落地后翻转）注入头必须含会话 id 与「要回复就用 send」指引", async () => {
+  it("D12 注入头必须含会话 id 与「要回复就用 send」指引（P7/task-14 已落地，由 it.fails 翻转）", async () => {
     const host = ctx.host("d12")
     const sessions = await ctx.sessions(host, ["a", "b"])
     const b = sessions["b"]!
     const sent = await host.send("a", { to: b.agentId, body: "d12 body" })
     await host.flush(b.agentId, b.agentId)
     const text = host.inboxOf(b.agentId).join("\n")
-    // 现状（task-13 跑测时）：`adapters/dsh/lib/flush.js` 的 `formatMessages` 仍只有两行头部 +
-    // 消息行，**不渲染会话 id、也没有 send 指引** → 本用例失败即"待 P4/task-10 修复"的证据。
-    // 该文件在 task-10 的写域内（`adapters/dsh/lib/flush.js`），本任务不改生产码。
+    // P7/task-14 落地：`adapters/dsh/lib/flush.js` 的 `formatMessages` 在 `- [<id>] 来自 <from>` 前缀后
+    // 追加 `（会话 <conversationId>）`，并补三条沟通规则与「要回复就用 send」指引。
+    // 前缀本身是解析契约（`host.injectedIds` / `assertInjectionPrefix`），会话 id 只能追加在其后。
     expect(text, "注入头必须渲染会话 id（否则 agent 不知回给哪个会话）").toContain(
       sent.message.conversationId,
     )
@@ -175,7 +175,7 @@ describe("T13-B 暴露问题回归 B（R9/P3/P4/P6 与工具面）", () => {
     )
   })
 
-  it("N11 忙碌中投递：busy 期间排队、取件即送达（P3/task-9）；urgency 档位待 P6/task-12", async () => {
+  it("N11 忙碌中投递：busy 期间排队、取件即送达（P3/task-9）；urgency 三档写入 meta（P6/task-12）", async () => {
     const host = ctx.host("n11")
     const sessions = await ctx.sessions(host, ["a", "b"])
     const b = sessions["b"]!
@@ -197,12 +197,22 @@ describe("T13-B 暴露问题回归 B（R9/P3/P4/P6 与工具面）", () => {
     })
     expect(await host.jobOf(sent.message.seq, b.agentId)).toMatchObject({ state: "accepted" })
 
-    // P6/task-12（urgency 三档 + 插队/打断映射）尚未落地：`urgency` 不是契约字段，
-    // 经 zod 静默剥离 → 库内无痕迹。本断言锁"现状"，待 P6 落地后**翻转为正向断言**。
+    // P6/task-12（Hub 侧）已落地：三档写入 `meta.urgency`（normal/缺省**不写**，保既有 golden），
+    // 读侧单源 `urgencyOf(meta)` 供 /internal/wake 与 message_status 使用。
     const urgent = await host.send("a", { to: b.agentId, body: "n11 urgent", urgency: "urgent" })
-    const row = (await dumpOf(host)).messages.find((message) => message.seq === urgent.message.seq)
-    const meta = JSON.parse(row?.meta ?? "{}") as { urgency?: unknown }
-    expect(meta.urgency, "P6/task-12 未落地：urgency 尚未进 meta").toBeUndefined()
+    const urgentRow = (await dumpOf(host)).messages.find((message) => message.seq === urgent.message.seq)
+    const urgentMeta = JSON.parse(urgentRow?.meta ?? "{}") as { urgency?: unknown }
+    expect(urgentMeta.urgency, "urgent 必须写进 meta.urgency").toBe("urgent")
+
+    const low = await host.send("a", { to: b.agentId, body: "n11 low", urgency: "low" })
+    const lowRow = (await dumpOf(host)).messages.find((message) => message.seq === low.message.seq)
+    const lowMeta = JSON.parse(lowRow?.meta ?? "{}") as { urgency?: unknown }
+    expect(lowMeta.urgency, "low 必须写进 meta.urgency").toBe("low")
+
+    const normal = await host.send("a", { to: b.agentId, body: "n11 normal" })
+    const normalRow = (await dumpOf(host)).messages.find((message) => message.seq === normal.message.seq)
+    const normalMeta = JSON.parse(normalRow?.meta ?? "{}") as { urgency?: unknown }
+    expect(normalMeta.urgency, "normal/缺省必须不写 meta.urgency（golden 逐字节不变）").toBeUndefined()
   })
 
   it("N26 （P4/task-10）instructions 非空含关键约束；12 条描述含何时/常见错误；关键字段有 description", async () => {

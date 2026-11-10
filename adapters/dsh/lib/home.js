@@ -1,5 +1,5 @@
 /**
- * DSH 适配器数据目录解析（与 OpenCode / Claude Code 适配器**同语义**）。
+ * DSH 适配器数据目录解析（与 OpenCode 适配器**同语义**）。
  *
  * `AGENTCHAT_HOME`（空串视同未设）→ 数据目录；缺省 `~/.agentchat`（与 Hub 一致）。
  * 单独成模块的原因与 `adapters/opencode/home.ts` 相同：`token.js`（读盘 + 读失败日志）

@@ -57,6 +57,8 @@ interface Ctx {
   adapterDir: string
   agentchatHome: string
   nodeExe?: string
+  /** 写不写 MCP 桥工具行（**生产默认 `false`**；本文件里专测桥/托管块的用例显式传 `true`）。 */
+  mcpBridge?: boolean
   profilePackage?: string
   userPatch?: string
   agentchatConfig?: Record<string, unknown>
@@ -217,7 +219,7 @@ function makeFixture(options: FixtureOptions = {}): Fixture {
 }
 
 /** 从磁盘读回当前状态，组装注入式上下文（模拟 CLI 的 `main()`，但不 spawn）。 */
-function contextOf(fixture: Fixture, nodeExe?: string): Ctx {
+function contextOf(fixture: Fixture, nodeExe?: string, extra: Partial<Ctx> = {}): Ctx {
   const ctx: Ctx = {
     dshHome: fixture.dshHome,
     profile: PROFILE,
@@ -231,7 +233,7 @@ function contextOf(fixture: Fixture, nodeExe?: string): Ctx {
   if (patch !== undefined) ctx.userPatch = patch
   const hub = readIfExists(fixture.hubPath)
   if (hub !== undefined) ctx.agentchatConfig = parseRecord(hub)
-  return ctx
+  return { ...ctx, ...extra }
 }
 
 function fileAt(plan: Plan, path: string): PlannedFile {
@@ -257,10 +259,10 @@ function snapshot(fixture: Fixture): Snapshot {
 // ── 1. 全新 profile 的规划（纯函数） ─────────────────────────────────
 
 describe("planInstall：全新 profile", () => {
-  it("规划四步安装（联结 / manifest / 托管块 / 厂商登记），全程不落盘", () => {
+  it("规划四步安装（联结 / manifest / 托管块 / 厂商登记）—— `--with-mcp-bridge` 时才写托管块", () => {
     const fixture = makeFixture({ withManifest: false, withPatch: false, withHub: false })
     const nodeExe = process.execPath
-    const plan = planInstall(contextOf(fixture, nodeExe))
+    const plan = planInstall(contextOf(fixture, nodeExe, { mcpBridge: true }))
 
     // 纯规划：一个字节都不该写
     expect(existsSync(fixture.manifestPath)).toBe(false)
@@ -328,11 +330,43 @@ describe("planInstall：全新 profile", () => {
 
   it("写进已有 patch 时保留用户条目（含缩进续行），且顶层校验接受真实形状", () => {
     const fixture = makeFixture({ withPatch: true })
-    const plan = planInstall(contextOf(fixture))
+    const plan = planInstall(contextOf(fixture, undefined, { mcpBridge: true }))
     const patch = fileAt(plan, fixture.patchPath).content ?? ""
     expect(patch.startsWith(USER_PATCH)).toBe(true)
     expect(patch).toContain("welcomeNoticeVersion: 2026-08-13.1")
     expect(countOccurrences(patch, MANAGED_HEAD)).toBe(1)
+  })
+
+  it("默认（不写桥行）：patch 层不被创建；notes 明确说明工具面走原生工具", () => {
+    const fixture = makeFixture({ withManifest: false, withPatch: false, withHub: false })
+    const plan = planInstall(contextOf(fixture))
+    const patchFile = fileAt(plan, fixture.patchPath)
+    expect(patchFile.content).toBeNull() // 期望"不存在"
+    expect(patchFile.change).toBe(false)
+    expect(plan.notes.join("\n")).toContain("默认**不**写 Hub MCP 行")
+    // 落盘后 patch 文件确实不存在，其余三处照常
+    applyPlan(plan, {})
+    expect(existsSync(fixture.patchPath)).toBe(false)
+    expect(existsSync(fixture.manifestPath)).toBe(true)
+    expect(existsSync(fixture.hubPath)).toBe(true)
+  })
+
+  it("默认模式**幂等摘除**旧版写入的托管块（避免模型同时看到两套工具）", () => {
+    const fixture = makeFixture({ withPatch: true })
+    // 旧版安装器写下的托管块
+    applyPlan(planInstall(contextOf(fixture, undefined, { mcpBridge: true })), {})
+    expect(countOccurrences(mustRead(fixture.patchPath), MANAGED_HEAD)).toBe(1)
+
+    // 新版默认安装：只摘掉托管块，用户正文原样保留
+    const plan = planInstall(contextOf(fixture))
+    expect(fileAt(plan, fixture.patchPath).change).toBe(true)
+    applyPlan(plan, {})
+    const patched = mustRead(fixture.patchPath)
+    expect(patched).not.toContain(MANAGED_HEAD)
+    expect(patched).toContain("welcomeNoticeVersion: 2026-08-13.1")
+    expect(patched).toBe(USER_PATCH) // 托管块是唯一增量 → 摘掉后逐字节还原用户原文
+    // 再装一次 = no-op
+    expect(planInstall(contextOf(fixture)).files.every((file) => !file.change)).toBe(true)
   })
 })
 
@@ -343,7 +377,7 @@ describe("幂等安装", () => {
     const fixture = makeFixture({ withPatch: true, withHub: true })
     const before = snapshot(fixture)
 
-    const first = applyPlan(planInstall(contextOf(fixture)), {})
+    const first = applyPlan(planInstall(contextOf(fixture, undefined, { mcpBridge: true })), {})
     expect(first.actions.some((action) => action.changed)).toBe(true)
     const afterFirst = snapshot(fixture)
     expect(afterFirst.manifest).not.toBe(before.manifest)
@@ -354,7 +388,7 @@ describe("幂等安装", () => {
     expect(mustRead(`${fixture.patchPath}.bak`)).toBe(before.patch ?? "")
     expect(mustRead(`${fixture.hubPath}.bak`)).toBe(before.hub ?? "")
 
-    const second = planInstall(contextOf(fixture))
+    const second = planInstall(contextOf(fixture, undefined, { mcpBridge: true }))
     expect(second.files.every((file) => !file.change)).toBe(true)
     const result = applyPlan(second, {})
     expect(result.actions.every((action) => !action.changed)).toBe(true)
@@ -389,7 +423,7 @@ describe("--dry-run / renderPlan", () => {
 
   it("renderPlan 打印全部落点路径与将要写入的原文（YAML + JSON）", () => {
     const fixture = makeFixture({ withManifest: false, withPatch: false, withHub: false })
-    const text = renderPlan(planInstall(contextOf(fixture)), false)
+    const text = renderPlan(planInstall(contextOf(fixture, undefined, { mcpBridge: true })), false)
     expect(text).toContain(fixture.manifestPath)
     expect(text).toContain(fixture.patchPath)
     expect(text).toContain(fixture.hubPath)
@@ -447,7 +481,7 @@ describe("planUninstall：逐字节还原", () => {
     const fixture = makeFixture({ withPatch: true, withHub: true })
     const before = snapshot(fixture)
 
-    applyPlan(planInstall(contextOf(fixture)), {})
+    applyPlan(planInstall(contextOf(fixture, undefined, { mcpBridge: true })), {})
     expect(mustRead(fixture.patchPath)).toContain(MANAGED_HEAD)
     expect(countOccurrences(mustRead(fixture.patchPath), MANAGED_HEAD)).toBe(1)
 
@@ -472,10 +506,10 @@ describe("planUninstall：逐字节还原", () => {
     expect(existsSync(fixture.linkPath)).toBe(false)
   })
 
-  it("预置不存在 patch / manifest 时：安装会创建，卸载会删掉（Hub 配置保留但不删）", () => {
+  it("预置不存在 patch / manifest 时：安装会创建（--with-mcp-bridge 下 patch 才会被创建），卸载会删掉", () => {
     const fixture = makeFixture({ withManifest: false, withPatch: false, withHub: false })
 
-    applyPlan(planInstall(contextOf(fixture)), {})
+    applyPlan(planInstall(contextOf(fixture, undefined, { mcpBridge: true })), {})
     expect(existsSync(fixture.patchPath)).toBe(true)
     expect(existsSync(fixture.manifestPath)).toBe(true)
     expect(existsSync(fixture.hubPath)).toBe(true)
@@ -483,7 +517,7 @@ describe("planUninstall：逐字节还原", () => {
     applyPlan(planUninstall(contextOf(fixture)), {})
     expect(existsSync(fixture.patchPath)).toBe(false)
     expect(existsSync(fixture.manifestPath)).toBe(false)
-    // Hub 配置是 Hub 的文件：只摘厂商登记，不删文件（与 opencode / claude-code 安装器一致）
+    // Hub 配置是 Hub 的文件：只摘厂商登记，不删文件（与 opencode 安装器一致）
     expect(existsSync(fixture.hubPath)).toBe(true)
     expect(parseRecord(mustRead(fixture.hubPath))["adapters"]).toEqual([])
   })
@@ -507,7 +541,7 @@ describe("planUninstall：逐字节还原", () => {
     writeFileSync(fixture.manifestPath, manifest)
     writeFileSync(fixture.patchPath, patch)
 
-    applyPlan(planInstall(contextOf(fixture)), {})
+    applyPlan(planInstall(contextOf(fixture, undefined, { mcpBridge: true })), {})
     expect(mustRead(fixture.patchPath)).toContain(MANAGED_HEAD)
     expect(mustRead(fixture.patchPath).endsWith("\n")).toBe(true)
 
@@ -532,12 +566,12 @@ describe("planUninstall：逐字节还原", () => {
 describe("托管块", () => {
   it("重新安装只替换块内文本：marker 仍各一次，用户正文与其它条目原样保留", () => {
     const fixture = makeFixture({ withPatch: true })
-    applyPlan(planInstall(contextOf(fixture, "C:\\old\\node.exe")), {})
+    applyPlan(planInstall(contextOf(fixture, "C:\\old\\node.exe", { mcpBridge: true })), {})
     const first = mustRead(fixture.patchPath)
     expect(countOccurrences(first, MANAGED_HEAD)).toBe(1)
     expect(first).toContain("command: 'C:\\old\\node.exe'")
 
-    const result = applyPlan(planInstall(contextOf(fixture, "C:\\new\\node.exe")), {})
+    const result = applyPlan(planInstall(contextOf(fixture, "C:\\new\\node.exe", { mcpBridge: true })), {})
     const updated = mustRead(fixture.patchPath)
     expect(result.actions.some((action) => action.changed)).toBe(true)
     expect(countOccurrences(updated, MANAGED_HEAD)).toBe(1)
@@ -554,7 +588,7 @@ describe("托管块", () => {
     const crlf = USER_PATCH.split("\n").join("\r\n")
     writeFileSync(fixture.patchPath, crlf)
 
-    applyPlan(planInstall(contextOf(fixture)), {})
+    applyPlan(planInstall(contextOf(fixture, undefined, { mcpBridge: true })), {})
     const installed = mustRead(fixture.patchPath)
     expect(installed).toContain(USER_PATCH.split("\n")[0] ?? "")
     // 除 CRLF 外不应出现"裸 LF"
@@ -569,10 +603,13 @@ describe("托管块", () => {
     const map = "dsh:\n  profile:\n    bundles: []\n"
     writeFileSync(fixture.patchPath, map)
 
-    expect(() => planInstall(contextOf(fixture))).toThrow(/顶层不是 YAML 数组/)
+    expect(() => planInstall(contextOf(fixture, undefined, { mcpBridge: true }))).toThrow(/顶层不是 YAML 数组/)
     expect(mustRead(fixture.patchPath)).toBe(map)
     // 规划期就抛，所以 applyPlan 根本没机会落盘
     expect(readIfExists(`${fixture.patchPath}.bak`)).toBeUndefined()
+    // 默认模式只"摘除"旧块、从不写 patch，故对非数组 patch 保持只读（不报错、不改写）
+    const quiet = planInstall(contextOf(fixture))
+    expect(fileAt(quiet, fixture.patchPath).change).toBe(false)
   })
 })
 
@@ -594,6 +631,7 @@ describe("parseArgs", () => {
     expect(none.error).toBeUndefined()
     expect(none.dryRun).toBe(false)
     expect(none.uninstall).toBe(false)
+    expect(none.mcpBridge).toBe(false) // 默认不写 MCP 桥行（P7）
     expect(none.help).toBe(false)
 
     const all = parseArgs([
@@ -603,6 +641,7 @@ describe("parseArgs", () => {
       "C:\\dsh",
       "--agentchat-home",
       "C:\\hub",
+      "--with-mcp-bridge",
       "--dry-run",
       "--uninstall",
     ])
@@ -610,6 +649,7 @@ describe("parseArgs", () => {
     expect(all.profile).toBe("web")
     expect(all.dshHome).toBe("C:\\dsh")
     expect(all.agentchatHome).toBe("C:\\hub")
+    expect(all.mcpBridge).toBe(true)
     expect(all.dryRun).toBe(true)
     expect(all.uninstall).toBe(true)
 
