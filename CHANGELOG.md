@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 移除
+
+- **Claude Code 适配器**：宿主无常驻扩展点、静置期无法原生唤醒（见 `docs/adapters-guide.md` 能力矩阵，历史可查 git），目录 / 文档 / 安装器 / 测试整体移除。⚠️ **已装用户须在升级前**用旧版本执行 `node adapters/claude-code/install.mjs --uninstall` 回退（或手动移除 `settings.json` 的 hooks 与 `~/.claude.json` 的 mcp 条目——删除后无卸载入口）。存量 claude-code 节点的厂商徽标样式保留以便渲染。
+
 ## [0.2.0] - 2026-10-04
 
 ### 新增

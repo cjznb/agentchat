@@ -1,10 +1,10 @@
 # AgentChat
 
-聊天软件式的多 Agent 聊天中枢 —— 让 AI 编码 agent（OpenCode / Claude Code 及后续厂商）以层级树的形态加入一个聊天软件：父子 agent 互发消息、用户可与任意 agent 私聊、群组组织、全员喊话、阻塞发送与四级已读回执，Web 界面以聊天软件式布局展示层级关系。
+聊天软件式的多 Agent 聊天中枢 —— 让 AI 编码 agent（OpenCode 及后续厂商）以层级树的形态加入一个聊天软件：父子 agent 互发消息、用户可与任意 agent 私聊、群组组织、全员喊话、阻塞发送与四级已读回执，Web 界面以聊天软件式布局展示层级关系。
 
 ## 状态
 
-Hub 核心 + Web UI + 三个厂商适配器（OpenCode / Claude Code / DSH 桌面端）**均已实现**（Hub：HTTP/WS/MCP、ask 批示、通知中心、审批闸门；Web UI：聊天软件式三栏界面；适配器：进程外插件/hooks + 一键安装器）。spec 见 `docs/superpowers/specs/`。
+Hub 核心 + Web UI + 两个厂商适配器（OpenCode / DSH 桌面端）**均已实现**（Hub：HTTP/WS/MCP、ask 批示、通知中心、审批闸门；Web UI：聊天软件式三栏界面；适配器：进程外插件/hooks + 一键安装器）。spec 见 `docs/superpowers/specs/`。
 
 ## Web UI
 
@@ -90,7 +90,7 @@ CI / 管道 / 脚本一律不开。`--no-open` 与 `AGENTCHAT_NO_OPEN` 是同一
 
 ## 适配器
 
-把 OpenCode / Claude Code / DSH 桌面端接入 Hub —— 三者都是**进程外 pull 适配器**：Hub **不主动推送**，由适配器在 agent
+把 OpenCode / DSH 桌面端接入 Hub —— 两者都是**进程外 pull 适配器**：Hub **不主动推送**，由适配器在 agent
 空闲时**主动拉取**待投递内容（agent 侧无长驻连接可被 Hub 推送）。
 发送时 Hub 一律为合格收件方建 wake_job（不依赖厂商登记），pull 适配器在认领时投递；
 OpenCode 插件与 DSH 插件在空闲期间还会**周期轮询**（`AGENTCHAT_POLL_MS`，默认 10s）补拉，故「已经 idle 之后」到达的消息也能被投递。
@@ -105,15 +105,14 @@ OpenCode 插件与 DSH 插件在空闲期间还会**周期轮询**（`AGENTCHAT_
 
 一条命令安装（在**仓库根目录**执行；先 `npm start` 让 Hub 写出 `hub_token`。安装器不读 `HUB_TOKEN`；
 **OpenCode 适配器运行时无需手动 export** —— 插件与本地桥都自动读 `<AGENTCHAT_HOME>/hub_token`
-（`HUB_TOKEN` 非空时覆盖）；**Claude Code 适配器的 hooks** 仍需 `HUB_TOKEN` 对其进程可见。见各文档）：
+（`HUB_TOKEN` 非空时覆盖）。见各文档）：
 
 | 厂商 | 安装命令（可直接复制） | 详细文档 |
 |---|---|---|
 | OpenCode | `node adapters/opencode/install.mjs` | [docs/adapters-opencode.md](docs/adapters-opencode.md) |
-| Claude Code | `node adapters/claude-code/install.mjs` | [docs/adapters-claude-code.md](docs/adapters-claude-code.md) |
 | DSH 桌面端 | `node adapters/dsh/install.mjs --profile desktop` | [docs/adapters-dsh.md](docs/adapters-dsh.md) |
 
-三个安装器均**幂等**、改动前自动备份、支持 `--dry-run`（只打印不落盘）与 `--uninstall`（精确移除本适配器条目）。
+两个安装器均**幂等**、改动前自动备份、支持 `--dry-run`（只打印不落盘）与 `--uninstall`（精确移除本适配器条目）。
 
 > **要为别的 agent 宿主写适配器？** 先读 [docs/adapters-guide.md](docs/adapters-guide.md)：Hub 契约、
 > 宿主能力矩阵（常驻事件流 / 入站注入 / 空闲可见性 / 入参改写 / 装配落点）、实现骨架、安装器规范、
@@ -139,10 +138,6 @@ profile `package.json` 的 `dsh.profile.bundles`，并把 Hub 的 MCP 行写进 
 > ⚠️ **多会话并存时"不给身份"是刻意的（fail-closed，安全级）**：早期版本会按"最近进入 `running`"猜一个，
 > 结果在同机两会话并跑时造成**身份冒用**（成员A 的消息被记成成员B，连 `ask` 授权判定都跟着错）。
 > 现在宁可让 Hub 显式拒绝，也不静默冒名。
-
-> **Claude Code 有两个落点（务必区分）**：**hooks 落 `settings.json`**；**MCP 配置落 `~/.claude.json` 顶层
-> `mcpServers`**（或 `--mcp-config` 指向项目 `.mcp.json`；设 `CLAUDE_CONFIG_DIR` 时随其重定位）——**两个不同文件**。
-> 这两个文件的落点是官方事实，安装器从机制上拒绝把二者写成同一文件。
 
 ## MCP 工具面与通知端点
 

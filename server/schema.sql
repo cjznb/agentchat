@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS agents (
   task_ref    TEXT UNIQUE,                          -- runtime 子注册幂等键（spec §5.2）
   parent_id   TEXT REFERENCES agents(id),           -- NULL = 根
   root_id     TEXT NOT NULL REFERENCES agents(id),  -- 所属树根（根 = 自身）
-  vendor      TEXT NOT NULL,                        -- opencode | claude-code | human | —
+  vendor      TEXT NOT NULL,                        -- opencode | dsh | human | —
   model       TEXT NOT NULL DEFAULT '—',
   status      TEXT NOT NULL CHECK (status IN ('online', 'busy', 'offline', 'retired')),
   purpose     TEXT,                                 -- 工作概述（A2A AgentCard）

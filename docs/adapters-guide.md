@@ -1,8 +1,8 @@
 # 编写 AgentChat 适配器：契约、宿主能力矩阵与实战清单
 
-> 读者：为**任意编码 agent 宿主**（OpenCode / Claude Code / DSH / 其它 CLI、IDE、桌面端）编写 AgentChat 适配器的
+> 读者：为**任意编码 agent 宿主**（OpenCode / DSH / 其它 CLI、IDE、桌面端）编写 AgentChat 适配器的
 > 人或 agent。本文是**规范 + 路线图 + 踩坑表**，实现细节以既有适配器代码为准：
-> [`adapters/opencode/`](../adapters/opencode/README.md)、[`adapters/claude-code/`](../adapters/claude-code/README.md)、
+> [`adapters/opencode/`](../adapters/opencode/README.md)、
 > [`adapters/dsh/`](../adapters/dsh/README.md)。
 >
 > 目标一句话：**让该宿主的每个会话在 Hub 里是一个可被寻址、可被唤醒、可回信的节点**。
@@ -80,7 +80,7 @@ POST /internal/retire { agentId }                 →  200；404 agent_not_found
 
 ---
 
-## 2. 节点模型（三个适配器共用，请照抄）
+## 2. 节点模型（两个适配器共用，请照抄）
 
 ```
 实例节点  <vendor>@<host>    根，role_tag=container，join_token 认领；MCP 出站身份兜底
@@ -108,21 +108,21 @@ POST /internal/retire { agentId }                 →  200；404 agent_not_found
 | Q4 | **能否改写工具入参**？ | 决定能否做**逐会话**出站身份 | DSH 的 `PreToolDecision` 只有 allow/deny/ask → 无法注入身份提示，只能退化为磁盘提示 |
 | Q5 | **配置/装配落点在哪**？（配置文件 / settings / profile patch）+ **卸载/卸载信号**？ | 决定安装器怎么写、`dispose` 该做什么 | 把"关闭会话"当删除 → `retire` 单向门，会话重开永久注册不了 |
 
-### 3.1 能力 → 方案对照（按已实现的三个宿主）
+### 3.1 能力 → 方案对照（按已实现的两个宿主）
 
-| 能力 | OpenCode | Claude Code | DSH 桌面端 |
-|---|---|---|---|
-| 常驻事件流 | 插件钩子收全部事件（`session.created/updated/status/idle/deleted`） | ❌ 一次性 hook | ✅ 进程内 Cordis 插件（`agent/created`/`agent/status`/`agent/disposed`） |
-| 注入并唤醒 | `client.session.promptAsync` | `Stop` hook 阻塞续跑（`decision:"block"`） | `agent.followup(msg)`（空闲）/ `agent.steer(msg)`（运行中）；**`inject` 不唤醒** |
-| 空闲检测 | `session.idle` / `session.status` | `Notification(idle_prompt)`（仅上报，不注入） | `agent/status` = `running`/`idle` |
-| 空窗补拉 | 空闲轮询（`AGENTCHAT_POLL_MS`，10s） | 无法常驻 → 只能 SessionStart/Stop 时拉 | 空闲轮询（同上，**登记即开轮询**，见坑 3） |
-| 逐会话出站身份 | `tool.execute.before` 改写入参 → 桥剥头 | ❌ 无（容器身份） | ❌ 禁改写 → 磁盘提示 `agents/dsh.current`（**仅单会话精确**，多会话 fail-closed 回落容器） |
-| 生命周期 | `dispose` → offline；`session.deleted` → retire | `session_end` hook | `agent/disposed` → 只停跟踪；插件卸载 → 实例 offline |
-| 装配落点 | 写 OpenCode 配置（JSONC，幂等合并） | 合并 `settings.json` 的 `hooks` + `mcpServers` | bundle（`dsh.bundle.patch`）+ profile `cordis.patch.yml` + `dsh.profile.bundles` |
+| 能力 | OpenCode | DSH 桌面端 |
+|---|---|---|
+| 常驻事件流 | 插件钩子收全部事件（`session.created/updated/status/idle/deleted`） | ✅ 进程内 Cordis 插件（`agent/created`/`agent/status`/`agent/disposed`） |
+| 注入并唤醒 | `client.session.promptAsync` | `agent.followup(msg)`（空闲）/ `agent.steer(msg)`（运行中）；**`inject` 不唤醒** |
+| 空闲检测 | `session.idle` / `session.status` | `agent/status` = `running`/`idle` |
+| 空窗补拉 | 空闲轮询（`AGENTCHAT_POLL_MS`，10s） | 空闲轮询（同上，**登记即开轮询**，见坑 3） |
+| 逐会话出站身份 | `tool.execute.before` 改写入参 → 桥剥头 | ❌ 禁改写 → 磁盘提示 `agents/dsh.current`（**仅单会话精确**，多会话 fail-closed 回落容器） |
+| 生命周期 | `dispose` → offline；`session.deleted` → retire | `agent/disposed` → 只停跟踪；插件卸载 → 实例 offline |
+| 装配落点 | 写 OpenCode 配置（JSONC，幂等合并） | bundle（`dsh.bundle.patch`）+ profile `cordis.patch.yml` + `dsh.profile.bundles` |
 
 > **决策树（简版）**
 > 1. 宿主有常驻插件 API → 走**插件 + 本地 MCP 桥**（能力最全，OpenCode / DSH 都是这条路）。
-> 2. 只有一次性 hook → 走**hooks + 注入式 hook**（Claude Code）：把"取件"放在 `Stop`/`SessionStart`，
+> 2. 只有一次性 hook → 走**hooks + 注入式 hook**：把"取件"放在 `Stop`/`SessionStart`，
 >    接受"只能在回合边界投递"的天花板；**不要**假装能实时唤醒。
 > 3. 只能配 MCP、无插件无 hook → **只能出站**（发消息/提问），入站投递做不了；文档里要如实写明。
 
@@ -179,8 +179,6 @@ adapters/<vendor>/
 
 ### 4.5 注入消息的构造（宿主差异最大的一步）
 
-- Claude Code：向 stdout 输出 `{"decision":"block","reason":…,"hookSpecificOutput":{...additionalContext}}`；
-  正文**同时镜像进 `reason`**（宿主可能忽略其中一个通道）。
 - OpenCode：`client.session.promptAsync({path:{id},body:{parts:[{type:"text",text}]}})`。
 - DSH：`agent.followup(UserMessage)` / `agent.steer(UserMessage)`；消息对象用**宿主自己的**构造器
   （`createUserMessage`），**不要手搓**——DSH 的会话格式 v4 会校验 `source`（见坑 5）。
@@ -267,7 +265,7 @@ Hub 里**显示**的是 `COALESCE(custom_name, name)`，所以正确做法是把
 
 | 宿主类 | 安装器写什么 |
 |---|---|
-| 配置型（Claude Code / OpenCode） | 合并宿主配置文件：`hooks`、`mcpServers`；**保留其它键**、二次安装等价、uninstall 只删自己那几条 |
+| 配置型（OpenCode） | 合并宿主配置文件：**保留其它键**、二次安装等价、uninstall 只删自己那几条 |
 | bundle 型（DSH） | ① 模块根**目录联接** → 适配器目录；② profile `package.json` 的依赖 + `dsh.profile.bundles` 选择；③ profile `cordis.patch.yml` 的**受管块**（含 MCP 行的**机器绝对路径**）；④ 厂商登记 |
 
 两条硬要求：
@@ -346,6 +344,5 @@ Hub 里**显示**的是 `COALESCE(custom_name, name)`，所以正确做法是把
 | 节点注册/收养/退役 | `server/core/agents.ts` |
 | 命名唯一与容器限制 | `server/schema.sql`、`server/core/messaging.ts` |
 | 最完整的插件式适配器 | `adapters/opencode/`（`plugin.ts`、`hub.ts`、`flush.ts`、`poll.ts`、`mcp-bridge.mjs`、`install.mjs`） |
-| hooks 式适配器（一次性扩展点） | `adapters/claude-code/`（`session-start.mjs`、`idle.mjs`、`busy.mjs`、`install.mjs`） |
 | bundle 式适配器（进程内插件 + profile patch） | `adapters/dsh/`（`index.js`、`lib/*`、`mcp-bridge.mjs`、`install*.mjs`、`docs/adapters-dsh.md`） |
-| 安装器写法与回退保证 | 三个 `install.mjs` + `docs/adapters-*.md` 的"排障"节 |
+| 安装器写法与回退保证 | 两个 `install.mjs` + `docs/adapters-*.md` 的"排障"节 |

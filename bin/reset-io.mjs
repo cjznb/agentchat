@@ -26,9 +26,8 @@ export const RESET_TARGETS = [
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
-/** 两个适配器安装器（复用其 `--uninstall`，不重复实现卸载逻辑）。 */
+/** 适配器安装器（复用其 `--uninstall`，不重复实现卸载逻辑）。 */
 export const INSTALLERS = [
-  { id: "claude-code", script: join(PACKAGE_ROOT, "adapters", "claude-code", "install.mjs") },
   { id: "opencode", script: join(PACKAGE_ROOT, "adapters", "opencode", "install.mjs") },
 ]
 
@@ -99,7 +98,7 @@ export function defaultRunInstaller(script, env) {
   return { code: result.status ?? 1 }
 }
 
-/** 依次对两个安装器跑 `--uninstall`；`run` 可注入（测试不 spawn）。返回 `[{id, code}]`。 */
+/** 依次对各安装器跑 `--uninstall`；`run` 可注入（测试不 spawn）。返回 `[{id, code}]`。 */
 export function uninstallAdapters(env, run = defaultRunInstaller) {
   return INSTALLERS.map(({ id, script }) => {
     const result = run(script, env)

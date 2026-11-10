@@ -1,6 +1,6 @@
 # 贡献指南（Contributing）
 
-AgentChat 是聊天软件式的多 Agent 聊天中枢：Hub 后端 + Web UI + 厂商适配器（OpenCode / Claude Code）。
+AgentChat 是聊天软件式的多 Agent 聊天中枢：Hub 后端 + Web UI + 厂商适配器（OpenCode / DSH 桌面端）。
 本指南面向**在本仓提交改动**的贡献者：先读懂架构地图与硬约束，再按工作流实现与提交。
 
 > 用户视角的安装与用法见 [README.md](README.md)；设计规格在 `docs/superpowers/specs/`（**内部文档，不入库**）。
@@ -11,7 +11,7 @@ AgentChat 是聊天软件式的多 Agent 聊天中枢：Hub 后端 + Web UI + �
 server/        Hub（后端）：HTTP + WebSocket + MCP，唯一权威
 client/        Web UI：React 三栏界面（Vite 构建）
 shared/        契约单一来源（前后端/Hub 共享）
-adapters/      进程外 pull 适配器 + 一键安装器（opencode / claude-code）
+adapters/      进程外 pull 适配器 + 一键安装器（opencode / dsh）
 bin/           `agentchat` CLI 启动器 / reset
 tests/         integration / unit / e2e
 ```
@@ -40,7 +40,7 @@ tests/         integration / unit / e2e
 
 ### `adapters/` — 进程外适配器
 
-Hub **不主动推送**；适配器在 agent 空闲时**主动拉取**（pull）。`opencode/`（插件 + 本地 stdio MCP 桥）与 `claude-code/`（hooks + MCP 配置）各含**幂等一键安装器** `install.mjs`。
+Hub **不主动推送**；适配器在 agent 空闲时**主动拉取**（pull）。`opencode/`（插件 + 本地 stdio MCP 桥）与 `dsh/`（Cordis bundle + profile patch）各含**幂等一键安装器** `install.mjs`。
 
 ### `tests/`
 
@@ -89,7 +89,7 @@ npm run build  # 构建前端到 client/dist（npm start 从该目录托管静�
 ## 工作流
 
 1. 从 `master` 切分支 → 实现（先写失败测试）→ 本地跑质量门 → 提交。
-2. **改适配器**：同步更新对应 `docs/adapters-opencode.md` / `docs/adapters-claude-code.md`（token 位置、自愈、日志、排障等都在这两份文档）。
+2. **改适配器**：同步更新对应 `docs/adapters-opencode.md` / `docs/adapters-dsh.md`（token 位置、自愈、日志、排障等都在这两份文档）。
 3. **改契约**（`shared/contracts.ts`）：确认契约测试同步，并复核 UI/适配器消费方。
 4. PR 目标分支 `master`；CI（Node 22 / 24 矩阵）必须全绿。
 

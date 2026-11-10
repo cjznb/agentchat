@@ -1,5 +1,5 @@
 /**
- * Hub `config.json` 读写（OpenCode / Claude Code 两个安装器共用）：把本厂商 id 合并进 /
+ * Hub `config.json` 读写（OpenCode / DSH 两个安装器共用）：把本厂商 id 合并进 /
  * 移出 `<home>/config.json` 的 `adapters` 数组，让用户**无需再手动**设置 `AGENTCHAT_ADAPTERS`。
  *
  * - `home` = `AGENTCHAT_HOME`（空串视同未设）→ `~/.agentchat`；配置路径 `<home>/config.json`

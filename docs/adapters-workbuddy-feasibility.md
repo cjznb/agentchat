@@ -1,4 +1,5 @@
 # WorkBuddy 接入 AgentChat：适配器插件可行性分析
+> （2026-10-04 注：Claude Code 适配器已移除，文中对比为当时状况）
 
 > 读者：决定"要不要为 WorkBuddy 写第四个适配器"的人。  
 > 方法：严格按 [`docs/adapters-guide.md`](./adapters-guide.md) §3 的**五问**逐条取证，答到"文件路径 / 文档 URL"级别；  
