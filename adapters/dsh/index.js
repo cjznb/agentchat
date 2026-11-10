@@ -79,7 +79,17 @@ export function apply(ctx, config) {
   )
   const tokenFile = tokenPath(home)
   const idFile = agentIdPath(home)
-  const seen = createBoundedSet(SEEN_LIMIT)
+  /**
+   * 收件方（Hub 会话节点 id）→ 该收件方**独有**的 flush 实例（内含只按它分键的 `seen`）。
+   *
+   * 去重键必须是 **(收件方, messageId)**：Hub 的 `(agent,message)` 在途租约只保证**同一收件方**
+   * 不重复注入，而一条消息可以同时是多个收件方的 job（shout 广播 / 人类群消息 / @多人）。
+   * 若全局共享一个只按 messageId 分键的 `seen`，第二个认领同一消息的会话会被判「已注入」，
+   * **不注入却直接回 `delivered`** → Hub 置 job `accepted`、UI 显示已送达，而模型从未看见
+   * （假投递，且污染审计）。每个收件方一份 `seen` 视图与 `${nodeId}:${messageId}` 复合键等价，
+   * 且**无需改动** `lib/flush.js` 的接口与语义（它与 opencode 共用同一闭环）。
+   */
+  const flushByRecipient = new Map()
 
   /** sessionId → { nodeId, agent, busy }；`busy` 决定注入用 followup 还是 steer。 */
   const sessions = new Map()
@@ -235,7 +245,26 @@ export function apply(ctx, config) {
     }
   }
 
-  const flush = createIdleFlush({ hub, deliver, seen, heartbeat, log: warn })
+  /**
+   * 取某收件方的 flush 实例（懒建）。同一 Hub 节点**始终复用同一份 `seen`**，故在途租约对
+   * 同一收件方重投同一消息时依然不重复注入，只幂等补回执；不同收件方各自独立去重。
+   *
+   * @param {string} nodeId 收件方（Hub 会话节点 id）
+   * @returns {(nodeId: string, agentId: string) => Promise<boolean>}
+   */
+  function flushFor(nodeId) {
+    let instance = flushByRecipient.get(nodeId)
+    if (instance === undefined) {
+      instance = createIdleFlush({ hub, deliver, seen: createBoundedSet(SEEN_LIMIT), heartbeat, log: warn })
+      flushByRecipient.set(nodeId, instance)
+    }
+    return instance
+  }
+
+  /** 空闲取件：`sessionId` 供注入定位 agent，`nodeId` = 本轮收件方（Hub 会话节点 id）。 */
+  function flush(sessionId, nodeId) {
+    return flushFor(nodeId)(sessionId, nodeId)
+  }
 
   function stopPolling(sessionId) {
     pollers.get(sessionId)?.stop()
@@ -366,6 +395,8 @@ export function apply(ctx, config) {
     sessions.delete(sessionId)
     known.delete(sessionId)
     lastState.delete(entry.nodeId)
+    // 该收件方已离场：连带丢弃它的去重集（重开后是新的 agent 上下文，重新注入才是对的）。
+    flushByRecipient.delete(entry.nodeId)
     log(`会话 ${sessionId} 的 agent 已释放，停止跟踪（节点保留，待 Hub 判 offline）`)
   }
 
@@ -401,6 +432,7 @@ export function apply(ctx, config) {
       sessions.clear()
       known.clear()
       pending.clear()
+      flushByRecipient.clear()
       // 卸载 = 0 个存活会话：删除会话身份提示（桥回落到实例 id，不留陈旧会话身份）。
       hint.clear()
       // 实例节点是根：卸载报 offline 合规；会话子节点不退役（见 `onDisposed` 的取舍）。

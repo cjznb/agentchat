@@ -537,6 +537,59 @@ describe("agent/status：busy/idle 与空闲取件", () => {
     expect(agent.followups).toHaveLength(1)
     expect(pathBodies(h.kit, "/internal/result")[1]).toEqual(receipt)
   })
+  it("同进程两个会话各有同一条消息的 job → 两者都注入；未注入方在注入前不得出现 delivered 回执", async () => {
+    const h = await setup()
+    // 同一条消息对**两个**收件方各有一条 job（shout 广播 / 人类群消息 / @多人）：Hub 的 wake 对
+    // 每个 agentId 都返回同一条 message。修复前 `seen` 全局共享且只按 messageId 分键 → 第二个会话
+    // 被判「已注入」，**不注入却直接回 delivered**（假投递：job 落 accepted、UI 显示已送达）。
+    const shared = { id: "m-shared", fromAgentId: "peer-1", body: "群发正文" }
+    h.kit.onInternal = (path) => (path === "/internal/wake" ? { messages: [shared] } : undefined)
+
+    const a = fakeAgent(sessionHeader("sess-a"))
+    const b = fakeAgent(sessionHeader("sess-b"))
+    h.on("agent/created")({ agent: a })
+    h.on("agent/created")({ agent: b })
+    expect(await waitUntil(() => registered(h.kit, "sess-a") && registered(h.kit, "sess-b"))).toBe(true)
+    // 收件方 id = 会话节点注册时 Hub 返回的 id（假 Hub 按调用序发 `agent-<n>`）。
+    const nodeOf = (sessionId: string): string =>
+      `agent-${h.kit.toolArgs.findIndex((args) => args["task_ref"] === sessionId) + 1}`
+    const nodeA = nodeOf("sess-a")
+    const nodeB = nodeOf("sess-b")
+    expect([nodeA, nodeB]).not.toContain("agent-0") // 两个会话节点都已注册（否则取不到收件方 id）
+    expect(nodeA).not.toBe(nodeB) // 两个会话 = 两个不同的收件方
+    const resultsFor = (nodeId: string): Json[] =>
+      pathBodies(h.kit, "/internal/result").filter((body) => body["agentId"] === nodeId)
+    const hasDelivered = (body: Json): boolean =>
+      (Array.isArray(body["items"]) ? (body["items"] as Json[]) : []).some((item) => item["result"] === "delivered")
+
+    const injected = (who: FakeAgent): number => who.followups.length + who.steers.length
+    // A 先 idle → 真实注入 + 回执（其后的空闲轮询因 seen 去重不会重复注入）。
+    h.on("agent/status")({ agent: a, status: "idle" })
+    expect(await waitUntil(() => a.followups.length === 1)).toBe(true)
+    expect(await waitUntil(() => resultsFor(nodeA).some(hasDelivered))).toBe(true)
+
+    // B 也 idle：同一条 messageId 对 B 同样是**新**消息 → 必须真的注入。
+    h.on("agent/status")({ agent: b, status: "idle" })
+    // 逐 tick（5ms）观察 B 直到它被真正注入：**未注入期间绝不允许出现 delivered 回执**。
+    // 修复前 B 永远注入不了（判「已见」→ 直接回 delivered），观察窗跑满预算、假投递被抓个正着。
+    // 注：B 的「登记即开轮询」也是合法取件通道，两条通道任一注入都算通过本用例。
+    let deliveredBeforeInjection = false
+    const deadline = Date.now() + 4000
+    for (;;) {
+      if (resultsFor(nodeB).some(hasDelivered) && injected(b) === 0) deliveredBeforeInjection = true
+      if (injected(b) > 0 || Date.now() > deadline) break
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    expect(deliveredBeforeInjection).toBe(false) // 未真正注入的一方不得先出现 delivered 回执
+    expect(b.followups).toHaveLength(1) // 修复前恒为 0（被判已见），却回过 delivered
+    expect(b.steers).toHaveLength(0)
+    expect(b.followups[0]?.content[0]?.text).toContain("[m-shared]")
+    expect(b.followups[0]?.content[0]?.text).toContain("群发正文")
+    expect(a.followups).toHaveLength(1) // A 不因 B 的认领而被重复注入
+    expect(await waitUntil(() => resultsFor(nodeB).some(hasDelivered))).toBe(true)
+    expect(resultsFor(nodeB)).toContainEqual({ agentId: nodeB, items: [{ messageId: "m-shared", result: "delivered" }] })
+    h.dispose()
+  })
   it("busy 状态停轮询（跨过一个轮询周期不 wake），且 running 期间不注入", async () => {
     const h = await setup()
     const agent = fakeAgent(sessionHeader("sess-1"))
