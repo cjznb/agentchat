@@ -39,7 +39,14 @@ function saveGroupSection(storage: StorageLike | null, open: boolean): void {
   }
 }
 
-export function GroupSection({ children }: { readonly children?: ReactNode }) {
+export function GroupSection({
+  children,
+  count,
+}: {
+  readonly children?: ReactNode
+  /** UI-1 ②-5：分组头计数（`群聊 2`）；缺省 0 → 不渲染计数（复用场景零变化）。 */
+  readonly count?: number
+}) {
   const [groupOpen, setGroupOpen] = useState<boolean>(() => loadGroupSection(safeStorage()))
 
   // 分组展开态持久化（同 F6 幂等模式）：值未变不重复持久化。
@@ -65,6 +72,11 @@ export function GroupSection({ children }: { readonly children?: ReactNode }) {
           <span aria-hidden="true">{groupOpen ? "▾" : "▸"}</span>
         </button>
         <span className="group-section-title">群聊</span>
+        {count === undefined || count <= 0 ? null : (
+          <span className="group-section-count" data-testid="group-section-count">
+            {count}
+          </span>
+        )}
       </div>
       {groupOpen ? <ul className="group-section-rows">{children}</ul> : null}
     </li>

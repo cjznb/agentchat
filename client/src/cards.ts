@@ -245,6 +245,36 @@ export function formatMoment(createdAt: number): string {
   return `${month}-${day} ${hours}:${minutes}`
 }
 
+/**
+ * 通知搜索（UI-1 ③-9，纯函数）：空查询原样返回；否则对**主题 / 发起方 / 类型 / 状态 / 时间**
+ * 做大小写不敏感子串匹配。`names` = id→展示名（roster 缺失回退 id）。
+ */
+export function filterNotifications(
+  entries: readonly NotificationEntry[],
+  query: string,
+  names: ReadonlyMap<string, string>,
+): readonly NotificationEntry[] {
+  const needle = query.trim().toLowerCase()
+  if (needle === "") return entries
+  return entries.filter((entry) => {
+    const card = cardFromEntry(entry)
+    // 主题/发起方/类型/状态/时间 = 条目上**看得见**的文本；另加审批载荷摘要
+    //（群名/正文/被拉成员）—— 用户常按群名找单据，而列表只显示动作标签。
+    const detail = card.kind === "approval" ? cardDetail(card) : null
+    const haystack = [
+      cardSubject(card),
+      detail ?? "",
+      names.get(entry.requesterAgentId) ?? entry.requesterAgentId,
+      kindLabel(entry.kind),
+      statusLabel(entry.status),
+      formatMoment(entry.createdAt),
+    ]
+      .join(" ")
+      .toLowerCase()
+    return haystack.includes(needle)
+  })
+}
+
 /** 乐观对账：把已决单据并入通知列表（同 id 合并，缺失则前插；`cardMessageId` 未知时置 null）。 */
 export function upsertDecided(
   entries: readonly NotificationEntry[],

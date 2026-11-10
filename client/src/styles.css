@@ -132,9 +132,12 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   min-height: 0;
   color: var(--color-ink);
   background: var(--color-list);
-  border-right: var(--line-thin) solid var(--color-hairline);
+  /* ④-11 分区感：与聊天区（--color-view）之间用 strong hairline 分界（原 hairline 太弱）。 */
+  border-right: var(--line-thin) solid var(--color-hairline-strong);
 }
 .context-list header, .view-header { min-height: calc(var(--space-12) * 2); padding: var(--space-6); border-bottom: var(--line-thin) solid var(--color-hairline); }
+/* ④-11 头部对齐：两栏标题带同高、同字号、同 eyebrow 排版；右栏头给白底形成分区带。 */
+.context-list header, .view-header, .chat-header, .notif-head { background: var(--color-raised); }
 .context-list header p, .view-header p { margin: 0 0 var(--space-2); color: var(--color-muted); font: 600 var(--text-label)/1.4 var(--font-utility); }
 .context-list header p { letter-spacing: 0.08em; }
 .context-list h1, .view-header h1 { margin: 0; font-size: var(--text-title); line-height: 1.25; }
@@ -888,6 +891,22 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   .mode-rail { grid-row: 3; flex-direction: row; justify-content: center; padding: var(--space-2); }
   .brand-mark, .hub-status { display: none; }
   .rail-actions { grid-template-columns: repeat(5, 1fr); max-width: calc(var(--space-12) * 7); margin: 0; }
+  /* ④-10 底部 tab：只留单字字形（标签视觉隐藏但保留可访问名），条高压到一行，
+     把高度还给消息区。触摸目标仍保持 --target-size（44px）。
+     注意选择器要指名 `.rail-label`：通知 tab 的 `span:last-child` 可能是 `rail-badge`。 */
+  .rail-button { min-height: var(--target-size); padding: 0 var(--space-1); }
+  .rail-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    clip-path: inset(50%);
+  }
+  .rail-glyph { font-size: var(--text-heading); }
   .rail-button::after { inset: auto var(--space-3) 0; width: auto; height: var(--space-1); border-radius: var(--radius-small); }
   .context-list { grid-row: 1; border-right: 0; border-bottom: var(--line-thin) solid var(--color-hairline); }
   .context-list header, .view-header { min-height: auto; padding: var(--space-4); }
@@ -1145,6 +1164,54 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .settings-input { min-height: var(--target-size); padding: var(--space-3); border: var(--line-thin) solid var(--color-hairline); border-radius: var(--radius-medium); color: var(--color-ink); background: var(--color-raised); }
 .settings-notice { margin: var(--space-3) 0 0; color: var(--color-jade); font-size: var(--text-body); }
 .settings-error { margin: var(--space-3) 0 0; color: var(--color-error); font-size: var(--text-body); }
+
+/* ══ UI-1 ⑤ 设置页：路径/日志命令可复制（样式照 .bubble-copy token 结构） ══ */
+.settings-value { margin-inline-end: var(--space-2); font-family: var(--font-utility); word-break: break-all; }
+.settings-copy {
+  padding: 0 var(--space-2);
+  border: var(--line-thin) solid var(--color-hairline);
+  border-radius: var(--radius-small);
+  color: var(--color-muted);
+  background: transparent;
+  font: 600 var(--text-label)/1.6 var(--font-utility);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--duration-micro) var(--ease-standard), border-color var(--duration-micro) var(--ease-standard);
+}
+.settings-copy:hover { color: var(--color-jade); border-color: var(--color-jade); }
+.settings-copy:active { color: var(--color-raised); background: var(--color-jade); border-color: var(--color-jade); }
+.settings-copy:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: var(--space-1); }
+
+/* ══ UI-1 ⑥ 设置页「版本与更新」卡片 ══════════════════════════════════
+   只读展示 + 手动步骤；`outdated` 走 error 族红字（与 danger 规范一致），未上报保持中性。 */
+.version-line { margin: var(--space-2) 0 0; font-size: var(--text-body); line-height: 1.6; overflow-wrap: anywhere; }
+.version-line b { font-family: var(--font-utility); }
+.version-link { margin-inline-start: var(--space-2); color: var(--color-jade); font: 600 var(--text-label)/1.6 var(--font-utility); word-break: break-all; }
+.version-adapters { display: grid; gap: var(--space-1); margin: var(--space-3) 0 0; padding: 0; list-style: none; }
+.version-adapter {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: var(--line-thin) solid var(--color-hairline);
+  border-radius: var(--radius-medium);
+  background: var(--color-list);
+}
+.version-adapter-name { font: 700 var(--text-label)/1.4 var(--font-utility); }
+.version-adapter-version { min-width: 0; overflow: hidden; color: var(--color-muted); font: 500 var(--text-label)/1.4 var(--font-utility); text-overflow: ellipsis; white-space: nowrap; }
+.version-adapter-state { padding: 0 var(--space-2); border-radius: var(--radius-large); color: var(--color-muted); background: color-mix(in srgb, var(--color-muted) 10%, transparent); font: 600 var(--text-label)/1.6 var(--font-utility); white-space: nowrap; }
+.version-adapter-state[data-state="outdated"] { color: var(--color-error); background: color-mix(in srgb, var(--color-error) 12%, var(--color-raised)); }
+.version-adapter-state[data-state="current"] { color: var(--color-jade); background: var(--color-jade-soft); }
+.version-actions { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-3); }
+.version-result { margin-top: var(--space-3); padding-top: var(--space-3); border-top: var(--line-thin) solid var(--color-hairline); }
+.version-flag { margin-inline-start: var(--space-2); padding: 0 var(--space-2); border-radius: var(--radius-large); font: 600 var(--text-label)/1.6 var(--font-utility); }
+.version-flag[data-available="true"] { color: var(--color-error); background: color-mix(in srgb, var(--color-error) 12%, var(--color-raised)); }
+.version-flag[data-available="false"] { color: var(--color-jade); background: var(--color-jade-soft); }
+.version-error-code { margin-inline-start: var(--space-1); color: var(--color-muted); font-family: var(--font-utility); }
+.version-outdated { margin: var(--space-2) 0 0; padding-left: var(--space-5); color: var(--color-error); font-size: var(--text-label); line-height: 1.6; }
+.version-manual { margin-top: var(--space-3); padding: var(--space-3); border: var(--line-thin) dashed var(--color-hairline-strong); border-radius: var(--radius-medium); }
+.version-steps { margin: var(--space-2) 0 0; padding-left: var(--space-5); color: var(--color-muted); font-size: var(--text-label); line-height: 1.7; }
 /* Task 8: mention highlight / chip / badge —— B1 token 化（同族 jade/AA 对比度，无裸 hex） */
 .mention-hit { background: var(--color-jade-soft); color: var(--color-jade); border-radius: var(--radius-small); padding: 0 2px; }
 .mention-chip { display: inline-block; margin-inline-start: 6px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--color-jade-soft); color: var(--color-jade); font-size: 11px; line-height: 16px; }
@@ -1182,3 +1249,165 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 }
 .group-danger-button:hover { color: var(--color-raised); background: var(--color-error); border-color: var(--color-error); }
 .group-danger-button:focus-visible { outline: var(--line-signal) solid var(--color-error); outline-offset: var(--space-1); }
+
+/* ══ UI-1 ① 可辨识与反馈 ══════════════════════════════════════════════════
+   （1）容器行禁用态肉眼可辨；（2）状态点图例；（3）单厂商不再逐行重复胶囊；
+   （4）禁用主按钮统一「描边 + 灰底」，不再用 jade 填充 + 透明度（像可点）。
+   约束：规则区零裸 hex（`p2-fix.test.ts` 回归锁）；勾选框不用 ::before/::after
+   （Chromium 对替换型 input 的伪元素不可靠），改用 token 渐变画横杠。 */
+
+.picker-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  margin: 0 0 var(--space-2);
+  color: var(--color-muted);
+  font: 600 var(--text-label)/1.4 var(--font-utility);
+}
+.picker-legend-title { letter-spacing: 0.08em; }
+.picker-legend-item { display: inline-flex; align-items: center; gap: var(--space-1); }
+
+/* ①-1 容器行：逐子项压暗 45%（行尾 hint 保持清晰可见），勾选框换「横杠」图形。
+   必须经 `> .picker-head` 限定到**本行自身**：容器行的子节点渲染在自己的 `<li>` 里且是
+   容器 `<li>` 的后代，若用后代选择器会把「会话子节点」一并压暗/禁用外观（实测截图可见）。 */
+.picker-row[data-container="true"] > .picker-head .picker-icon,
+.picker-row[data-container="true"] > .picker-head .picker-name,
+.picker-row[data-container="true"] > .picker-head .picker-check,
+.picker-row[data-container="true"] > .picker-head .picker-meta > *:not(.picker-hint) { opacity: 0.45; }
+.picker-row[data-container="true"] > .picker-head .picker-label { cursor: not-allowed; }
+.picker-row[data-container="true"] > .picker-head .picker-check {
+  appearance: none;
+  width: 1.125rem;
+  height: 1.125rem;
+  border: var(--line-thin) solid var(--color-hairline-strong);
+  border-radius: var(--radius-small);
+  background-color: color-mix(in srgb, var(--color-muted) 14%, var(--color-raised));
+  background-image: linear-gradient(var(--color-muted), var(--color-muted));
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 0.6rem var(--line-thin);
+  cursor: not-allowed;
+}
+.picker-hint {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border: var(--line-thin) dashed var(--color-hairline-strong);
+  border-radius: var(--radius-pill);
+  color: var(--color-muted);
+  font: 600 var(--text-label)/1.6 var(--font-utility);
+  white-space: nowrap;
+}
+/* hint 可能把 meta 撑宽 → 允许换行而不是横向溢出（层1 扫描零容忍 X 溢出）。 */
+.picker-meta { flex-wrap: wrap; min-width: 0; }
+
+/* ①-4 禁用主按钮统一态（后置 + 更高特异性，覆盖各入口的 jade 填充）。
+   `.card-choice` 有意排除：它是选项 chip，选中态需保持可辨识（见下方单独规则）。 */
+.member-add-confirm:disabled,
+.group-submit:disabled,
+.composer-send:disabled,
+.card-button:disabled,
+.card-custom-send:disabled,
+.settings-action:disabled,
+.settings-danger:disabled,
+.group-add-button:disabled,
+.contact-action:disabled,
+.contact-rename-submit:disabled,
+.member-rename-submit:disabled {
+  border: var(--line-thin) solid var(--color-hairline);
+  color: var(--color-muted);
+  background: color-mix(in srgb, var(--color-muted) 12%, var(--color-raised));
+  opacity: 1;
+  cursor: not-allowed;
+}
+.card-choice:disabled { cursor: not-allowed; }
+
+/* ══ UI-1 ② 信息层级：会话列表 + 消息元信息 ══════════════════════════════
+   ②-5 会话行 = 头像/标识 + 标题&摘要 + 行尾（被@/时间/未读）；群聊分组头带计数。
+   ②-6 回执前置 + tone 分级；行内操作收进 hover/「⋯」菜单。②-7 作者行层级降噪。 */
+
+/* 会话行三列（头像 | 主体 | 行尾）；child 行多一列状态点。后置覆盖既有列定义。 */
+.conversation-item,
+.conversation-flat { grid-template-columns: auto minmax(0, 1fr) auto; }
+.conversation-child { grid-template-columns: auto auto minmax(0, 1fr) auto; }
+.fold-content { grid-template-columns: auto minmax(0, 1fr); }
+/* 标题也要省略号：多出的头像/时间列会压缩可用宽度（层1 的 ellipsis 豁免随之生效）。 */
+.conversation-body strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-avatar { width: var(--space-6); height: var(--space-6); font: 650 var(--text-label)/1 var(--font-ui); }
+.row-avatar[data-kind="group"] { color: var(--color-jade); background: var(--color-jade-soft); }
+.row-avatar[data-kind="shout"] { color: var(--color-raised); background: var(--color-jade); }
+.conversation-side { display: inline-flex; flex: 0 0 auto; align-items: center; gap: var(--space-2); }
+.conversation-time { color: var(--color-muted); font: 500 var(--text-label)/1 var(--font-utility); white-space: nowrap; }
+.group-section-count {
+  min-width: var(--space-4);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-large);
+  color: var(--color-jade);
+  background: var(--color-jade-soft);
+  font: 700 var(--text-label)/1.6 var(--font-utility);
+  text-align: center;
+}
+
+/* ②-6 回执 tone 分级：排队(弱) → 唤醒中(琥珀) → 已送达(正文色) → 已读(jade 加粗，见上)。 */
+.receipt[data-tone="pending"] { color: var(--color-muted); }
+.receipt[data-tone="progress"] { color: var(--color-amber); }
+.receipt[data-tone="delivered"] { color: var(--color-ink); }
+/* 脚注可换行：回执/时间/chip/操作同排时宁可折行，也不横向溢出（层1 零容忍）。 */
+.bubble-foot { flex-wrap: wrap; }
+.bubble-actions { display: inline-flex; align-items: center; gap: var(--space-2); visibility: hidden; opacity: 0; transition: opacity var(--duration-micro) var(--ease-standard); }
+.message-row:hover .bubble-actions,
+.message-row:focus-within .bubble-actions,
+.bubble-actions[data-open="true"] { visibility: visible; opacity: 1; }
+.bubble-actions-toggle {
+  padding: 0 var(--space-2);
+  border: var(--line-thin) solid transparent;
+  border-radius: var(--radius-small);
+  color: var(--color-muted);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+  transition: color var(--duration-micro) var(--ease-standard), border-color var(--duration-micro) var(--ease-standard);
+}
+.bubble-actions-toggle:hover { color: var(--color-ink); border-color: var(--color-hairline); }
+.bubble-actions-toggle:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: var(--space-1); }
+/* ②-7 作者行降噪：`[子·根名]` → 紧凑「子」chip，全量层级说明在 title/aria。 */
+.child-badge { padding: 0 var(--space-1); border: var(--line-thin) solid color-mix(in srgb, var(--color-jade) 32%, transparent); border-radius: var(--radius-small); font-size: var(--text-label); }
+
+/* ══ UI-1 ③ 交互可用性：列表搜索 / 空态引导 / 已在群区分 ═════════════════
+   三处列表（会话 / 通讯录 / 通知）共用 `.list-pane` + `.list-search-input`；
+   空态统一 `.list-empty`（已有）。 */
+
+/* 列表 = 搜索行（auto）+ 滚动列表（1fr）：中栏既有 grid 行的第二格里自撑满。 */
+.list-pane { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+.list-search { padding: var(--space-2) var(--space-3) 0; }
+.list-search-input {
+  width: 100%;
+  min-height: var(--target-size);
+  padding: var(--space-2) var(--space-3);
+  border: var(--line-thin) solid var(--color-hairline);
+  border-radius: var(--radius-medium);
+  color: var(--color-ink);
+  background: var(--color-raised);
+  font: var(--text-body)/1.4 var(--font-ui);
+}
+.list-search-input:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: calc(var(--space-1) * -1); }
+.notif-search { width: auto; flex: 1; min-width: 8rem; }
+
+/* ③-8 弹窗内：搜索 + 已选计数同排。 */
+.member-add-search { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
+.member-add-search .list-search-input { flex: 1; }
+.member-add-count { flex: 0 0 auto; color: var(--color-muted); font: 600 var(--text-label)/1 var(--font-utility); white-space: nowrap; }
+
+/* ③-8 「已在群」：灰显 + 徽标（不是隐藏 —— 用户要知道为什么点不动）。 */
+.existing-badge {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border: var(--line-thin) solid var(--color-hairline);
+  border-radius: var(--radius-large);
+  color: var(--color-muted);
+  background: color-mix(in srgb, var(--color-muted) 10%, var(--color-raised));
+  font: 600 var(--text-label)/1.6 var(--font-utility);
+  white-space: nowrap;
+}
+.picker-row[data-existing="true"] > .picker-head .picker-label { cursor: not-allowed; }
+.picker-row[data-existing="true"] > .picker-head .picker-name { color: var(--color-muted); }

@@ -27,6 +27,8 @@ import {
   messagesByConversation,
   notifications,
   roster,
+  versionCheckResponse,
+  versionInfoResponse,
 } from "./fixtures/api-fixtures"
 
 /** 层2 产图根目录（test-results/ 已由 .gitignore 兜住）。 */
@@ -57,6 +59,8 @@ interface ScanScope {
     overflowX: string
     overflowY: string
     textOverflow: string
+    clipPath: string
+    clip: string
   }
 }
 
@@ -80,6 +84,9 @@ export async function mockApi(page: Page): Promise<void> {
       )
     }
     if (method === "GET" && path === "/api/admin/info") return respond(adminInfoResponse)
+    // UI-1 ⑥ 版本与更新：GET 只读概览；POST /api/version/check 仅在点按钮时被调用。
+    if (method === "GET" && path === "/api/version") return respond(versionInfoResponse)
+    if (method === "POST" && path === "/api/version/check") return respond(versionCheckResponse)
     if (path.startsWith("/api/agents/")) return respond(agentCardResponse)
     const segments = path.split("/")
     if (segments[1] === "api" && segments[2] === "conversations" && segments.length === 5) {
@@ -148,6 +155,12 @@ export async function scanOverflow(page: Page): Promise<readonly OverflowOffende
       // V1.1 ellipsis 豁免：有意截断（text-overflow: ellipsis）且已渲染（clientWidth>0 门槛）
       // 不报 X 轴；零宽/未布局元素不豁免，防吞真横向溢出。
       const isEllipsisClip = style.textOverflow === "ellipsis" && element.clientWidth > 0
+      // UI-1 ④-10 视觉隐藏豁免：`clip-path: inset(50%)`/`clip: rect(0…)` 是 sr-only 标准做法
+      // （1px 盒内保留可访问名）。这类"有意裁掉"的文本不是布局溢出，报出来是仪器误报。
+      // 取 `?? ""` 是为了容错**不完整样式对象**（单测里的 getComputedStyle 桩），真实浏览器恒有值。
+      const clipPath = style.clipPath ?? ""
+      const clip = style.clip ?? ""
+      const isVisuallyHidden = clipPath.includes("inset(50%)") || /rect\(\s*0/.test(clip)
       const canScrollX = style.overflowX === "auto" || style.overflowX === "scroll"
       const canScrollY = style.overflowY === "auto" || style.overflowY === "scroll"
       const excessX = element.scrollWidth - element.clientWidth
@@ -157,6 +170,7 @@ export async function scanOverflow(page: Page): Promise<readonly OverflowOffende
       // P2-5 方案A 有意延伸：rail 指示条负 right 越过按钮/动作区盒缘至 rail 边缘 —— X 轴白名单豁免。
       const intentionalXClasses = ["rail-button", "rail-actions"]
       const hasIntentionalX = intentionalXClasses.some((name) => classNames.includes(name))
+      if (isVisuallyHidden) continue
       let overX: boolean
       if (isEllipsisClip || hasIntentionalX) overX = false
       else if (isVerticalContainer) overX = excessX > 1

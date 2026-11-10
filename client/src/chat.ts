@@ -141,3 +141,25 @@ export function formatClock(createdAt: number): string {
   const minutes = String(date.getMinutes()).padStart(2, "0")
   return `${hours}:${minutes}`
 }
+
+/** 同一本地日历日（列表时间分级用；不做时区换算 —— 前后端同为本地时钟口径）。 */
+function sameLocalDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+  )
+}
+
+/**
+ * 会话列表用的**分级短时间**（UI-1 ②-5）：今天 → `HH:MM`；昨天 → `昨天`；
+ * 同年更早 → `M月D日`；跨年 → `YYYY/M/D`。`now` 可注入（测试确定性，不依赖真实时钟）。
+ */
+export function formatListTime(createdAt: number, now: number = Date.now()): string {
+  const date = new Date(createdAt)
+  const today = new Date(now)
+  if (sameLocalDay(date, today)) return formatClock(createdAt)
+  const yesterday = new Date(now)
+  yesterday.setDate(today.getDate() - 1)
+  if (sameLocalDay(date, yesterday)) return "昨天"
+  if (date.getFullYear() === today.getFullYear()) return `${date.getMonth() + 1}月${date.getDate()}日`
+  return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`
+}

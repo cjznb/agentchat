@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { RosterNode } from "../../../shared/contracts"
 import {
+  filterConversationRows,
   foldConversations,
   loadExpandedRoots,
   saveExpandedRoots,
@@ -26,7 +27,7 @@ import {
 } from "../fold"
 import { useStore } from "../store"
 import { conversationMentioned } from "../unread"
-import { Badge, Body, MentionBadge, StatusDot } from "./conversation-row"
+import { Badge, Body, MentionBadge, RowAvatar, RowTime, Side, StatusDot } from "./conversation-row"
 import { GroupSection, GROUP_SECTION_KEY } from "./GroupSection"
 
 // 分组展开态键仍从本模块导出（既有消费方导入路径不变，实现已移至 GroupSection）。
@@ -67,9 +68,9 @@ function ChildItem({
         type="button"
       >
         {node === undefined ? null : <StatusDot status={node.status} />}
+        <RowAvatar name={node?.name ?? conversation.name ?? "私聊"} vendor={node?.vendor} kind="node" />
         <Body name={node?.name ?? conversation.name ?? "私聊"} conversation={conversation} />
-        {mentioned ? <MentionBadge /> : null}
-        <Badge count={conversation.unread} />
+        <Side conversation={conversation} unread={conversation.unread} mentioned={mentioned} />
       </button>
     </li>
   )
@@ -108,9 +109,13 @@ function FlatItem({
         onClick={() => onOpen(conversation.id)}
         type="button"
       >
+        <RowAvatar
+          name={flatName(row)}
+          vendor={row.node?.vendor}
+          kind={row.kind === "group" ? "group" : row.kind === "shout" ? "shout" : "node"}
+        />
         <Body name={flatName(row)} conversation={conversation} />
-        {mentioned ? <MentionBadge /> : null}
-        <Badge count={row.unread} />
+        <Side conversation={conversation} unread={row.unread} mentioned={mentioned} />
       </button>
     </li>
   )
@@ -163,10 +168,14 @@ function RootItem({
           }}
           type="button"
         >
+          <RowAvatar name={name} vendor={row.node?.vendor} kind="node" />
           <Body name={name} conversation={conversation} />
-          {mentioned ? <MentionBadge /> : null}
         </button>
         <span className="fold-meta">
+          {mentioned ? <MentionBadge /> : null}
+          {conversation === null ? null : (
+            <RowTime createdAt={conversation.lastMessage?.createdAt ?? conversation.createdAt} />
+          )}
           {row.children.length > 0 ? (
             <span className="fold-summary" data-testid="fold-summary">
               {row.children.length} 子
@@ -194,11 +203,15 @@ export interface ConversationListProps {
 export function ConversationList({ onCreateGroup }: ConversationListProps = {}) {
   const { state, openAndRead } = useStore()
   const [expanded, setExpanded] = useState<readonly string[]>(() => loadExpandedRoots(safeStorage()))
+  // ③-9：列表搜索（名字 / 最后消息摘要）。
+  const [query, setQuery] = useState("")
 
-  const rows = useMemo(
+  const allRows = useMemo(
     () => foldConversations(state.conversations, state.roster),
     [state.conversations, state.roster],
   )
+  const rows = useMemo(() => filterConversationRows(allRows, query), [allRows, query])
+  const searching = query.trim() !== ""
 
   // C1 分区：喊话置顶不变；群会话全部收进分组区；其余行保持原相对顺序。
   const shoutRows = useMemo(() => rows.filter((row) => row.kind === "shout"), [rows])
@@ -229,20 +242,40 @@ export function ConversationList({ onCreateGroup }: ConversationListProps = {}) 
   )
 
   return (
-    <ul className="conversation-list" data-testid="conversation-list">
-      {rows.length === 0 ? (
-        <li className="list-empty" data-testid="conversation-empty">
-          <span aria-hidden="true">—</span>
-          <p>还没有会话</p>
-          <small>从通讯录发起对话，或新建群聊</small>
-        </li>
-      ) : (
+    <div className="list-pane" data-testid="conversation-pane">
+      <div className="list-search">
+        <input
+          className="list-search-input"
+          data-testid="conversation-search"
+          type="search"
+          value={query}
+          placeholder="搜索会话或消息…"
+          aria-label="搜索会话"
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </div>
+      <ul className="conversation-list" data-testid="conversation-list">
+        {rows.length === 0 ? (
+          searching ? (
+            <li className="list-empty" data-testid="conversation-no-match">
+              <span aria-hidden="true">—</span>
+              <p>没有匹配「{query.trim()}」的会话</p>
+              <small>换个关键词，或清空搜索框看全部会话</small>
+            </li>
+          ) : (
+            <li className="list-empty" data-testid="conversation-empty">
+              <span aria-hidden="true">—</span>
+              <p>还没有会话</p>
+              <small>点下方「新建群聊」，或到通讯录选一个 Agent 发起私聊</small>
+            </li>
+          )
+        ) : (
         <>
           {shoutRows.map((row) => (
             <FlatItem key={row.id} row={row} activeId={state.openConversationId} onOpen={open} roster={state.roster} />
           ))}
           {groupRows.length === 0 ? null : (
-            <GroupSection>
+            <GroupSection count={groupRows.length}>
               {groupRows.map((row) => (
                 <FlatItem key={row.id} row={row} activeId={state.openConversationId} onOpen={open} roster={state.roster} />
               ))}
@@ -280,6 +313,7 @@ export function ConversationList({ onCreateGroup }: ConversationListProps = {}) 
           </button>
         </li>
       )}
-    </ul>
+      </ul>
+    </div>
   )
 }

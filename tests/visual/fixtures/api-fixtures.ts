@@ -326,5 +326,48 @@ export const adminInfoResponse: AdminInfo = {
   logsDir: "D:\\agentchat-fixture\\home\\logs",
 }
 
+/**
+ * `GET /api/version`（UI-1 ⑥；Hub `feat/version` 契约）。
+ * 两个适配器刻意覆盖两种状态：`opencode` 已上报且落后（outdated:true → 红）、
+ * `dsh` 从未上报（version:null → 「未上报」，不猜）。
+ */
+export const versionInfoResponse = {
+  ok: true,
+  hub: { name: "agentchat", version: "0.2.0", compareUrl: "https://github.com/cjznb/agentchat" },
+  adapters: [
+    {
+      vendor: "opencode",
+      version: "0.1.0",
+      bundledVersion: "0.2.0",
+      outdated: true,
+      reportedAt: T0,
+    },
+    { vendor: "dsh", version: null, bundledVersion: "0.1.0", outdated: null, reportedAt: null },
+  ],
+  checkedAt: null,
+}
+
+/** `POST /api/version/check`（点「检查更新」才请求；此处给"有更新"分支以展示结果区全貌）。 */
+export const versionCheckResponse = {
+  ok: true,
+  current: "0.2.0",
+  latest: "0.3.0",
+  updateAvailable: true,
+  adaptersOutdated: [
+    {
+      vendor: "opencode",
+      version: "0.1.0",
+      bundledVersion: "0.2.0",
+      outdated: true,
+      reportedAt: T0,
+    },
+  ],
+  tagsChecked: 12,
+  source: "https://github.com/cjznb/agentchat/tags",
+  checkedAt: T0 + 1000,
+  cached: false,
+  compareUrl: "https://github.com/cjznb/agentchat/compare/v0.2.0...v0.3.0",
+}
+
 /** `ConversationSummary` 冗余导出（spec 场景定位用）。 */
 export type { ConversationSummary }

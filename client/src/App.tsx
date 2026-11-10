@@ -194,7 +194,7 @@ export function App() {
           {modes.map((mode) => (
             <button className="rail-button" data-active={mode.id === activeMode} aria-pressed={mode.id === activeMode} key={mode.id} onClick={() => { setActiveMode(mode.id); if (mode.id !== "chat") setComposeGroup(false) }} type="button">
               <span className="rail-glyph" aria-hidden="true">{mode.glyph}</span>
-              <span>{mode.label}</span>
+              <span className="rail-label">{mode.label}</span>
               {mode.id === "notifications" && notificationBadge > 0 ? (
                 <span className="rail-badge" data-testid="notification-badge">{notificationBadge}</span>
               ) : null}
@@ -207,7 +207,9 @@ export function App() {
       </nav>
 
       <aside className="context-list" aria-labelledby="context-title" data-testid="middle-list">
-        <header><p>AGENTCHAT</p><h1 id="context-title">{list.title}</h1></header>
+        {/* ④-11 头部结构对齐：与右侧（`群聊` 小字 + 大标题）同构 —— 小字给出**上下文**（当前模式），
+            大标题给出列表名；品牌只在 rail 出现，不再占据列表头。 */}
+        <header><p>{active.label}</p><h1 id="context-title">{list.title}</h1></header>
         {activeMode === "contacts" ? (
           <OrgTree selectedId={selectedContactId} onSelect={selectContact} />
         ) : activeMode === "chat" ? (

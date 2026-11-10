@@ -73,6 +73,47 @@ function childRow(conversation: ConversationSummary, node: RosterNode): ChildRow
   return { conversation, node, retired: node.status === "retired" }
 }
 
+/** 行的可搜索文本（UI-1 ③-9）：展示名 + 最后消息摘要（大小写不敏感匹配用）。 */
+export function rowSearchText(row: FoldedRow): string {
+  const name =
+    row.kind === "shout" || row.kind === "group"
+      ? row.conversation?.name ?? ""
+      : row.node?.name ?? row.conversation?.name ?? ""
+  return `${name} ${row.conversation?.lastMessage?.body ?? ""}`
+}
+
+/**
+ * 会话列表搜索（UI-1 ③-9，纯函数）：空查询原样返回；否则按名字/摘要子串过滤。
+ * - 扁平行：自身命中即保留；
+ * - 折叠根行：自身命中 → 保留其全部子会话；仅子会话命中 → 只保留命中的子行。
+ */
+export function filterConversationRows(
+  rows: readonly FoldedRow[],
+  query: string,
+): readonly FoldedRow[] {
+  const needle = query.trim().toLowerCase()
+  if (needle === "") return rows
+  const hit = (row: FoldedRow): boolean => rowSearchText(row).toLowerCase().includes(needle)
+  const hitChild = (row: ChildRow): boolean =>
+    `${row.node?.name ?? row.conversation.name ?? ""} ${row.conversation.lastMessage?.body ?? ""}`
+      .toLowerCase()
+      .includes(needle)
+  const out: FoldedRow[] = []
+  for (const row of rows) {
+    if (row.children.length === 0) {
+      if (hit(row)) out.push(row)
+      continue
+    }
+    if (hit(row)) {
+      out.push(row)
+      continue
+    }
+    const children = row.children.filter(hitChild)
+    if (children.length > 0) out.push({ ...row, children })
+  }
+  return out
+}
+
 /**
  * header 归属约定：human↔root 的自有 DM 优先（无则取最近活动者，同值 id 稳定）。
  * 其余自有会话**降级为子行**，保证同一根的多条会话零丢行。

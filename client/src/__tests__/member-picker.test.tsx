@@ -17,7 +17,8 @@ import { MemberPicker } from "../components/MemberPicker"
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 
 // 一级 root1 → 二级 child-1 → 三级 grand-1；旁支 child-2；另有一棵 P5 容器子树 box-1 → sess-1。
-const rosterFixture = vi.hoisted(() => {
+// `multi` 追加一个 claude-code 节点，供 ①-3「多厂商才显示胶囊」断言。
+const pickerFixture = vi.hoisted(() => {
   const build = (
     id: string,
     children: readonly unknown[] = [],
@@ -39,14 +40,15 @@ const rosterFixture = vi.hoisted(() => {
     children,
     ...extra,
   })
-  return [
+  const single = [
     build("root1", [build("child-1", [build("grand-1")]), build("child-2")]),
     build("box-1", [build("sess-1")], { role_tag: "container" }),
   ]
+  return { single, multi: [...single, build("root2", [], { vendor: "claude-code" })], roster: [...single] }
 })
 
 vi.mock("../store", () => ({
-  useStore: () => ({ state: { roster: rosterFixture } }),
+  useStore: () => ({ state: { roster: pickerFixture.roster } }),
 }))
 
 describe("toggleIndependent 原语", () => {
@@ -68,6 +70,9 @@ let root: Root | null = null
 
 beforeEach(() => {
   window.localStorage.clear()
+  // 每个用例从单厂商基线起步（①-3 的多厂商用例自行切换）。
+  pickerFixture.roster.length = 0
+  pickerFixture.roster.push(...pickerFixture.single)
 })
 
 afterEach(() => {
@@ -150,7 +155,7 @@ function checkOf(el: HTMLElement, nodeId: string): HTMLInputElement {
   return check
 }
 
-describe("MemberPicker 容器不可勾选（P5）", () => {
+describe("MemberPicker 容器不可勾选（P5 + UI-1 ①-1）", () => {
   it("容器行仍在树里（保留层级）、显示「容器」徽标，checkbox 禁用且有说明", () => {
     const el = render()
     const row = el.querySelector('[data-testid="member-row"][data-node-id="box-1"]')
@@ -162,8 +167,32 @@ describe("MemberPicker 容器不可勾选（P5）", () => {
     const check = checkOf(el, "box-1")
     expect(check.disabled).toBe(true)
     expect(check.checked).toBe(false)
-    expect(check.getAttribute("title")).toContain("不能加入群聊")
+    expect(check.getAttribute("title")).toContain("不可作为成员")
     expect(check.getAttribute("aria-label")).toContain("分组容器")
+  })
+
+  it("①-1 行尾有**可见** hint（禁用理由不只藏在 title/aria 里）", () => {
+    const el = render()
+    const hint = el.querySelector(
+      '[data-testid="member-row"][data-node-id="box-1"] [data-testid="picker-container-hint"]',
+    )
+    expect(hint?.textContent).toBe("分组容器，不可作为成员")
+    // 普通行不得出现该 hint（不外溢）。
+    expect(
+      el.querySelector(
+        '[data-testid="member-row"][data-node-id="root1"] [data-testid="picker-container-hint"]',
+      ),
+    ).toBeNull()
+  })
+
+  it("①-1 容器行样式钩子齐备：data-container 供 CSS 压暗/横杠勾选框选择器命中", () => {
+    const el = render()
+    const row = el.querySelector('[data-testid="member-row"][data-node-id="box-1"]')
+    // CSS（styles.css）以 `.picker-row[data-container="true"]` 命中压暗 45% +
+    // `.picker-check` 横杠图形；此处锁住选择器赖以命中的属性契约。
+    expect(row?.getAttribute("data-container")).toBe("true")
+    expect(row?.getAttribute("data-retired")).toBe("false")
+    expect(row?.querySelector(".picker-label")).not.toBeNull()
   })
 
   it("容器层级保留且可展开：点开容器仍能看到其会话子节点，且子节点可勾选", () => {
@@ -200,5 +229,54 @@ describe("MemberPicker 容器不可勾选（P5）", () => {
     expect(check.disabled).toBe(false)
     click(check)
     expect(check.checked).toBe(false) // 受控组件（onToggle 为 no-op）→ 勾选态不落地
+  })
+})
+
+// ── UI-1 ①-2 / ①-3：状态图例 + 单厂商降噪 ─────────────────────────────
+
+describe("MemberPicker 图例与厂商胶囊（UI-1 ①）", () => {
+  it("①-2 列表顶部有可见状态图例，四项覆盖 在线/忙碌/离线/退役 且带 role=img 文案", () => {
+    const el = render()
+    const legend = el.querySelector('[data-testid="picker-status-legend"]')
+    expect(legend).not.toBeNull()
+    const items = legend?.querySelectorAll(".picker-legend-item") ?? []
+    expect(items).toHaveLength(4)
+    expect(Array.from(items).map((item) => item.textContent)).toEqual([
+      "🟢在线",
+      "🟠忙碌",
+      "⚪离线",
+      "⚫退役",
+    ])
+    for (const item of Array.from(items)) {
+      const dot = item.querySelector('.node-dot[role="img"]')
+      expect(dot?.getAttribute("aria-label")).toBeTruthy()
+      expect(dot?.getAttribute("title")).toBeTruthy()
+    }
+  })
+
+  it("①-3 单厂商列表不渲染逐行 vendor 胶囊（图标底色已表意）", () => {
+    const el = render()
+    // 基线 roster 全是 opencode → 胶囊全隐藏。
+    expect(el.querySelectorAll('[data-testid="member-row"] .vendor-badge')).toHaveLength(0)
+    // 厂商信息仍可从图标底色钩子读到（未被删弱）。
+    expect(
+      el.querySelector('[data-testid="member-row"][data-node-id="root1"] .picker-icon')
+        ?.getAttribute("data-vendor"),
+    ).toBe("opencode")
+  })
+
+  it("①-3 多厂商列表恢复 vendor 胶囊（信息不丢）", () => {
+    pickerFixture.roster.push(...pickerFixture.multi.filter((node) => node["id"] === "root2"))
+    const el = render()
+    const badges = Array.from(el.querySelectorAll('[data-testid="member-row"] .vendor-badge'))
+    // 每行都回带自己的厂商，且集合覆盖两种厂商（不是只剩一个）。
+    expect(new Set(badges.map((badge) => badge.textContent))).toEqual(
+      new Set(["opencode", "claude-code"]),
+    )
+    expect(
+      el.querySelector(
+        '[data-testid="member-row"][data-node-id="root2"] .vendor-badge',
+      )?.textContent,
+    ).toBe("claude-code")
   })
 })

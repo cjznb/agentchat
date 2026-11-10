@@ -119,9 +119,20 @@ export function CardActions({ card, entry }: CardActionsProps) {
     return (
       <div className="card-actions" data-kind="ask" data-state="readonly">
         {card.options.length > 0 ? (
+          // ④-12：只读态也**按钮化**（与可答复态同款 `.card-choice`），不再是一串纯文本链接；
+          // 明确禁用表达"这张单据不由你答复"，视觉与全局一致。
           <ul className="card-choices" data-testid="card-choices-readonly">
             {card.options.map((option) => (
-              <li key={option}>{option}</li>
+              <li key={option}>
+                <button
+                  type="button"
+                  className="card-choice"
+                  data-testid="card-choice-readonly"
+                  disabled
+                >
+                  {option}
+                </button>
+              </li>
             ))}
           </ul>
         ) : null}

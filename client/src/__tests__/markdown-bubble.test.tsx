@@ -132,8 +132,7 @@ describe("scope=agent × 消息归属", () => {
   })
 })
 
-describe("MD⇄原文 toggle", () => {
-  it("点击翻转视图；手动覆盖后 scope notify 不再改它", () => {
+describe("MD⇄原文 toggle", () => {  it("点击翻转视图；手动覆盖后 scope notify 不再改它", () => {
     const container = render(props({ message: message({ body: "**粗体**" }) }))
     const toggle = find(container, "bubble-md-toggle")
     expect(toggle).not.toBeNull()
@@ -250,5 +249,55 @@ describe("system / 卡 / 撤回占位 → 无按钮", () => {
     expect(find(container, "revoke-mark")).not.toBeNull()
     expect(find(container, "bubble-md-toggle")).toBeNull()
     expect(find(container, "bubble-copy")).toBeNull()
+  })
+})
+
+// ── UI-1 ②-6：消息元信息分级（回执前置 + ⋯ 操作菜单） ──────────────────
+
+describe("UI-1 ②-6 回执前置与操作菜单", () => {
+  it("回执前置在时间戳之前（状态先读），tone/stage 透传给 CSS 分级着色", () => {
+    const container = render(
+      props({
+        own: true,
+        sender: sender(),
+        message: message({
+          receipts: [{ agentId: "peer", stage: "read" }] as unknown as ChatMessage["receipts"],
+          receiptStage: "read",
+        }),
+      }),
+    )
+    const receipt = find(container, "receipt")
+    const time = container.querySelector(".bubble-time")
+    expect(receipt).not.toBeNull()
+    expect(time).not.toBeNull()
+    expect(receipt?.getAttribute("data-tone")).toBe("read")
+    expect(receipt?.getAttribute("data-stage")).toBe("read")
+    // DOM 顺序：receipt 先于 time（改前回执排在脚注末尾）。
+    expect(
+      (receipt as Node).compareDocumentPosition(time as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it("⋯ 常显且驱动 data-open（触屏无 hover 也能展开操作组）", () => {
+    const container = render(props({ message: message({ body: "x" }) }))
+    const toggle = find(container, "bubble-actions-toggle")
+    expect(toggle).not.toBeNull()
+    expect(toggle?.getAttribute("aria-expanded")).toBe("false")
+    expect(find(container, "bubble-actions")?.getAttribute("data-open")).toBeNull()
+
+    click(toggle as Element)
+    expect(find(container, "bubble-actions-toggle")?.getAttribute("aria-expanded")).toBe("true")
+    expect(find(container, "bubble-actions")?.getAttribute("data-open")).toBe("true")
+    // 既有操作按钮 testid 不变（只换收纳方式，功能未删弱）。
+    expect(find(container, "bubble-md-toggle")).not.toBeNull()
+    expect(find(container, "bubble-copy")).not.toBeNull()
+  })
+
+  it("撤回占位等无操作可做时不渲染 ⋯ 与操作组", () => {
+    const container = render(
+      props({ message: message({ revoked_at: 5, body: "机密" }), own: true }),
+    )
+    expect(find(container, "bubble-actions-toggle")).toBeNull()
+    expect(find(container, "bubble-actions")).toBeNull()
   })
 })

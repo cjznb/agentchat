@@ -41,9 +41,21 @@ async function renderPanel(api: SettingsApi): Promise<HTMLDivElement> {
   document.body.appendChild(host)
   root = createRoot(host)
   await act(async () => {
-    root?.render(<Settings api={api} />)
+    // ⑥ 版本卡片：注入 hermetic stub，避免设置页用例触发真实 fetch。
+    root?.render(<Settings api={api} versionApi={stubVersionApi} />)
   })
   return host
+}
+
+/** 版本卡片 stub（本轮设置页用例只关心 rest 的接口；卡片自身有独立用例）。 */
+const stubVersionApi = {
+  load: async () => ({
+    ok: true as const,
+    hub: { name: "agentchat", version: "0.2.0", compareUrl: "https://example.test" },
+    adapters: [],
+    checkedAt: null,
+  }),
+  check: async () => ({ ok: false as const, code: "no_tags" }),
 }
 
 function find(container: HTMLElement, testid: string): Element | null {
@@ -61,6 +73,40 @@ describe("Settings 数据位置", () => {
     const container = await renderPanel(fakeApi())
     expect(find(container, "settings-home")?.textContent).toContain("/tmp/home")
     expect(find(container, "settings-logs")?.textContent).toContain("/tmp/home/logs")
+  })
+
+  it("⑤-13 路径与两条日志命令各有复制按钮；点击写入剪贴板并回显已复制", async () => {
+    const written: string[] = []
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text: string) => void written.push(text) },
+    })
+    try {
+      const container = await renderPanel(fakeApi())
+      const buttons: readonly [string, string][] = [
+        ["settings-copy-home", "/tmp/home"],
+        ["settings-copy-logs", "/tmp/home/logs"],
+        ["settings-copy-log-cmd", "tail -f /tmp/home/logs/*.log"],
+        ["settings-copy-log-cmd-win", "Get-Content -Wait /tmp/home/logs\\*.log"],
+      ]
+      for (const [testid, expected] of buttons) {
+        const button = find(container, testid) as HTMLElement | null
+        expect(button, `${testid} 应存在`).not.toBeNull()
+        expect(button?.getAttribute("aria-label")).toContain("复制")
+        await act(async () => void button?.click())
+        await act(async () => {})
+        expect(written).toContain(expected)
+      }
+    } finally {
+      Reflect.deleteProperty(navigator, "clipboard")
+    }
+  })
+
+  it("⑤-13 不可恢复的「清理离线历史会话」用 danger 样式（触发按钮即红系）", async () => {
+    const container = await renderPanel(fakeApi())
+    const button = find(container, "settings-prune")
+    expect(button?.classList.contains("settings-danger")).toBe(true)
+    expect(button?.classList.contains("settings-action")).toBe(false)
   })
 })
 

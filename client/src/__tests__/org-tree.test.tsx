@@ -141,3 +141,47 @@ describe("OrgTreeList 分组折叠", () => {
     expect(containerRow?.querySelector('[data-testid="container-badge"]')?.textContent).toBe("容器")
   })
 })
+
+// ── UI-1 ③-9：通讯录搜索（保留层级 + 强制展开命中祖先 + 空态） ─────────
+
+function renderWithSearch(query: string): HTMLDivElement {
+  host = document.createElement("div")
+  document.body.appendChild(host)
+  root = createRoot(host)
+  act(() => {
+    root?.render(
+      <OrgTreeList
+        rows={foldTree(roster)}
+        expandedIds={[]}
+        selectedId={null}
+        onSelect={() => {}}
+        onToggle={() => {}}
+        query={query}
+        onQueryChange={() => {}}
+      />,
+    )
+  })
+  return host
+}
+
+describe("OrgTreeList 搜索（UI-1 ③-9）", () => {
+  it("空查询：不渲染搜索框时不过滤；给出 onQueryChange 时渲染搜索框", () => {
+    const el = renderWithSearch("")
+    expect(el.querySelector('[data-testid="org-search"]')).not.toBeNull()
+    expect(rowIds(el)).toEqual(["root1", "container", "offline-root"])
+  })
+
+  it("命中深层子节点：保留其祖先并强制展开（搜到了必须看得见）", () => {
+    const el = renderWithSearch("online-child")
+    expect(rowIds(el)).toEqual(["root1", "online-child"])
+    expect(
+      el.querySelector('[data-testid="org-row"][data-node-id="root1"]')?.getAttribute("data-expanded"),
+    ).toBe("true")
+  })
+
+  it("无命中：给「没有匹配」空态而不是空白", () => {
+    const el = renderWithSearch("zzz")
+    expect(el.querySelector('[data-testid="org-tree-no-match"]')).not.toBeNull()
+    expect(el.querySelector('[data-testid="org-tree"]')).toBeNull()
+  })
+})
