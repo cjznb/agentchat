@@ -160,3 +160,11 @@
   opacity: 0.45;
   cursor: default;
 }
+
+/* UI-1 ①-4：禁用提交按钮与 styles.css 的全局禁用态（描边 + 灰底）对齐。
+   main.tsx 中本文件后于 styles.css 引入，同特异性的 opacity 会在此覆盖 —— 必须在此收口，
+   否则「灰底 + 0.45 透明」两重叠加，与其余禁用按钮不一致。 */
+.contact-rename-submit:disabled,
+.member-rename-submit:disabled {
+  opacity: 1;
+}

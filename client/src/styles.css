@@ -1182,3 +1182,75 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 }
 .group-danger-button:hover { color: var(--color-raised); background: var(--color-error); border-color: var(--color-error); }
 .group-danger-button:focus-visible { outline: var(--line-signal) solid var(--color-error); outline-offset: var(--space-1); }
+
+/* ══ UI-1 ① 可辨识与反馈 ══════════════════════════════════════════════════
+   （1）容器行禁用态肉眼可辨；（2）状态点图例；（3）单厂商不再逐行重复胶囊；
+   （4）禁用主按钮统一「描边 + 灰底」，不再用 jade 填充 + 透明度（像可点）。
+   约束：规则区零裸 hex（`p2-fix.test.ts` 回归锁）；勾选框不用 ::before/::after
+   （Chromium 对替换型 input 的伪元素不可靠），改用 token 渐变画横杠。 */
+
+.picker-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  margin: 0 0 var(--space-2);
+  color: var(--color-muted);
+  font: 600 var(--text-label)/1.4 var(--font-utility);
+}
+.picker-legend-title { letter-spacing: 0.08em; }
+.picker-legend-item { display: inline-flex; align-items: center; gap: var(--space-1); }
+
+/* ①-1 容器行：逐子项压暗 45%（行尾 hint 保持清晰可见），勾选框换「横杠」图形。
+   必须经 `> .picker-head` 限定到**本行自身**：容器行的子节点渲染在自己的 `<li>` 里且是
+   容器 `<li>` 的后代，若用后代选择器会把「会话子节点」一并压暗/禁用外观（实测截图可见）。 */
+.picker-row[data-container="true"] > .picker-head .picker-icon,
+.picker-row[data-container="true"] > .picker-head .picker-name,
+.picker-row[data-container="true"] > .picker-head .picker-check,
+.picker-row[data-container="true"] > .picker-head .picker-meta > *:not(.picker-hint) { opacity: 0.45; }
+.picker-row[data-container="true"] > .picker-head .picker-label { cursor: not-allowed; }
+.picker-row[data-container="true"] > .picker-head .picker-check {
+  appearance: none;
+  width: 1.125rem;
+  height: 1.125rem;
+  border: var(--line-thin) solid var(--color-hairline-strong);
+  border-radius: var(--radius-small);
+  background-color: color-mix(in srgb, var(--color-muted) 14%, var(--color-raised));
+  background-image: linear-gradient(var(--color-muted), var(--color-muted));
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 0.6rem var(--line-thin);
+  cursor: not-allowed;
+}
+.picker-hint {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border: var(--line-thin) dashed var(--color-hairline-strong);
+  border-radius: var(--radius-pill);
+  color: var(--color-muted);
+  font: 600 var(--text-label)/1.6 var(--font-utility);
+  white-space: nowrap;
+}
+/* hint 可能把 meta 撑宽 → 允许换行而不是横向溢出（层1 扫描零容忍 X 溢出）。 */
+.picker-meta { flex-wrap: wrap; min-width: 0; }
+
+/* ①-4 禁用主按钮统一态（后置 + 更高特异性，覆盖各入口的 jade 填充）。
+   `.card-choice` 有意排除：它是选项 chip，选中态需保持可辨识（见下方单独规则）。 */
+.member-add-confirm:disabled,
+.group-submit:disabled,
+.composer-send:disabled,
+.card-button:disabled,
+.card-custom-send:disabled,
+.settings-action:disabled,
+.settings-danger:disabled,
+.group-add-button:disabled,
+.contact-action:disabled,
+.contact-rename-submit:disabled,
+.member-rename-submit:disabled {
+  border: var(--line-thin) solid var(--color-hairline);
+  color: var(--color-muted);
+  background: color-mix(in srgb, var(--color-muted) 12%, var(--color-raised));
+  opacity: 1;
+  cursor: not-allowed;
+}
+.card-choice:disabled { cursor: not-allowed; }
