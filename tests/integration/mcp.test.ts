@@ -1206,3 +1206,53 @@ describe("P4 工具可发现性（instructions／description／is_member／错�
     }
   })
 })
+
+/** P6 消息紧急度（urgency）：MCP 入参广告 + 落 `meta.urgency` + `message_status` 体现 + 非法值被拒。 */
+describe("P6 紧急度（urgency）端到端", () => {
+  it("advertises urgency on send/shout/ask, persists only low/urgent, and shows it in message_status", async () => {
+    const actor = makeAgent("p6-mcp-actor")
+    const peer = makeAgent("p6-mcp-peer")
+    const client = await connect(actor.id)
+    try {
+      // ① schema 广告：三个可带紧急度的工具都能在 tools/list 看到 urgency（DSH 只从这里读参数语义）。
+      const { tools } = await client.listTools()
+      for (const name of ["send", "shout", "ask"] as const) {
+        const properties = (tools.find((tool) => tool.name === name)?.inputSchema.properties ??
+          {}) as Record<string, unknown>
+        expect({ name, advertised: "urgency" in properties }).toEqual({ name, advertised: true })
+      }
+
+      // ② 落库：urgent/low 写 meta.urgency；缺省与显式 normal 都不写。
+      const readRaw = (result: unknown): { message: { id: string; meta?: Record<string, unknown> } } =>
+        JSON.parse(textOf(result)) as { message: { id: string; meta?: Record<string, unknown> } }
+      const urgent = readRaw(await callTool(client, "send", { to: peer.id, body: "紧急", urgency: "urgent" }))
+      expect(urgent.message.meta?.["urgency"]).toBe("urgent")
+      const low = readRaw(await callTool(client, "send", { to: peer.id, body: "不急", urgency: "low" }))
+      expect(low.message.meta?.["urgency"]).toBe("low")
+      const normal = readRaw(await callTool(client, "send", { to: peer.id, body: "普通" }))
+      expect(normal.message.meta?.["urgency"]).toBeUndefined()
+      const explicit = readRaw(
+        await callTool(client, "send", { to: peer.id, body: "显式普通", urgency: "normal" }),
+      )
+      expect(explicit.message.meta?.["urgency"]).toBeUndefined()
+
+      // ③ message_status 体现紧急度（缺省归一为 normal），供矩阵断言与排障区分三档。
+      const status = await callTool(client, "message_status", {
+        ids: [urgent.message.id, low.message.id, normal.message.id],
+      })
+      expect(toolFailed(status)).toBe(false)
+      const entries = MCP_TOOL_OUTPUTS.message_status.parse(JSON.parse(textOf(status)))
+      const byId = new Map(entries.map((entry) => [entry.id, entry.urgency]))
+      expect(byId.get(urgent.message.id)).toBe("urgent")
+      expect(byId.get(low.message.id)).toBe("low")
+      expect(byId.get(normal.message.id)).toBe("normal")
+
+      // ④ 非法档位是**入参错误**，不是静默归一。
+      const bogus = await callTool(client, "send", { to: peer.id, body: "x", urgency: "bogus" })
+      expect(toolFailed(bogus)).toBe(true)
+      expect(textOf(bogus)).toContain("Input validation error")
+    } finally {
+      await client.close()
+    }
+  })
+})

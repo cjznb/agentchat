@@ -12,6 +12,7 @@
  * - 答复编排（`respondAsk`）在 `core/respond.ts`（本文件 ≤250 纯行红线拆分，controller 授权；
  *   `core/permissions` 一并 re-export）。
  */
+import { urgencyMeta, type MessageUrgency } from "../../shared/contracts"
 import type { Db } from "../db"
 import { AgentNotFoundError, getAgent } from "../store/agents"
 import { getApproval, insertAsk, type Approval } from "../store/approvals"
@@ -131,6 +132,11 @@ export interface AskInput {
   readonly allowCustom?: boolean
   /** 给出则阻塞至答复/超时（`awaitAsk`）。 */
   readonly wait?: WaitOptions
+  /**
+   * 紧急度（P6）：**只影响卡消息的投递**（落卡 `meta.urgency`），不影响答复链路
+   * （答复走 `respondAsk`，与紧急度无关）。缺省/`normal` 不写 meta。
+   */
+  readonly urgency?: MessageUrgency
 }
 
 /** 建卡结果（无 wait）。 */
@@ -207,6 +213,8 @@ export interface AskCardParams {
   readonly options: readonly string[]
   readonly allowCustom: boolean
   readonly conversation: Conversation
+  /** 紧急度（P6）：浅合并进卡 `meta`（`normal`/缺省不写）。 */
+  readonly urgency?: MessageUrgency
 }
 
 /** 建一张批示卡：插单 + 卡消息（幂等键按单）+ approval 事件（`ask` 与 `askGroup` 共用原语）。 */
@@ -224,12 +232,14 @@ export function createAskCard(db: Db, params: AskCardParams): Approval {
     conversationId: params.conversation.id,
     fromAgentId: params.from,
     body: cardBody(params.question, params.options, params.allowCustom),
+    // P6：卡 `meta` 浅合并 urgency —— 既有 askId/kind/question/options/allowCustom 一字不动。
     meta: {
       askId: stored.id,
       kind: "ask",
       question: params.question,
       options: [...params.options],
       allowCustom: params.allowCustom,
+      ...(urgencyMeta(params.urgency) ?? {}),
     },
     idempotencyKey: `ask-card:${stored.id}`,
   })
@@ -261,6 +271,7 @@ export function ask(db: Db, from: string, input: AskInput): AskResult | Promise<
     options: input.options,
     allowCustom,
     conversation,
+    ...(input.urgency === undefined ? {} : { urgency: input.urgency }),
   })
   if (input.wait === undefined) return { ask: stored }
   return awaitAsk(db, from, stored, conversation.id, input.wait)

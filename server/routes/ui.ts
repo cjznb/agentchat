@@ -65,8 +65,14 @@ const ensureDmBodySchema = z.object({ to: z.string().min(1) })
 function executeApproved(db: Db, approval: Approval): void {
   switch (approval.action) {
     case "shout": {
-      const { body } = shoutPayloadSchema.parse(approval.payload)
-      sendMessage(db, { from: approval.requesterAgentId, to: "*", body })
+      // P6：urgency 随审批 payload 保留（**历史单缺该字段 → undefined = normal**，不报错）。
+      const { body, urgency } = shoutPayloadSchema.parse(approval.payload)
+      sendMessage(db, {
+        from: approval.requesterAgentId,
+        to: "*",
+        body,
+        ...(urgency === undefined ? {} : { urgency }),
+      })
       return
     }
     case "group_create": {

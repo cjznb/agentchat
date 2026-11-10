@@ -117,10 +117,17 @@ function renderShout(
 
 export function runShout(ctx: ToolContext, input: McpToolInput<"shout">): Promise<unknown> | unknown {
   const from = requireIdentity(ctx)
+  // P6：urgency 是 additive 第 5 参；无 wait 时第 4 参显式 undefined（审批 payload 亦带 urgency）。
   const result =
     input.wait === undefined
-      ? shout(ctx.db, from, input.body)
-      : shout(ctx.db, from, input.body, { until: input.wait.until, timeoutMs: input.wait.timeoutMs })
+      ? shout(ctx.db, from, input.body, undefined, input.urgency)
+      : shout(
+          ctx.db,
+          from,
+          input.body,
+          { until: input.wait.until, timeoutMs: input.wait.timeoutMs },
+          input.urgency,
+        )
   return result instanceof Promise
     ? result.then((resolved) => renderShout(ctx, from, resolved))
     : renderShout(ctx, from, result)

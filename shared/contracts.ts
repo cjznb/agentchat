@@ -26,6 +26,15 @@ export type WaitUntil = (typeof WAIT_UNTIL)[number]
 export const RECEIPT_STAGES = ["queued", "sending", "delivered", "read"] as const
 export type ReceiptStage = (typeof RECEIPT_STAGES)[number]
 
+/**
+ * 消息紧急度（P6）：三档，缺省 `normal`。
+ * 落库位置 = `messages.meta.urgency`（**不加 DB 列**，避免迁移）；仅 `low`/`urgent` 写入，
+ * `normal`/未传不写 —— 未带 urgency 的消息 meta 与既有 golden 逐字节一致。
+ * Hub 只**携带**档位（投递排序/插队由适配器实现，见 `docs/urgency.md`）。
+ */
+export const MESSAGE_URGENCIES = ["low", "normal", "urgent"] as const
+export type MessageUrgency = (typeof MESSAGE_URGENCIES)[number]
+
 /** WebSocket 事件封套 type（spec §Global Constraints） */
 export const WS_EVENT_TYPES = ["message", "receipt", "agent", "approval"] as const
 export type WsEventType = (typeof WS_EVENT_TYPES)[number]
@@ -53,8 +62,26 @@ export const agentStatusSchema = z.enum(AGENT_STATUS)
 export const agentKindSchema = z.enum(AGENT_KIND)
 export const waitUntilSchema = z.enum(WAIT_UNTIL)
 export const receiptStageSchema = z.enum(RECEIPT_STAGES)
+export const messageUrgencySchema = z.enum(MESSAGE_URGENCIES)
 export const wsEventTypeSchema = z.enum(WS_EVENT_TYPES)
 export const mcpToolNameSchema = z.enum(MCP_TOOLS)
+
+/**
+ * 紧急度**读口径单源**（P6）：`meta.urgency` 非法或缺失 → `normal`。
+ * `/internal/wake`、`message_status` 与将来的适配器一律调它，禁止各处再写 `meta.urgency ?? "normal"`。
+ */
+export function urgencyOf(meta: unknown): MessageUrgency {
+  if (typeof meta !== "object" || meta === null) return "normal"
+  const parsed = messageUrgencySchema.safeParse((meta as Record<string, unknown>)["urgency"])
+  return parsed.success ? parsed.data : "normal"
+}
+
+/** 紧急度**写口径单源**（P6）：仅 `low`/`urgent` 需落 `meta.urgency`（`normal`/缺省 → 不写，省体积且 golden 不变）。 */
+export function urgencyMeta(
+  urgency: MessageUrgency | undefined,
+): { readonly urgency: MessageUrgency } | undefined {
+  return urgency === undefined || urgency === "normal" ? undefined : { urgency }
+}
 
 // ── WS 事件封套（spec §Global：`{type, seq, payload}`，连接参数 `?since=<seq>`） ──
 // payload 的具体形状由各事件任务在自身模块内细化，契约层只锁定信封。
@@ -284,6 +311,7 @@ const mcpSendInput = z.object({
   mentions: z.array(z.string()).optional().describe('群内点名（仅群会话生效）：成员名字 / id 前 8 位 / "*"=全体；DM 忽略。'),
   wait: mcpWaitSchema.optional().describe("给了就阻塞等对方：等新消息/等回执/任一（见内部 until/timeoutMs/scope）。"),
   idempotencyKey: z.string().optional().describe("幂等键：同 (发送方, key) 重发返回同一条消息，不新增行、不重复唤醒。"),
+  urgency: messageUrgencySchema.optional().describe("紧急度：low=闲时才递 / normal=缺省（现状） / urgent=适配器插队到下一个 step 边界（不抢占正在执行的工具）。"),
 })
 
 const mcpInboxInput = z.object({
@@ -345,6 +373,7 @@ const mcpGroupInput = z
 const mcpShoutInput = z.object({
   body: z.string().describe("广播正文；须有信息增量（禁纯回执/寒暄/复读），全员（非容器）各收一份。"),
   wait: mcpWaitSchema.optional().describe("给了就阻塞等回执/新消息；root 节点发起还需 human 审批。"),
+  urgency: messageUrgencySchema.optional().describe("紧急度（同 send）：urgent 会随审批 payload 保留，批准后仍按 urgent 投递。"),
 })
 
 const mcpStatusInput = z.object({
@@ -364,6 +393,7 @@ const mcpAskInput = z.object({
   /** 结构化提及（spec §3.1）：`to` 为群会话 id 时必填（必填校验在 Task 4 服务端）。 */
   mentions: z.array(z.string()).optional().describe("群问必填：@ 群成员（名字 / id 前 8 位），解析失败报 mention_not_found。"),
   wait: mcpWaitSchema.optional().describe("阻塞等答复；群问用 scope=all（缺省，等全体）/any（任一先回）。"),
+  urgency: messageUrgencySchema.optional().describe("紧急度：只影响**卡消息的投递**（落卡 meta），不影响答复链路。"),
 })
 
 /** `respond_ask` 入参（spec §9/§17：`choice` ∈ options 或 `text` 自由答复，二者择一）。 */
@@ -563,7 +593,12 @@ export const MCP_TOOL_OUTPUTS = {
   shout: mcpShoutOutput,
   status: z.object({ id: z.string(), status_text: z.string().nullable() }),
   message_status: z.array(
-    z.object({ id: z.string(), receipts: z.array(mcpReceiptOutput) }),
+    z.object({
+      id: z.string(),
+      /** P6 additive：该消息的紧急度（缺省 `normal`；便于测试与排障区分三档）。 */
+      urgency: messageUrgencySchema.optional(),
+      receipts: z.array(mcpReceiptOutput),
+    }),
   ),
   ask: mcpAskToolOutput,
   respond_ask: mcpAskOutput,

@@ -22,7 +22,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 import { Hono } from "hono"
 import { z } from "zod"
-import type { ReceiptStage } from "../../shared/contracts"
+import { urgencyOf, type ReceiptStage } from "../../shared/contracts"
 import { adapterFor, adapterStateSchema, ensurePullAdapter, type AdapterState } from "../adapters/types"
 import { canTransition, emitAgentTree, retire } from "../core/agents"
 import { receiptState } from "../core/messaging"
@@ -248,7 +248,15 @@ export function internalRoutes(db?: Db, options?: InternalRoutesOptions): Hono {
       if (adapterFor(agent.vendor) === undefined) ensurePullAdapter(agent.vendor)
       const backlog = claimWakeBacklog(database, parsed.data)
       for (const conversationId of backlog.conversations) publishReceipt(database, conversationId)
-      return c.json({ messages: backlog.messages, receipts: backlog.receipts })
+      // P6 additive：每条消息带 `urgency`（读口径单源 `urgencyOf`；缺省 normal）。
+      // 既有字段与 `meta` 形状不动 —— 老适配器忽略该字段即可。
+      return c.json({
+        messages: backlog.messages.map((message) => ({
+          ...message,
+          urgency: urgencyOf(message.meta),
+        })),
+        receipts: backlog.receipts,
+      })
     })
     .post("/internal/result", async (c) => {
       const parsed = resultBodySchema.safeParse(await c.req.json().catch(() => undefined))

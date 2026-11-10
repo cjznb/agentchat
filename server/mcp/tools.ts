@@ -8,8 +8,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import {
   MCP_TOOLS,
   MCP_TOOL_INPUTS,
+  urgencyOf,
   type McpToolInput,
   type McpToolName,
+  type MessageUrgency,
 } from "../../shared/contracts"
 import { registerChild, registerLogical, registerRoot, RegistrationError } from "../core/agents"
 import { ack, inbox, receiptState, sendMessage, unreadFor } from "../core/messaging"
@@ -120,6 +122,8 @@ function runSend(ctx: ToolContext, input: McpToolInput<"send">): unknown {
     body: input.body,
     ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
     ...(input.mentions === undefined ? {} : { mentions: input.mentions }),
+    // P6：紧急度随消息落 `meta.urgency`（缺省/`normal` 由 core 侧不写）。
+    ...(input.urgency === undefined ? {} : { urgency: input.urgency }),
   }
   if (input.wait === undefined) return sendView(ctx.db, sendMessage(ctx.db, base), from)
   return sendMessage(ctx.db, {
@@ -177,7 +181,7 @@ function runStatus(ctx: ToolContext, input: McpToolInput<"status">): unknown {
 
 function runMessageStatus(ctx: ToolContext, input: McpToolInput<"message_status">): unknown {
   requireIdentity(ctx)
-  const results: { id: string; receipts: { agentId: string; stage: string }[] }[] = []
+  const results: { id: string; urgency: MessageUrgency; receipts: { agentId: string; stage: string }[] }[] = []
   for (const id of input.ids) {
     const message = getById(ctx.db, id)
     const conversation =
@@ -185,6 +189,8 @@ function runMessageStatus(ctx: ToolContext, input: McpToolInput<"message_status"
     if (message === undefined || conversation === undefined) continue
     results.push({
       id,
+      // P6：紧急度按读口径单源解析（非法/缺失 → normal），便于测试与排障区分三档。
+      urgency: urgencyOf(message.meta),
       // 回执收件人集合 = 该消息 wake_jobs 行（spec §14.2 唯一来源，不再全员枚举）。
       receipts: wakeRecipients(ctx.db, message.seq).map((agentId) => ({
         agentId,

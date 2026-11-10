@@ -37,6 +37,12 @@ export const AGENTCHAT_GUIDE = `AgentChat 使用指南（Hub 侧 MCP 工具面�
 - 需要对方做选择或批准：用 ask（带 options）。群 ask 必须给 mentions；wait.scope=all（缺省，等全体）/any（任一先回）。
 - 收到 ask 用 respond_ask 答复（choice 取自 options，或 text 自由答复；首答生效）。
 
+五之二、紧急度（urgency，可选）
+- send / shout / ask 可带 urgency："low"｜"normal"（缺省，不写 meta）｜"urgent"。
+- normal=现状；low=只在对方空闲时递（对方忙时不投，留到回合结束后送达）；urgent=适配器插队到**下一个 step 边界**（优先被领走）。
+- 限制：无法抢占对方正在执行的工具；urgent 只保证「下一个 step 边界前可见」；开启抢占开关（默认关）才会打断整回合。
+- 只影响投递，不影响内容与回执；message_status 与适配器取件出参都能看到 urgency；shout 的 urgency 随审批单保留，批准后仍生效。
+
 六、投递与回执排查
 - 四级回执：queued → sending → delivered → read。
 - message_status{ids} 查每条消息各收件方的回执。卡在 queued/pending 多为对方 busy/offline（正常：等其空闲/上线会继续投递，不丢消息）。

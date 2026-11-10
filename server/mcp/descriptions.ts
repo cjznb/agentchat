@@ -28,10 +28,10 @@ export const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   ].join("\n"),
   send: [
     "作用：以当前身份给节点(agent id)或群会话(会话 id)发一条消息，可 wait 阻塞等回信。每条消息须有信息增量，禁纯回执/寒暄与复读。",
-    "何时用：要对方做事/回话时；答复别人的消息也用 send，回给发送者 id（DM）或群会话 id（群）。",
+    "何时用：要对方做事/回话时；答复别人的消息也用 send，回给发送者 id（DM）或群会话 id（群）；急事加 urgency:\"urgent\"。",
     '何时不用：广播全员用 shout（send 的 to 不接受 "*"，会报 use_shout_tool）；只读消息用 inbox；答复 ask 单用 respond_ask。',
-    "邻接区别：send=发+可选等；inbox=收；ack=仅标已读不回信；message_status=查回执。",
-    '示例：{"to":"<agent id 或群 id>","body":"X 已完成，下一步 Y","mentions":["<群成员名>"],"wait":{"until":"either","timeoutMs":30000}}',
+    "邻接区别：send=发+可选等；inbox=收；ack=仅标已读不回信；message_status=查回执与紧急度。",
+    '示例：{"to":"<agent id 或群 id>","body":"X 已完成，下一步 Y","mentions":["<群成员名>"],"wait":{"until":"either","timeoutMs":30000},"urgency":"urgent"}',
     "常见错误：" + DISCIPLINE + "；not_participant（不在群里，先 group{op:add}）；recipient_not_found（先用 roster 取 id）；identity_required（先 register）；container_not_chat_target（容器不是聊天对象）。",
   ].join("\n"),
   inbox: [
@@ -76,10 +76,10 @@ export const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   ].join("\n"),
   shout: [
     "作用：全员广播（广播会话 key=\"shout\"，所有非容器节点各收一份）；root 节点发起需人工审批。",
-    "何时用：通告所有人都要知道的约定/变更（排期、规范变更等）。",
+    "何时用：通告所有人都要知道的约定/变更（排期、规范变更等）；急事加 urgency:\"urgent\"（随审批 payload 保留，批准后仍按 urgent 投递）。",
     "何时不用：只给某人或某个群用 send；群内 @ 多人用 send+mentions，不要拿 shout 代替定向消息。",
     "邻接区别：shout=无目标广播；send=定向到 agent/群；两者都返回 receipts。",
-    '示例：{"body":"全体注意：今天 18:00 前提交结果"}',
+    '示例：{"body":"全体注意：今天 18:00 前提交结果","urgency":"urgent"}',
     "常见错误：同样须有信息增量、禁纯回执/寒暄与复读；子节点调用报 Forbidden；返回 approval 表示尚未投递（等 human 批准）；容器节点不会收到广播。",
   ].join("\n"),
   status: [
@@ -94,13 +94,13 @@ export const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "作用：按消息 id 查每个收件方的四级回执 queued→sending→delivered→read，判断“对方到底收到没”。",
     "何时用：send 后迟迟没有回复、怀疑没投递、交付前核对时。",
     "何时不用：想看消息正文用 inbox/conversation；想催办就用 send 发一条有新信息的消息。",
-    "邻接区别：message_status=只读回执；inbox=读正文；status=自己的状态文本。",
+    "邻接区别：message_status=只读回执与紧急度；inbox=读正文；status=自己的状态文本。",
     '示例：{"ids":["a1b2c3","d4e5f6"]}',
     "常见错误：对端 busy/offline 时停在 pending/queued 属正常（不是丢失，等其空闲/上线会继续投递）；只对自己发出的消息有意义；identity_required（先 register）。",
   ].join("\n"),
   ask: [
     "作用：向 human 或某个 agent 发“带选项的请求批示”，可 wait 阻塞到答复；群问要带 mentions。",
-    "何时用：需要对方选择/批准才能继续，且必须拿到答复时（如“用 A 还是 B”）。",
+    "何时用：需要对方选择/批准才能继续，且必须拿到答复时（如“用 A 还是 B”）；急卡可加 urgency 加快投递（不影响答复链路）。",
     "何时不用：只是告知进度用 send；不需要答复就别开 ask 单（会占一张审批卡）。",
     "邻接区别：ask=结构化提问（有 options、有答复卡）；send=自由文本；respond_ask=答复别人的 ask。",
     '示例：{"to":"human","question":"采用 A 还是 B？","options":["A","B"],"allow_custom":true,"wait":{"until":"either","timeoutMs":285000}}',

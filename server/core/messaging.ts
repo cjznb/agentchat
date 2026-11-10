@@ -14,7 +14,11 @@
  *   （`container_cannot_send`）、不可作 DM 收件方（`container_not_chat_target`，既有）。
  *   移除/解散与系统消息/`/internal/*` 一律不受这些守卫限制。
  */
-import type { ReceiptStage } from "../../shared/contracts"
+import {
+  urgencyMeta,
+  type MessageUrgency,
+  type ReceiptStage,
+} from "../../shared/contracts"
 import { resolveMentions, type MentionTarget, type MentionsEcho } from "../../shared/mentions"
 import type { Db } from "../db"
 import {
@@ -322,6 +326,8 @@ export interface SendMessageInput {
   readonly mentions?: string[] | undefined
   /** 阻塞等待（spec §6.2）；给出则 `sendMessage` 返回 Promise 并带 `reply`。 */
   readonly wait?: WaitOptions
+  /** 紧急度（P6）：落 `messages.meta.urgency`；缺省/`normal` 不写（Hub 只携带，排序由适配器做）。 */
+  readonly urgency?: MessageUrgency
 }
 
 /** 单收件方回执（四级锁枚举来自 shared/contracts，禁止另立）。 */
@@ -440,11 +446,14 @@ function deliver(db: Db, input: SendMessageInput): SendMessageResult {
     mentions: input.mentions,
     recipientIds,
   })
+  // P6：`meta` = 既有 route.meta（mentions/mentionScope）**浅合并** urgency；`normal`/缺省不写
+  // —— 未带 urgency 的消息 meta 与既有 golden 逐字节一致；两处都为空则不产生 `meta` 字段。
+  const meta = { ...(route.meta ?? {}), ...(urgencyMeta(input.urgency) ?? {}) }
   const message = send(db, {
     conversationId: conversation.id,
     fromAgentId: input.from,
     body: input.body,
-    ...(route.meta === undefined ? {} : { meta: route.meta }),
+    ...(Object.keys(meta).length === 0 ? {} : { meta }),
     ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
   })
   publishMessage(db, conversation.id)
@@ -512,29 +521,45 @@ async function awaitShoutApproval(
   }
 }
 
-/** 喊话（`to='*'`）：写入唯一广播会话，全部节点收件箱可见（决议 3）；入口经 `gate`（Task 7）。 */
+/**
+ * 喊话（`to='*'`）：写入唯一广播会话，全部节点收件箱可见（决议 3）；入口经 `gate`（Task 7）。
+ * `urgency`（P6）是**additive 第 5 参**：无 wait 时第 4 参传 `undefined` 显式占位。
+ * 闸门路径把 urgency 一并写进审批 payload（`shoutPayloadSchema`），批准后仍按原档投递。
+ */
 export function shout(db: Db, from: string, body: string): Gated<SendMessageResult>
 export function shout(
   db: Db,
   from: string,
   body: string,
+  wait: undefined,
+  urgency?: MessageUrgency,
+): Gated<SendMessageResult>
+export function shout(
+  db: Db,
+  from: string,
+  body: string,
   wait: WaitOptions,
+  urgency?: MessageUrgency,
 ): Promise<ShoutWaitResult | ShoutApprovalWaitResult>
 export function shout(
   db: Db,
   from: string,
   body: string,
   wait?: WaitOptions,
+  urgency?: MessageUrgency,
 ): Gated<SendMessageResult> | Promise<ShoutWaitResult | ShoutApprovalWaitResult> {
+  // 审批 payload 带 urgency（缺省/`normal` 不写）——历史单缺该字段时解析为正常值，不会崩。
+  const payload = { body, ...(urgencyMeta(urgency) ?? {}) }
+  const delivery = { from, to: "*", body, ...(urgency === undefined ? {} : { urgency }) }
   if (wait === undefined) {
-    return gate(db, "shout", from, { body }, () => sendMessage(db, { from, to: "*", body }))
+    return gate(db, "shout", from, payload, () => sendMessage(db, delivery))
   }
   const bounded: WaitOptions = {
     ...(wait.until === undefined ? {} : { until: wait.until }),
     ...(wait.timeoutMs === undefined ? {} : { timeoutMs: wait.timeoutMs }),
   }
-  const outcome = gate(db, "shout", from, { body }, () =>
-    sendMessage(db, { from, to: "*", body, wait: bounded }),
+  const outcome = gate(db, "shout", from, payload, () =>
+    sendMessage(db, { ...delivery, wait: bounded }),
   )
   return "approved" in outcome
     ? outcome.approved

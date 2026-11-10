@@ -15,6 +15,7 @@
  * - 可提及集合口径 = `recipientsOf`（容器恒排除、不含发送者，与 T3 唤醒/回执同一单点，
  *   不另写一套容器排除逻辑）；解析只经 `resolveMentions`（Task 1 单点）。
  */
+import type { MessageUrgency } from "../../shared/contracts"
 import { resolveMentions, type MentionTarget } from "../../shared/mentions"
 import type { Db } from "../db"
 import {
@@ -54,6 +55,8 @@ export interface GroupAskInput {
   readonly mentions?: readonly string[] | undefined
   /** 给出则按 `scope` 阻塞聚合等待；缺省立即返回 `asks`（异步形态）。 */
   readonly wait?: GroupWaitOptions | undefined
+  /** 紧急度（P6）：只影响每张**卡消息的投递**（落卡 meta），不影响答复链路。 */
+  readonly urgency?: MessageUrgency
 }
 
 /** 建卡结果（不传 `wait`）：`asks` = 一目标一卡的单据数组。 */
@@ -237,6 +240,7 @@ export function askGroup(
       options: input.options,
       allowCustom,
       conversation,
+      ...(input.urgency === undefined ? {} : { urgency: input.urgency }),
     }),
   )
   if (input.wait === undefined) return { asks }

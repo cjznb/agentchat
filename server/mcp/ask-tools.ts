@@ -33,6 +33,8 @@ export function runAsk(ctx: ToolContext, input: McpToolInput<"ask">): Promise<un
     question: input.question,
     options: input.options,
     ...(input.allow_custom === undefined ? {} : { allowCustom: input.allow_custom }),
+    // P6：紧急度只影响卡消息投递（落卡 meta），不影响答复链路。
+    ...(input.urgency === undefined ? {} : { urgency: input.urgency }),
   }
   if (groupConversation(ctx.db, input.to) !== undefined) {
     const groupBase = {

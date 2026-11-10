@@ -14,7 +14,7 @@
  * - 时钟可注入（`now` 参数），测试不 `sleep(24h)`。
  */
 import { z } from "zod"
-import { approvalSnapshotSchema } from "../../shared/contracts"
+import { approvalSnapshotSchema, messageUrgencySchema } from "../../shared/contracts"
 import type { Db } from "../db"
 import {
   AgentNotFoundError,
@@ -129,7 +129,11 @@ const ACTION_LABEL: Record<ApprovalActionValue, string> = {
  * （`routes/ui.ts.executeApproved`）共用同一份定义 —— 杜绝"入口/store 宽、批准执行严"
  * 的错位（如 `createGroup(name:"")` 立单后批准时才在 zod `.parse` 炸掉）。
  */
-export const shoutPayloadSchema = z.object({ body: z.string() })
+export const shoutPayloadSchema = z.object({
+  body: z.string(),
+  /** P6 additive：批准后仍按原档投递；**历史单缺该字段 → 缺省 normal**（不报错）。 */
+  urgency: messageUrgencySchema.optional(),
+})
 export const groupCreatePayloadSchema = z.object({
   name: z.string().min(1),
   memberIds: z.array(z.string()).optional(),
