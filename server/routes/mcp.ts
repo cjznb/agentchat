@@ -1,5 +1,5 @@
 /**
- * MCP 端点（spec §9）：以 streamable-HTTP 暴露十个工具。
+ * MCP 端点（spec §9）：以 streamable-HTTP 暴露十二个工具。
  *
  * - 传输：`WebStandardStreamableHTTPServerTransport`（Hono 原生 Web Request/Response），
  *   有状态会话 —— 每会话一个 `{server, transport, ctx}`，存模块级 `Map<sessionId, ...>`；
@@ -19,6 +19,7 @@ import { config } from "../config"
 import { isContainer } from "../core/messaging"
 import { openDb, type Db } from "../db"
 import { registerTools } from "../mcp/tools"
+import { AGENTCHAT_GUIDE } from "../mcp/guide"
 import type { ToolContext } from "../mcp/context"
 import { getAgent, getAgentByTaskRef } from "../store/agents"
 import { ensureHubToken } from "./internal"
@@ -149,7 +150,11 @@ export function mcpRoutes(db?: Db, options?: McpRoutesOptions): Hono {
       if (c.req.method !== "POST") return c.json({ ok: false, error: "missing_session" }, 400)
       const ctx = initializeContext(c, database, home, hint)
       if ("error" in ctx) return c.json({ ok: false, error: ctx.error }, 400)
-      const server = new McpServer({ name: "agentchat-hub", version: "0.1.0" })
+      // P4：`instructions` 是 DSH 唯一会注入系统提示的全局说明通道（tool title/annotations 会被丢弃）。
+      const server = new McpServer(
+        { name: "agentchat-hub", version: "0.1.0" },
+        { instructions: AGENTCHAT_GUIDE },
+      )
       registerTools(server, ctx)
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),

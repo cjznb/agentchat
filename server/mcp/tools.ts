@@ -21,6 +21,9 @@ import { getById, type Message } from "../store/messages"
 import { errorResult, McpToolError, requireIdentity, sendView, toolResult, type ToolContext } from "./context"
 import { runAsk, runRespondAsk } from "./ask-tools"
 import { runConversation, runGroup, runRoster, runShout } from "./read-tools"
+// P4：12 条 description 与使用指南各自成模块（单文件 ≤250 纯行的硬约束；文本量大且与逻辑无关）。
+import { TOOL_DESCRIPTIONS } from "./descriptions"
+import { AGENTCHAT_GUIDE } from "./guide"
 
 // ── register ────────────────────────────────────────────────────────
 
@@ -100,6 +103,9 @@ function runRegister(ctx: ToolContext, input: McpToolInput<"register">): unknown
     agent: registered.agent,
     unread: unreadFor(ctx.db, registered.agent.id),
     ...(registered.joinToken === undefined ? {} : { join_token: registered.joinToken }),
+    // P4 additive：把《使用指南》随注册出参回一份 —— 原生工具面（只从 tools/list 生成提示）
+    // 不消费 server `instructions`，这条路径是它们唯一的全局说明书来源。
+    guide: AGENTCHAT_GUIDE,
   }
 }
 
@@ -190,25 +196,6 @@ function runMessageStatus(ctx: ToolContext, input: McpToolInput<"message_status"
 }
 
 // ── 注册与分发 ──────────────────────────────────────────────────────
-
-const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
-  register: "注册或认领节点（根 / 子 / 逻辑节点）",
-  send:
-    "向节点或会话发送消息，可阻塞等待回信。每条消息须有信息增量，禁纯回执/寒暄与复读，确认并入下一步；对 agent 的回复只发一次，别向会话重发同样内容（没有观众）；回人类时别复述工具输出。",
-  inbox: "读取收件箱，可阻塞等待新消息",
-  ack: "将消息标记为已读",
-  roster: "读取层级树与联系人卡",
-  conversation: "读取会话历史分页",
-  group:
-    "创建群聊 / 拉人 / 列出群聊。op 必填：create=建群（需 name，member_ids 可选指定初始成员）；add=拉人（需目标群 group 与成员 member）；list=列群（出参含 member_cards）。",
-  shout:
-    "全员喊话（根节点，需审批）。每条消息须有信息增量，禁纯回执/寒暄与复读，确认并入下一步；对 agent 的回复只发一次，别向会话重发同样内容（没有观众）；回人类时别复述工具输出。",
-  status: "更新自身状态文本",
-  message_status: "查询消息各收件方回执",
-  ask:
-    "向用户或节点发起带选项的请求批示，可阻塞等待答复。群问时 mentions 必填（spec §3.1，to 为群会话 id）；wait.scope 缺省 all（阻塞范围默认全体会话）。",
-  respond_ask: "答复一条请求批示（选项或自由文本，首答生效）",
-}
 
 function runTool(name: McpToolName, args: unknown, ctx: ToolContext): Promise<unknown> | unknown {
   switch (name) {

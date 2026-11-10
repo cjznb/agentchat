@@ -1062,3 +1062,147 @@ describe("会话 TTL 淘汰（Important #2）", () => {
     expect(await probeSession(second)).toBe(404)
   })
 })
+
+/**
+ * P4 工具可发现性：DSH 只消费 (a) tool description (b) 参数 JSON Schema 的 description
+ * (c) server `instructions`，tool `title` 与 annotation hint 会被丢弃 —— 故这三处必须有内容。
+ */
+describe("P4 工具可发现性（instructions／description／is_member／错误下一步）", () => {
+  /** tools/list 广告的某工具入参 properties（unknown 入参 + 运行时收窄，避开 SDK 类型并集）。 */
+  function propertiesOf(tools: Awaited<ReturnType<Client["listTools"]>>["tools"], name: string) {
+    const schema: unknown = tools.find((tool) => tool.name === name)?.inputSchema
+    if (typeof schema !== "object" || schema === null) return {}
+    const properties: unknown = (schema as { properties?: unknown }).properties
+    return typeof properties === "object" && properties !== null
+      ? (properties as Record<string, unknown>)
+      : {}
+  }
+
+  /** 字段级 description 是否非空（用于断言"参数语义确实广告出去了"）。 */
+  function describedIn(properties: Record<string, unknown>, field: string): boolean {
+    const property: unknown = properties[field]
+    if (typeof property !== "object" || property === null) return false
+    const description: unknown = (property as { description?: unknown }).description
+    return typeof description === "string" && description.length > 0
+  }
+
+  it("injects a ≤8KB guide via instructions and advertises six-line descriptions on all twelve tools", async () => {
+    const actor = makeAgent("p4-discover-actor")
+    const client = await connect(actor.id)
+    try {
+      // ① instructions：DSH 唯一会注入系统提示的全局说明通道（tool title/annotations 会被丢弃）。
+      const guide = client.getInstructions() ?? ""
+      expect(guide.length).toBeGreaterThan(200)
+      expect(Buffer.byteLength(guide, "utf8")).toBeLessThanOrEqual(8192)
+      for (const keyword of ["register", "inbox", "send", "shout", "message_status", "容器", "R1", "R2", "identity_required"]) {
+        expect({ keyword, present: guide.includes(keyword) }).toEqual({ keyword, present: true })
+      }
+
+      // ② 12 条 description：每条 ≤6 行，且都含「何时」（何时用/何时不用）与「常见错误」。
+      const { tools } = await client.listTools()
+      expect(tools).toHaveLength(MCP_TOOLS.length)
+      for (const tool of tools) {
+        const description = tool.description ?? ""
+        expect({
+          name: tool.name,
+          hasWhen: description.includes("何时"),
+          hasCommonError: description.includes("常见错误"),
+          withinSixLines: description.split("\n").length <= 6,
+        }).toEqual({ name: tool.name, hasWhen: true, hasCommonError: true, withinSixLines: true })
+      }
+      // 反寒暄关键词（spec §15.5）：golden 用例已锁，这里按工具名再锁一次防文本重排漂移。
+      for (const name of ["send", "shout"] as const) {
+        const description = tools.find((tool) => tool.name === name)?.description ?? ""
+        expect(description).toContain("信息增量")
+        expect(description).toContain("禁纯回执")
+      }
+
+      // ③ 关键参数 description 必须随 tools/list 一起广告（agent 只能从这里读参数语义）。
+      const sendProps = propertiesOf(tools, "send")
+      const groupProps = propertiesOf(tools, "group")
+      const registerProps = propertiesOf(tools, "register")
+      const askProps = propertiesOf(tools, "ask")
+      const required: ReadonlyArray<readonly [Record<string, unknown>, string]> = [
+        [sendProps, "to"],
+        [sendProps, "mentions"],
+        [sendProps, "idempotencyKey"],
+        [groupProps, "op"],
+        [groupProps, "name"],
+        [groupProps, "member_ids"],
+        [groupProps, "group"],
+        [groupProps, "member"],
+        [registerProps, "task_ref"],
+        [registerProps, "parent_ref"],
+        [askProps, "allow_custom"],
+      ]
+      for (const [properties, field] of required) {
+        expect({ field, described: describedIn(properties, field) }).toEqual({ field, described: true })
+      }
+      // 嵌套的 wait 三个子字段（until/timeoutMs/scope）也要有 description。
+      const wait: unknown = sendProps["wait"]
+      const waitProperties =
+        typeof wait === "object" && wait !== null
+          ? (() => {
+              const nested: unknown = (wait as { properties?: unknown }).properties
+              return typeof nested === "object" && nested !== null ? (nested as Record<string, unknown>) : {}
+            })()
+          : {}
+      for (const field of ["until", "timeoutMs", "scope"]) {
+        expect({ field, described: describedIn(waitProperties, field) }).toEqual({ field, described: true })
+      }
+
+      // ④ register 出参 additive 带 guide（原生工具面不消费 instructions 时的兜底说明书）。
+      const registration = await callTool(client, "register", {
+        name: "p4-guide-node",
+        kind: "runtime",
+        vendor: "opencode",
+      })
+      expect(toolFailed(registration)).toBe(false)
+      const registered = MCP_TOOL_OUTPUTS.register.parse(JSON.parse(textOf(registration)))
+      expect(typeof registered.guide).toBe("string")
+      expect(registered.guide ?? "").toContain("register")
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("marks group{op:list} entries with is_member so an outsider can see why sending fails", async () => {
+    const human = ensureHuman(db)
+    const member = makeAgent("p4-member")
+    const outsider = makeAgent("p4-outsider")
+    const group = createGroup(db, { name: "p4-group", createdBy: human.id, memberIds: [member.id] })
+    if (!("approved" in group)) throw new Error("human group creation must execute immediately")
+
+    const memberClient = await connect(member.id)
+    const outsiderClient = await connect(outsider.id)
+    try {
+      const readList = async (client: Client, groupId: string): Promise<boolean | undefined> => {
+        const result = await callTool(client, "group", { op: "list" })
+        expect(toolFailed(result)).toBe(false)
+        const parsed = MCP_TOOL_OUTPUTS.group.parse(JSON.parse(textOf(result)))
+        if (!("groups" in parsed)) throw new Error("expected the group list output")
+        return parsed.groups.find((entry) => entry.id === groupId)?.is_member
+      }
+      expect(await readList(memberClient, group.approved.id)).toBe(true)
+      expect(await readList(outsiderClient, group.approved.id)).toBe(false)
+    } finally {
+      await memberClient.close()
+      await outsiderClient.close()
+    }
+  })
+
+  it("keeps the stable error code at line end while appending a next-step hint", async () => {
+    const client = await connect() // 不带 x-agent-id / x-agentchat-session：任何需要身份的工具都报缺身份。
+    try {
+      const result = await callTool(client, "send", { to: "someone", body: "hi" })
+      expect(toolFailed(result)).toBe(true)
+      const text = textOf(result)
+      expect(text).toContain("identity_required")
+      expect(text).toContain("下一步")
+      // 桥用 `/\[([a-z_]+)\]\s*$/` 解析错误码 —— 尾注只能加在 code **之前**（code 必须留在行尾）。
+      expect(/\[([a-z_]+)\]\s*$/.exec(text)?.[1]).toBe("identity_required")
+    } finally {
+      await client.close()
+    }
+  })
+})

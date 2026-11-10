@@ -253,61 +253,61 @@ export type WsServerFrame = z.infer<typeof wsServerFrameSchema>
 
 /** `wait` 入参（spec §6.2；缺省锁定 285000/either，经 zod 校验后原样透传字面量）。 */
 export const mcpWaitSchema = z.object({
-  until: waitUntilSchema.default("either"),
-  timeoutMs: z.number().int().positive().default(285000),
+  until: waitUntilSchema.default("either").describe("等什么：message=等新消息 / received=等对方回执 / either=任一（缺省）。"),
+  timeoutMs: z.number().int().positive().default(285000).describe("最长等待毫秒数（缺省 285000≈4.75min）；超时不报错，结果 timedOut=true。"),
   /**
    * 群 ask 等待范围（spec §3.4）：`all` = 全体回复才返回；`any` = 任一先回即返回。
    * 可选且**不写 default**——群 ask 默认 `all` 由 Task 4 服务端生效，schema 层不设默认以免影响 send/shout 语义。
    */
-  scope: z.enum(["all", "any"]).optional(),
+  scope: z.enum(["all", "any"]).optional().describe("仅群 ask：all=等全体（服务端缺省）/ any=任一先回即返回。"),
 })
 export type McpWait = z.infer<typeof mcpWaitSchema>
 
 const mcpRegisterInput = z.object({
-  join_token: z.string().optional(),
-  parent_ref: z.string().optional(),
-  task_ref: z.string().optional(),
-  kind: agentKindSchema.optional(),
-  name: z.string().optional(),
-  vendor: z.string().optional(),
-  model: z.string().optional(),
-  purpose: z.string().optional(),
-  skills: z.array(z.string()).optional(),
-  role_tag: z.string().optional(),
-  remark: z.string().optional(),
+  join_token: z.string().optional().describe("根节点重连认领用的一次性口令（首次 register 返回值，落 $AGENTCHAT_HOME/tokens/<id>）。"),
+  parent_ref: z.string().optional().describe("父节点 id 或系统名（roster 可查）；给了它就必须同时给 task_ref，否则报 task_ref_required。"),
+  task_ref: z.string().optional().describe("子会话的稳定任务键（通常=会话 id）：同 task_ref 重连会认领同一节点，不新建。"),
+  kind: agentKindSchema.optional().describe("节点类型：runtime=可执行任务 / logical=纯逻辑节点（收不到唤醒，只能被读）。"),
+  name: z.string().optional().describe("节点名（同一命名空间唯一；撞名报 name_taken）。"),
+  vendor: z.string().optional().describe("来源厂商（如 opencode/dsh）；容器节点由适配器标记 role_tag=container。"),
+  model: z.string().optional().describe("该节点使用的模型标识（展示用）。"),
+  purpose: z.string().optional().describe("工作概述（展示在联系人卡）。"),
+  skills: z.array(z.string()).optional().describe("能力标签数组（展示用）。"),
+  role_tag: z.string().optional().describe("角色标记：container=分组容器（不是聊天对象，不可入群/发言）。"),
+  remark: z.string().optional().describe("备注（展示用）。"),
 })
 
 const mcpSendInput = z.object({
-  to: z.string().min(1),
-  body: z.string(),
+  to: z.string().min(1).describe('收件方：agent id（自动建/复用 DM）或群会话 id；广播用 shout，这里不接受 "*"。'),
+  body: z.string().describe("消息正文；必须带信息增量（禁纯回执/寒暄/复读）。"),
   /** 结构化提及（spec §3.1）：名字 / id / id 前 8 位 / `"*"`；解析见 `shared/mentions.ts`。 */
-  mentions: z.array(z.string()).optional(),
-  wait: mcpWaitSchema.optional(),
-  idempotencyKey: z.string().optional(),
+  mentions: z.array(z.string()).optional().describe('群内点名（仅群会话生效）：成员名字 / id 前 8 位 / "*"=全体；DM 忽略。'),
+  wait: mcpWaitSchema.optional().describe("给了就阻塞等对方：等新消息/等回执/任一（见内部 until/timeoutMs/scope）。"),
+  idempotencyKey: z.string().optional().describe("幂等键：同 (发送方, key) 重发返回同一条消息，不新增行、不重复唤醒。"),
 })
 
 const mcpInboxInput = z.object({
-  conversation: z.string().optional(),
-  after: z.number().int().nonnegative().optional(),
-  ack: z.boolean().optional(),
-  timeout: z.number().int().positive().optional(),
+  conversation: z.string().optional().describe("只看该会话（群/DM 会话 id）的消息。"),
+  after: z.number().int().nonnegative().optional().describe("分页游标：只取 seq 大于它的消息（默认 0=全部未读）。"),
+  ack: z.boolean().optional().describe("true=读到即自动标已读（等价于顺手 ack），但**不等于回复**。"),
+  timeout: z.number().int().positive().optional().describe("阻塞等新消息的毫秒数；超时返回 timedOut=true，不是错误。"),
 })
 
 const mcpAckInput = z.object({
-  message_ids: z.array(z.string().min(1)).min(1),
+  message_ids: z.array(z.string().min(1)).min(1).describe("要标已读的消息短 id（send/inbox 出参的 message.id，不是 seq）。"),
 })
 
 const mcpRosterInput = z.object({
-  filter: z.string().optional(),
-  online_only: z.boolean().optional(),
+  filter: z.string().optional().describe("按名称子串过滤（含祖先链保留）。"),
+  online_only: z.boolean().optional().describe("true=只保留 online 节点。"),
   /** 只返回该会话（群）的参与者（spec §4.4；shout 广播会话不接受）。 */
-  conversation: z.string().optional(),
+  conversation: z.string().optional().describe("只看某个群/会话的成员；调用者必须是该群成员，否则 not_participant。"),
 })
 
 const mcpConversationInput = z.object({
-  id: z.string().min(1),
-  before: z.number().int().nonnegative().optional(),
-  limit: z.number().int().positive().optional(),
+  id: z.string().min(1).describe("会话 id（不是 agent id；从 group{op:list} 或 send 出参的 conversationId 取）。"),
+  before: z.number().int().nonnegative().optional().describe("分页游标：只取 seq 小于它的消息（往前翻页）。"),
+  limit: z.number().int().positive().optional().describe("本页条数上限（缺省 50，最大 200）。"),
 })
 
 /**
@@ -324,11 +324,11 @@ type McpGroupInput =
 
 const mcpGroupInput = z
   .object({
-    op: z.enum(["create", "add", "list"]),
-    name: z.string().min(1).optional(),
-    member_ids: z.array(z.string()).optional(),
-    group: z.string().min(1).optional(),
-    member: z.string().min(1).optional(),
+    op: z.enum(["create", "add", "list"]).describe("动作：create=建群 / add=拉人入群 / list=列群（含 is_member）。"),
+    name: z.string().min(1).optional().describe("create 必填：群名。"),
+    member_ids: z.array(z.string()).optional().describe("create 可选：初始成员 agent id（创作者自动为 owner；容器会被拒）。"),
+    group: z.string().min(1).optional().describe("add 必填：目标群会话 id（用 op=list 查）。"),
+    member: z.string().min(1).optional().describe("add 必填：要拉进来的 agent id 或系统名。"),
   })
   .superRefine((value, ctx) => {
     if (value.op === "create" && value.name === undefined) {
@@ -343,34 +343,34 @@ const mcpGroupInput = z
   }) as unknown as z.ZodType<McpGroupInput>
 
 const mcpShoutInput = z.object({
-  body: z.string(),
-  wait: mcpWaitSchema.optional(),
+  body: z.string().describe("广播正文；须有信息增量（禁纯回执/寒暄/复读），全员（非容器）各收一份。"),
+  wait: mcpWaitSchema.optional().describe("给了就阻塞等回执/新消息；root 节点发起还需 human 审批。"),
 })
 
 const mcpStatusInput = z.object({
-  text: z.string(),
+  text: z.string().describe("你的状态文本（人类界面可见）；不改变 online/busy/offline。"),
 })
 
 const mcpMessageStatusInput = z.object({
-  ids: z.array(z.string().min(1)).min(1),
+  ids: z.array(z.string().min(1)).min(1).describe("要查回执的消息短 id 列表（己方发出的消息）。"),
 })
 
 /** `ask` 入参（spec §9/§17：`to` = `'human'` 或目标 agent id（群会话 id 见 spec §3.1）；`wait?` 同 §6.2 阻塞语义）。 */
 const mcpAskInput = z.object({
-  to: z.string().min(1),
-  question: z.string(),
-  options: z.array(z.string()),
-  allow_custom: z.boolean().optional(),
+  to: z.string().min(1).describe('问谁："human"（人类）或 agent id；给群会话 id 则问全群（此时 mentions 必填）。'),
+  question: z.string().describe("要对方裁决的问题（一句话说清选项差异）。"),
+  options: z.array(z.string()).describe("候选项（答复只能选其中之一，除非 allow_custom=true）。"),
+  allow_custom: z.boolean().optional().describe("true=允许自由文本答复（respond_ask 用 text 而非 choice）。"),
   /** 结构化提及（spec §3.1）：`to` 为群会话 id 时必填（必填校验在 Task 4 服务端）。 */
-  mentions: z.array(z.string()).optional(),
-  wait: mcpWaitSchema.optional(),
+  mentions: z.array(z.string()).optional().describe("群问必填：@ 群成员（名字 / id 前 8 位），解析失败报 mention_not_found。"),
+  wait: mcpWaitSchema.optional().describe("阻塞等答复；群问用 scope=all（缺省，等全体）/any（任一先回）。"),
 })
 
 /** `respond_ask` 入参（spec §9/§17：`choice` ∈ options 或 `text` 自由答复，二者择一）。 */
 const mcpRespondAskInput = z.object({
-  ask_id: z.string().min(1),
-  choice: z.string().optional(),
-  text: z.string().optional(),
+  ask_id: z.string().min(1).describe("要答复的 ask id（inbox/conversation 里的 ask 卡）。"),
+  choice: z.string().optional().describe("选一个 options 里的值；不在其中且未开 allow_custom 报 invalid_choice。"),
+  text: z.string().optional().describe("自由文本答复（仅 allow_custom=true 的 ask 用）；与 choice 二者择一。"),
 })
 
 /** 十二工具入参（键恰为 MCP_TOOLS；spec §9 参数列的 zod 化）。 */
@@ -480,6 +480,8 @@ const mcpGroupOutput = z.union([
         member_cards: z
           .array(z.object({ id: z.string(), name: z.string(), status: agentStatusSchema }))
           .optional(),
+        /** P4 additive：调用者是否已是该群成员（false → 先 group{op:add} 再发言，否则 not_participant）。 */
+        is_member: z.boolean().optional(),
       }),
     ),
   }),
@@ -545,6 +547,8 @@ export const MCP_TOOL_OUTPUTS = {
     agent: mcpAgentOutput,
     unread: z.number().int().nonnegative(),
     join_token: z.string().optional(),
+    /** P4 additive：随注册回一份《使用指南》（原生工具面不消费 server `instructions`）。 */
+    guide: z.string().optional(),
   }),
   send: mcpSendOutput,
   inbox: z.object({

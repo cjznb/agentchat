@@ -75,16 +75,21 @@ export function runGroup(ctx: ToolContext, input: McpToolInput<"group">): unknow
     case "list": {
       const groups = listConversations(ctx.db)
         .filter((conversation) => conversation.kind === "group" && conversation.key !== SHOUT_KEY)
-        .map((conversation) => ({
-          id: conversation.id,
-          name: conversation.name ?? null,
-          created_by: conversation.createdBy,
-          // Task 5：`members` id 数组形状不变；`member_cards` additive（id+名+展示态）。
-          members: listParticipants(ctx.db, conversation.id).map(
+        .map((conversation) => {
+          const members = listParticipants(ctx.db, conversation.id).map(
             (participant) => participant.agentId,
-          ),
-          member_cards: memberCards(ctx.db, conversation.id),
-        }))
+          )
+          return {
+            id: conversation.id,
+            name: conversation.name ?? null,
+            created_by: conversation.createdBy,
+            // Task 5：`members` id 数组形状不变；`member_cards` additive（id+名+展示态）。
+            members,
+            member_cards: memberCards(ctx.db, conversation.id),
+            // P4 additive：调用者是否已在群 —— 否则"看得见、发不出、看不出为什么"（发言要 not_participant）。
+            is_member: members.includes(actor),
+          }
+        })
       return { groups }
     }
   }
