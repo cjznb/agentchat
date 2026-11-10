@@ -9,6 +9,10 @@
  * - `unreadFor` 双层聚合（决议 5）：自身全部会话（含喊话）+ 全部后代递归求和
  * - 权限闸门（spec §8，Task 7）：建群/拉人/喊话三个入口内调 `permissions.gate` 单点执法
  *   （决议 1：执行器以闭包传入，permissions 不反向依赖本层，无循环依赖）
+ * - **容器语义（P5）**：容器（`role_tag="container"`）只是分组目录 —— 不可入群
+ *   （`container_not_group_member`，只在 add/create 侧）、不可作发送方
+ *   （`container_cannot_send`）、不可作 DM 收件方（`container_not_chat_target`，既有）。
+ *   移除/解散与系统消息/`/internal/*` 一律不受这些守卫限制。
  */
 import type { ReceiptStage } from "../../shared/contracts"
 import { resolveMentions, type MentionTarget, type MentionsEcho } from "../../shared/mentions"
@@ -64,11 +68,90 @@ export { receiptState }
 // 此处保持既有导入路径（`core/messaging.ensureHuman`）不变。
 export { ensureHuman } from "./permissions"
 
+/**
+ * 分组容器不可**入群**（P5，`container_not_group_member`；HTTP 409）。
+ * 与 `container_not_chat_target`（不可作 DM 收件方）分离：入群与私聊是两条不同语义，
+ * UI/MCP 依此给可自诊文案。容器是分组目录，进群后既收不到（`recipientsOf` 恒排除）
+ * 也无法发言（`container_cannot_send`）——"拉进群"是静默假成功，故在写入前拒绝。
+ */
+export class ContainerNotGroupMemberError extends Error {
+  readonly code = "container_not_group_member"
+  constructor(readonly containerId: string) {
+    // 消息里带上稳定码：审批执行失败路径只回传 `error.message`（`routes/ui.ts` 的 detail），
+    // 不带码就无法自诊。
+    super(
+      `container ${containerId} is a grouping container and cannot be a group member (container_not_group_member)`,
+    )
+    this.name = "ContainerNotGroupMemberError"
+  }
+}
+
+/**
+ * 分组容器不可作**发送方**（P5，`container_cannot_send`）。堵住"以容器身份自动建 DM、
+ * 毒化会话"的静默成功（真库里已有 1 条 `from_agent_id`=容器的毒化 DM）。
+ * **作用面**：只拦 `sendMessage`/`shout`（本模块）；`/internal/*` 的容器心跳与状态上报
+ * 走 `store` 直写，不经此路径，故保持可用；`kind:"system"` 系统消息同理豁免。
+ */
+export class ContainerCannotSendError extends Error {
+  readonly code = "container_cannot_send"
+  constructor(readonly containerId: string) {
+    super(`container ${containerId} is a grouping container and cannot send messages`)
+    this.name = "ContainerCannotSendError"
+  }
+}
+
+/**
+ * 拉人目标的**唯一谓词**（P5 单点守卫，add 侧）：未知 id → `AgentNotFoundError`；
+ * 分组容器 → `ContainerNotGroupMemberError`。
+ *
+ * 只在 **add/create 侧**调用。移除（`removeGroupMember`）与解散（`dissolveGroup`）
+ * 路径**绝不**调用：历史数据里可能已有容器 participant，加了守卫那些行就永远清不掉。
+ */
+function assertAddableGroupMember(db: Db, agentId: string): Agent {
+  const agent = getAgent(db, agentId)
+  if (agent === undefined) throw new AgentNotFoundError(agentId)
+  if (isContainer(agent)) throw new ContainerNotGroupMemberError(agent.id)
+  return agent
+}
+
+/**
+ * 建群 target 的守卫（P5，create 侧）：`memberIds` 命中容器即拒绝；**不校验存在性**
+ * （未知 id 仍留给 store 事务的 FK 失败语义 —— `approvals.test.ts` 以 "ghost-agent"
+ * 场景断言"闸放行、执行失败"的诚实回执，不在此改口径）。建群者本人也必须是可入群节点
+ * （owner 行同样是 group member）。
+ */
+function assertGroupCreateTargets(db: Db, input: CreateGroupInput): void {
+  const creator = getAgent(db, input.createdBy)
+  if (creator !== undefined && isContainer(creator)) {
+    throw new ContainerNotGroupMemberError(creator.id)
+  }
+  for (const agentId of input.memberIds ?? []) {
+    const member = getAgent(db, agentId)
+    if (member !== undefined && isContainer(member)) {
+      throw new ContainerNotGroupMemberError(member.id)
+    }
+  }
+}
+
+/**
+ * 建群落地（store 写入）的**唯一业务路径**：闸内执行器与「已批准执行」
+ *（`routes/ui.ts.executeApproved` 的 group_create 分支）共用 —— 与
+ * `applyAddParticipant` 对称，守卫只在 core 一处，审批执行路径不得绕过。
+ */
+export function applyCreateGroup(db: Db, input: CreateGroupInput): Conversation {
+  // 写库前守卫（含历史遗留/伪造的 pending 单）：容器不可入群、不可自任 owner。
+  assertGroupCreateTargets(db, input)
+  return storeCreateGroup(db, input)
+}
+
 // 群原语（决议 6 → Task 7）：建群/拉人入口在此套审批闸门（`gate` 单点执法）；
 // 返回与 `GateOutcome` 同构的判别联合（裁决 D2），调用方以 `"approved" in result` 解包。
 export function createGroup(db: Db, input: CreateGroupInput): Gated<Conversation> {
+  // P5：闸**前**判容器 —— 被闸的根 agent 若带上容器，会在批准执行时才失败，
+  // 且白落一张注定失败的审批单；闸前拒绝即让 MCP/UI 立刻拿到 `container_not_group_member`。
+  assertGroupCreateTargets(db, input)
   const payload = { name: input.name, memberIds: input.memberIds ?? [] }
-  return gate(db, "group_create", input.createdBy, payload, () => storeCreateGroup(db, input))
+  return gate(db, "group_create", input.createdBy, payload, () => applyCreateGroup(db, input))
 }
 
 /**
@@ -100,11 +183,18 @@ function joinNotice(db: Db, input: AddParticipantInput): void {
  * 一条业务，通知逻辑不复制。
  */
 export function applyAddParticipant(db: Db, input: AddParticipantInput): void {
+  // P5 写库前单点守卫：即时执行（human / 无 key 根）与"已批准执行"
+  //（`routes/ui.ts.executeApproved` 的 group_add 分支，含历史遗留的 pending 单）
+  // 共用此处 —— 三条入口最终都必须过这一关，容器一行 participant 也写不进去。
+  assertAddableGroupMember(db, input.agentId)
   storeAddParticipant(db, input)
   joinNotice(db, input)
 }
 
 export function addParticipant(db: Db, input: AddParticipantInput): Gated<void> {
+  // 闸前快失败：被闸的根 agent 若目标是容器，先拒绝、不落"注定失败"的审批单；
+  // 写库前的那道守卫（`applyAddParticipant`）仍保留，覆盖已批准执行路径。
+  assertAddableGroupMember(db, input.agentId)
   const actorId = input.invitedBy ?? getConversation(db, input.conversationId)?.createdBy ?? ""
   const payload = { conversationId: input.conversationId, agentId: input.agentId, role: input.role }
   return gate(db, "group_add", actorId, payload, () => applyAddParticipant(db, input))
@@ -182,6 +272,11 @@ function assertNoContainerTarget(db: Db, conversation: Conversation): void {
 
 /** `to` 解析：`*` → 喊话广播会话；既有会话直用（成员校验）；否则按 agent id 自动建/取 DM。 */
 function resolveConversation(db: Db, sender: Agent, to: string): Conversation {
+  // P5：容器只是分组目录，不是聊天实体 —— 不可作发送方。守卫放在一切解析之前：
+  // 否则以容器身份发消息会**自动建 DM**（`createDm`）并把容器署名的行写进历史
+  //（"所有人以父容器发言"的毒化来源）。`/internal/*` 的心跳/状态上报走 store 直写、
+  // 不经本函数；`kind:"system"` 系统消息经 `store/messages.send` 直写，同样不受限。
+  if (isContainer(sender)) throw new ContainerCannotSendError(sender.id)
   if (to === "*") return ensureShoutConversation(db, sender.id)
   const existing = getConversation(db, to)
   if (existing !== undefined) {

@@ -1250,6 +1250,117 @@ describe("E. 群成员与解散", () => {
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
+// E2. P5 容器语义（测试面稳定码：不可入群 / 不可建群 / 不可发送 / 移除仍可清）
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("E2. P5 容器语义（/api/test/* 稳定码）", () => {
+  /** 造一个分组容器节点（`role_tag='container'`，如实例节点）。 */
+  async function seedContainer(app: App, name = "容器P5"): Promise<string> {
+    const response = await post(app, "/api/test/agents", {
+      name,
+      kind: "runtime",
+      status: "online",
+      roleTag: "container",
+    })
+    expect(response.status).toBe(200)
+    return (await read<AgentResponse>(response)).agent.id
+  }
+
+  it("拉容器入群 → 409 container_not_group_member（participants / messages 零写入）", async () => {
+    const { app } = fixture()
+    const ids = await seedBasic(app)
+    const groupId = lookup(ids.conversation, "g1", "g1").id
+    await seedContainer(app)
+    const before = await readDump(app)
+
+    await expectError(
+      await post(app, `/api/test/conversations/${groupId}/members`, { agentId: "容器P5" }),
+      409,
+      "container_not_group_member",
+    )
+
+    const after = await readDump(app)
+    expect(after.participants).toEqual(before.participants)
+    expect(after.messages).toEqual(before.messages) // 连入群 system 通知都不落
+  })
+
+  it("建群 memberIds 含容器 → 409 container_not_group_member（未建群）", async () => {
+    const { app } = fixture()
+    await seedBasic(app)
+    await seedContainer(app)
+    const before = await readDump(app)
+
+    await expectError(
+      await post(app, "/api/test/conversations", {
+        kind: "group",
+        name: "容器群",
+        memberIds: ["容器P5"],
+      }),
+      409,
+      "container_not_group_member",
+    )
+    expect((await readDump(app)).conversations).toEqual(before.conversations)
+  })
+
+  it("容器作发送方 → 409 container_cannot_send（会话消息与 shout 两径，零消息写入）", async () => {
+    const { app } = fixture()
+    const ids = await seedBasic(app)
+    const dmId = lookup(ids.conversation, "dm1", "dm1").id
+    await seedContainer(app)
+    const before = await readDump(app)
+
+    await expectError(
+      await post(app, `/api/test/conversations/${dmId}/messages`, {
+        from: "容器P5",
+        body: "我代表所有人发言",
+      }),
+      409,
+      "container_cannot_send",
+    )
+    await expectError(
+      await post(app, "/api/test/shout", { from: "容器P5", body: "全员注意" }),
+      409,
+      "container_cannot_send",
+    )
+    expect((await readDump(app)).messages).toEqual(before.messages)
+  })
+
+  it("seed 直造的历史容器成员仍可被移除：移除路径**不得**有容器守卫", async () => {
+    const { app } = fixture()
+    const seeded = await read<SeedResponse>(
+      await post(app, "/api/test/seed", {
+        agents: [
+          { name: "历史容器", kind: "runtime", status: "online", roleTag: "container" },
+          { name: "历史群主", kind: "runtime", status: "online" },
+        ],
+        conversations: [
+          {
+            kind: "group",
+            name: "历史容器群",
+            createdBy: "历史群主",
+            memberIds: ["历史容器"],
+            ref: "hg",
+          },
+        ],
+      }),
+    )
+    const groupId = lookup(
+      new Map(seeded.conversations.map((conversation) => [conversation.ref, conversation] as const)),
+      "hg",
+      "历史容器群",
+    ).id
+    expect(where((await readDump(app)).participants, "conversation_id", groupId)).toHaveLength(2)
+
+    const removed = await post(app, `/api/test/conversations/${groupId}/members/remove`, {
+      agentId: "历史容器",
+    })
+
+    expect(removed.status).toBe(200)
+    expect(where((await readDump(app)).participants, "conversation_id", groupId)).toHaveLength(1)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
 // F. 节点（agent）
 // ═══════════════════════════════════════════════════════════════════════════
 

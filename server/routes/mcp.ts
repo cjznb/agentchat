@@ -8,13 +8,15 @@
  * - 鉴权：全部 `/mcp` 请求需 `Authorization: Bearer <hubToken>`（复用 internal 的
  *   `ensureHubToken`），否则 401。
  * - 身份：initialize 时 `x-agent-id`（存在则必须命中 agents 表，否则 400；缺省 =
- *   仅注册会话）。`register` 工具在会话内认领身份后写回 `ctx.agentId`。
+ *   仅注册会话；**命中分组容器 → 视为无身份**，P5 fail-closed）。`register` 工具在会话内
+ *   认领身份后写回 `ctx.agentId`。
  */
 import { randomUUID } from "node:crypto"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import { Hono, type Context } from "hono"
 import { config } from "../config"
+import { isContainer } from "../core/messaging"
 import { openDb, type Db } from "../db"
 import { registerTools } from "../mcp/tools"
 import type { ToolContext } from "../mcp/context"
@@ -73,6 +75,9 @@ function sessionIdentity(db: Db, ref: string | undefined): SessionIdentity {
 /**
  * initialize 的 `ToolContext`：会话头优先（命中用会话节点身份、未命中也**不回落到 `x-agent-id`**）；
  * 无会话头才走既有 `x-agent-id`（存在但查无此节点 → `agent_not_found` 400）。
+ * **P5 fail-closed**：`x-agent-id` 命中的是分组容器（`role_tag='container'`）时**视为无身份**
+ * （不 400）—— 后续工具（除 `register`）报 `identity_required`，从此不再产生任何容器署名的消息。
+ * 逐调用 `x-agentchat-session` 通道不受影响（命中即用会话节点身份，见上）；`register` 不需要身份。
  */
 function initializeContext(
   c: Context,
@@ -83,10 +88,18 @@ function initializeContext(
   if (hint.kind === "resolved") return { db, home, agentId: hint.agentId }
   if (hint.kind === "unresolved") return { db, home }
   const agentId = c.req.header("x-agent-id")
-  if (agentId !== undefined && getAgent(db, agentId) === undefined) {
-    return { error: "agent_not_found" }
+  if (agentId !== undefined) {
+    const agent = getAgent(db, agentId)
+    if (agent === undefined) return { error: "agent_not_found" }
+    if (isContainer(agent)) {
+      console.warn(
+        `[agentchat] /mcp x-agent-id 指向分组容器（${agent.id}）；按 fail-closed 视为无身份（工具报 identity_required）`,
+      )
+      return { db, home }
+    }
+    return { db, home, agentId }
   }
-  return { db, home, ...(agentId === undefined ? {} : { agentId }) }
+  return { db, home }
 }
 
 /** 单路由（`/mcp`）表；`db` 缺省时惰性取进程配置库（测试显式注入临时库 + home）。 */

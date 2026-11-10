@@ -4,6 +4,8 @@
  * 自绘复选框列表（不引组件库）：复用 `treeFold.foldTree`（默认折叠、human 过滤、逻辑节点图标、
  * 退役标记），带手风琴展开（独立持久化键，不与会话列表/组织树展开态串扰）。
  * human 由 `foldTree` 完全过滤 → 天然不可选；退役节点灰显且 checkbox 禁用。
+ * 分组容器（`role_tag === "container"`，P5）**保留在树里**（层级与可展开不变），
+ * 但 checkbox 不可勾选，并显示「容器」徽标 + 说明文案。
  *
  * 修 2A「离线/历史会话」折叠栏：`partitionPickerRows` 纯函数把**全离线根子树**分拣进
  * 独立折叠栏（默认收起、独立持久化键 `agentchat:expandedPickerLegacy`）；主列表为空且
@@ -15,6 +17,7 @@ import { vendorBadge } from "../chat"
 import { useStore } from "../store"
 import {
   foldTree,
+  isContainerNode,
   partitionPickerRows,
   roleTone,
   statusGlyph,
@@ -66,9 +69,19 @@ function PickerRow({
   const { node, logical, retired, children } = row
   const expanded = expandedIds.includes(node.id)
   const checked = selected.includes(node.id)
+  // P5：分组容器是目录、不是聊天对象 —— 不可勾选（服务端亦 409 兜底）。
+  // **保留层级与可展开**：容器行仍在树里、仍能展开看子节点，只是 checkbox 不可选。
+  const container = isContainerNode(node)
+  const blocked = retired || container
   const expandable = children.length > 0 && !retired
   return (
-    <li className="picker-row" data-testid="member-row" data-node-id={node.id} data-retired={retired}>
+    <li
+      className="picker-row"
+      data-testid="member-row"
+      data-node-id={node.id}
+      data-retired={retired}
+      data-container={container || undefined}
+    >
       <div className="picker-head" data-expanded={expanded} data-selected={checked}>
         {expandable ? (
           <button
@@ -89,8 +102,10 @@ function PickerRow({
             className="picker-check"
             data-testid="member-check"
             type="checkbox"
-            checked={checked}
-            disabled={retired}
+            checked={checked && !blocked}
+            disabled={blocked}
+            aria-label={container ? `${node.name}（分组容器，不能加入群聊）` : undefined}
+            title={container ? "分组容器，不能加入群聊" : undefined}
             onChange={() => onToggle(node.id)}
           />
           <span
@@ -111,6 +126,15 @@ function PickerRow({
               {statusGlyph(node.status)}
             </i>
             <span className="vendor-badge">{node.vendor}</span>
+            {container ? (
+              <span
+                className="container-badge"
+                data-testid="container-badge"
+                title="分组容器，不是聊天对象"
+              >
+                容器
+              </span>
+            ) : null}
             <RoleTag tag={node.role_tag} />
           </span>
         </label>

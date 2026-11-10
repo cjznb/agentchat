@@ -11,6 +11,7 @@ import { z } from "zod"
 import { conversationRoster, rosterTree } from "../core/agents"
 import {
   applyAddParticipant,
+  applyCreateGroup,
   ContainerNotChatTargetError,
   NotParticipantError,
   RecipientNotFound,
@@ -34,7 +35,7 @@ import { config } from "../config"
 import { openDb, type Db } from "../db"
 import { getAgent } from "../store/agents"
 import { getApproval, listApprovals, type Approval } from "../store/approvals"
-import { createDm, createGroup, getConversation } from "../store/conversations"
+import { createDm, getConversation } from "../store/conversations"
 import { latestInConversation } from "../store/messages"
 import { markRead } from "../store/read_states"
 import { handleAgentRename } from "./agent-rename"
@@ -70,7 +71,9 @@ function executeApproved(db: Db, approval: Approval): void {
     }
     case "group_create": {
       const { name, memberIds } = groupCreatePayloadSchema.parse(approval.payload)
-      createGroup(db, {
+      // P5：批准执行与闸内执行共用 core 的落地路径（`applyCreateGroup`）——容器不可入群
+      // 的守卫不得被"已批准"路径绕过（改前此处直调 store，容器会静默入群）。
+      applyCreateGroup(db, {
         name,
         createdBy: approval.requesterAgentId,
         ...(memberIds === undefined ? {} : { memberIds }),

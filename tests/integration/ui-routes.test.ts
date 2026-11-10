@@ -46,8 +46,14 @@ import { ask, respondAsk } from "../../server/core/permissions"
 import { openDb, type Db } from "../../server/db"
 import { createApp } from "../../server/index"
 import { getAgent, insertAgent } from "../../server/store/agents"
-import { getApproval } from "../../server/store/approvals"
-import { getConversation, getConversationByKey, isParticipant, SHOUT_KEY } from "../../server/store/conversations"
+import { getApproval, insertApproval } from "../../server/store/approvals"
+import {
+  addParticipant as storeAddParticipant,
+  getConversation,
+  getConversationByKey,
+  isParticipant,
+  SHOUT_KEY,
+} from "../../server/store/conversations"
 import { getById, history, send } from "../../server/store/messages"
 import { getWakeJob } from "../../server/store/wake"
 import { vi } from "vitest"
@@ -206,6 +212,128 @@ describe("GET/POST /api/groups", () => {
     const afterAdd = groupListSchema.parse(await (await app.request("/api/groups")).json())
     const updated = afterAdd.groups.find((group) => group.id === createdJson.group.id)
     expect(new Set(updated?.members)).toEqual(new Set([humanId, rootId, child.id]))
+  })
+})
+
+// ── P5 容器语义（HTTP 面）：不可入群/不可建群（409）+ 移除路径仍可清历史容器 ──
+
+/** 造一个分组容器节点（`role_tag="container"`，如实例容器）。 */
+function makeContainer(name: string): string {
+  return insertAgent(db, {
+    name,
+    kind: "runtime",
+    status: "online",
+    vendor: "opencode",
+    roleTag: "container",
+  }).id
+}
+
+describe("P5 容器不可入群（HTTP 409 自转 JSON）", () => {
+  it("POST /api/groups/:id/members 拉容器 → 409 container_not_group_member 且零写入", async () => {
+    const created = groupCreateResultSchema.parse(
+      await (await post("/api/groups", { name: "p5-http", memberIds: [rootId] })).json(),
+    )
+    if (!("group" in created)) throw new Error("human group creation must execute immediately")
+    const boxId = makeContainer("p5-http-box")
+
+    const res = await post(`/api/groups/${created.group.id}/members`, { agentId: boxId })
+
+    expect(res.status).toBe(409)
+    expect(errorBodySchema.parse(await res.json()).error).toBe("container_not_group_member")
+    expect(isParticipant(db, created.group.id, boxId)).toBe(false)
+  })
+
+  it("POST /api/groups 的 memberIds 含容器 → 409 container_not_group_member 且未建群", async () => {
+    const boxId = makeContainer("p5-http-create-box")
+
+    const res = await post("/api/groups", { name: "p5-http-create", memberIds: [rootId, boxId] })
+
+    expect(res.status).toBe(409)
+    expect(errorBodySchema.parse(await res.json()).error).toBe("container_not_group_member")
+    const list = groupListSchema.parse(await (await app.request("/api/groups")).json())
+    expect(list.groups).toHaveLength(0)
+  })
+
+  it("POST /api/groups/:id/members 拉未知节点 → 404 agent_not_found（不是非 JSON 500）", async () => {
+    const created = groupCreateResultSchema.parse(
+      await (await post("/api/groups", { name: "p5-http-ghost", memberIds: [rootId] })).json(),
+    )
+    if (!("group" in created)) throw new Error("human group creation must execute immediately")
+
+    const res = await post(`/api/groups/${created.group.id}/members`, { agentId: "no-such-node" })
+
+    expect(res.status).toBe(404)
+    expect(errorBodySchema.parse(await res.json()).error).toBe("agent_not_found")
+  })
+
+  it("移除路径**不得**加容器守卫：历史容器 participant 仍可被清掉", async () => {
+    const created = groupCreateResultSchema.parse(
+      await (await post("/api/groups", { name: "p5-http-remove", memberIds: [rootId] })).json(),
+    )
+    if (!("group" in created)) throw new Error("human group creation must execute immediately")
+    const boxId = makeContainer("p5-http-hist-box")
+    // 历史数据：旧版本经 store 直造把容器写进了 participants。
+    storeAddParticipant(db, {
+      conversationId: created.group.id,
+      agentId: boxId,
+      invitedBy: humanId,
+    })
+    expect(isParticipant(db, created.group.id, boxId)).toBe(true)
+
+    const res = await post(`/api/groups/${created.group.id}/members/remove`, { agentId: boxId })
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ ok: true })
+    expect(isParticipant(db, created.group.id, boxId)).toBe(false)
+  })
+})
+
+describe("P5 已批准审批执行路径同样被守卫（group_add / group_create）", () => {
+  it("历史/伪造的 group_add 容器审批单：批准后执行失败且容器未入群", async () => {
+    const created = groupCreateResultSchema.parse(
+      await (await post("/api/groups", { name: "p5-approve-add", memberIds: [rootId] })).json(),
+    )
+    if (!("group" in created)) throw new Error("human group creation must execute immediately")
+    const boxId = makeContainer("p5-approve-add-box")
+    // 直插审批单（绕开 gate 的闸前守卫）——模拟守卫落地前已存在的 pending 单。
+    const approval = insertApproval(db, {
+      requesterAgentId: rootId,
+      action: "group_add",
+      payload: { conversationId: created.group.id, agentId: boxId },
+      now: Date.now(),
+    })
+
+    const res = await post(`/api/approvals/${approval.id}`, { decision: "approve" })
+
+    expect(res.status).toBe(500)
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      error: "approval_execution_failed",
+      detail: expect.stringContaining("container_not_group_member"),
+    })
+    expect(getApproval(db, approval.id)?.status).toBe("approved")
+    expect(isParticipant(db, created.group.id, boxId)).toBe(false)
+  })
+
+  it("历史/伪造的 group_create 含容器审批单：批准后执行失败且未建群", async () => {
+    const boxId = makeContainer("p5-approve-create-box")
+    const approval = insertApproval(db, {
+      requesterAgentId: rootId,
+      action: "group_create",
+      payload: { name: "p5-approve-create", memberIds: [rootId, boxId] },
+      now: Date.now(),
+    })
+
+    const res = await post(`/api/approvals/${approval.id}`, { decision: "approve" })
+
+    expect(res.status).toBe(500)
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      error: "approval_execution_failed",
+      detail: expect.stringContaining("container_not_group_member"),
+    })
+    const list = groupListSchema.parse(await (await app.request("/api/groups")).json())
+    expect(list.groups).toHaveLength(0)
   })
 })
 

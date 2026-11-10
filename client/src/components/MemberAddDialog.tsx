@@ -5,7 +5,7 @@
  * 卸载即清空已选（等价原 closePicker 清 picked）。
  */
 import { useCallback, useEffect, useState } from "react"
-import { addGroupMember } from "../api"
+import { addGroupMember, ApiError } from "../api"
 import { MemberPicker } from "./MemberPicker"
 
 export interface MemberAddDialogProps {
@@ -14,6 +14,19 @@ export interface MemberAddDialogProps {
   readonly onClose: () => void
   /** 确认提交成功：关闭弹窗并刷新（父层回调）。 */
   readonly onSuccess: () => void
+}
+
+/**
+ * 拉人失败码 → 用户可自诊文案（P5）：容器被服务端 409 拒绝时不再显示"添加失败，请重试"。
+ * 未知码/网络失败保持通用兜底。
+ */
+export function memberAddErrorMessage(code: string | undefined): string {
+  if (code === "container_not_group_member") return "这是分组容器，不能加入群聊。"
+  if (code === "container_not_chat_target") return "这是分组容器，不是聊天对象。"
+  if (code === "agent_not_found") return "该节点不存在或已被删除。"
+  if (code === "recipient_retired") return "该节点已退役，不能加入群聊。"
+  if (code === "not_participant") return "你没有权限向这个群拉人。"
+  return "添加失败，请重试。"
 }
 
 export function MemberAddDialog({ conversationId, onClose, onSuccess }: MemberAddDialogProps) {
@@ -42,8 +55,9 @@ export function MemberAddDialog({ conversationId, onClose, onSuccess }: MemberAd
       }
       setPicked([])
       onSuccess()
-    } catch {
-      setAddError("添加失败，请重试。")
+    } catch (error) {
+      // `ApiError.code` 由 `api.ts` 从错误体透出（P5）；非 ApiError（网络失败等）→ 通用文案。
+      setAddError(memberAddErrorMessage(error instanceof ApiError ? error.code : undefined))
     } finally {
       setAdding(false)
     }

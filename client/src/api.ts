@@ -69,9 +69,24 @@ interface Parser<T> {
   parse(value: unknown): T
 }
 
+/**
+ * 非 2xx 错误体里的**稳定业务码**（服务端契约 `{ok:false,error:"..."}`）。
+ * 非 JSON / 无 `error` 字段 / 非字符串 → `undefined`（保持既有"仅有状态码"语义）。
+ */
+function errorCodeOf(payload: unknown): string | undefined {
+  if (payload === null || typeof payload !== "object" || !("error" in payload)) return undefined
+  const raw: unknown = payload.error
+  return typeof raw === "string" && raw !== "" ? raw : undefined
+}
+
 async function request<T>(path: string, schema: Parser<T>, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init)
-  if (!response.ok) throw new ApiError(path, response.status)
+  if (!response.ok) {
+    // 读错误体透出稳定错误码（如 `container_not_group_member`）—— UI 据此给可自诊文案，
+    // 不再一律"添加失败，请重试"。`json()` 失败（代理错误页等）回落 undefined，不抛二次错。
+    const payload: unknown = await response.json().catch(() => undefined)
+    throw new ApiError(path, response.status, errorCodeOf(payload))
+  }
   return schema.parse(await response.json())
 }
 

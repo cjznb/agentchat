@@ -19,7 +19,9 @@ import { openDb, type Db } from "../../server/db"
 import {
   addParticipant,
   ack,
+  ContainerCannotSendError,
   ContainerNotChatTargetError,
+  ContainerNotGroupMemberError,
   createGroup,
   ensureHuman,
   history,
@@ -32,12 +34,14 @@ import {
   unreadFor,
 } from "../../server/core/messaging"
 import {
+  AgentNotFoundError,
   insertAgent,
   listAgents,
   type Agent,
 } from "../../server/store/agents"
 import type { Gated } from "../../server/core/permissions"
 import {
+  addParticipant as storeAddParticipant,
   createDm,
   getConversationByKey,
   isParticipant,
@@ -289,6 +293,102 @@ describe("分组容器不是聊天实体（M1 服务端守卫）", () => {
   })
 })
 
+// ── P5：容器不可入群 / 不可建群 / 不可作发送方（守卫只在 add/create/发送方侧） ──
+describe("P5 容器语义（core 单点守卫）", () => {
+  const container = (name: string): Agent =>
+    insertAgent(db, {
+      name,
+      kind: "runtime",
+      status: "online",
+      vendor: "opencode",
+      roleTag: "container",
+    })
+
+  it("core addParticipant 拒绝容器（container_not_group_member）且零写入", () => {
+    const owner = makeAgent("p5-add-owner")
+    const peer = makeAgent("p5-add-peer")
+    const box = container("p5-add-box")
+    const group = approved(createGroup(db, { name: "p5-add", createdBy: owner.id, memberIds: [peer.id] }))
+
+    let thrown: unknown
+    try {
+      addParticipant(db, { conversationId: group.id, agentId: box.id, invitedBy: owner.id })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(ContainerNotGroupMemberError)
+    expect((thrown as ContainerNotGroupMemberError).code).toBe("container_not_group_member")
+    expect(isParticipant(db, group.id, box.id)).toBe(false)
+    expect(new Set(listParticipants(db, group.id).map((p) => p.agentId))).toEqual(
+      new Set([owner.id, peer.id]),
+    )
+  })
+
+  it("core addParticipant 目标不存在 → AgentNotFoundError（不再落成驱动层 SQLITE 异常）", () => {
+    const owner = makeAgent("p5-add-ghost-owner")
+    const group = approved(createGroup(db, { name: "p5-add-ghost", createdBy: owner.id }))
+
+    expect(() =>
+      addParticipant(db, { conversationId: group.id, agentId: randomUUID(), invitedBy: owner.id }),
+    ).toThrow(AgentNotFoundError)
+    expect(listParticipants(db, group.id)).toHaveLength(1)
+  })
+
+  it("createGroup 拒绝含容器的 memberIds，也拒绝容器自任 owner（零会话写入）", () => {
+    const owner = makeAgent("p5-create-owner")
+    const box = container("p5-create-box")
+
+    expect(() =>
+      createGroup(db, { name: "p5-create-member", createdBy: owner.id, memberIds: [box.id] }),
+    ).toThrow(ContainerNotGroupMemberError)
+    expect(() => createGroup(db, { name: "p5-create-owner", createdBy: box.id })).toThrow(
+      ContainerNotGroupMemberError,
+    )
+    expect(listConversations(db)).toHaveLength(0)
+  })
+
+  it("容器不可作发送方：自动建 DM 路径被拒，且不留毒化会话", () => {
+    const box = container("p5-send-box")
+    const peer = makeAgent("p5-send-peer")
+
+    expect(() => sendMessage(db, { from: box.id, to: peer.id, body: "我是实例容器" })).toThrow(
+      ContainerCannotSendError,
+    )
+    expect(getConversationByKey(db, `dm:${[box.id, peer.id].sort().join("_")}`)).toBeUndefined()
+    // 喊话同样被拒（`shout` 经 `sendMessage` 落地）。
+    expect(() => shout(db, box.id, "全员注意")).toThrow(ContainerCannotSendError)
+    expect(getConversationByKey(db, "shout")).toBeUndefined()
+  })
+
+  it("容器不可作发送方：既有会话（历史容器成员）同样被拒，零消息写入", () => {
+    const owner = makeAgent("p5-hist-owner")
+    const box = container("p5-hist-box")
+    const group = approved(createGroup(db, { name: "p5-hist", createdBy: owner.id }))
+    storeAddParticipant(db, { conversationId: group.id, agentId: box.id, invitedBy: owner.id })
+
+    expect(() => sendMessage(db, { from: box.id, to: group.id, body: "我代表大家发言" })).toThrow(
+      ContainerCannotSendError,
+    )
+    expect(history(db, group.id)).toHaveLength(0)
+  })
+
+  it("store 直写不受限：容器心跳/状态上报与系统通知路径仍可写（守卫只在 sendMessage）", () => {
+    const owner = makeAgent("p5-sys-owner")
+    const box = container("p5-sys-box")
+    const group = approved(createGroup(db, { name: "p5-sys", createdBy: owner.id }))
+
+    const message = storeSend(db, {
+      conversationId: group.id,
+      fromAgentId: box.id,
+      kind: "system",
+      body: "（系统）容器心跳/状态上报",
+    })
+
+    expect(history(db, group.id).map((m) => m.id)).toContain(message.id)
+  })
+})
+
 describe("唤醒集合 T（spec §2，Task 3）", () => {
   it("agent 发群消息无提及 → 0 条 wake_jobs，回执集合 = jobs 行 = ∅（spec §14.2）", () => {
     const { owner, group } = t3Group("t3-noat")
@@ -372,12 +472,21 @@ describe("唤醒集合 T（spec §2，Task 3）", () => {
       vendor: "opencode",
       roleTag: "container",
     })
-    addParticipant(db, { conversationId: group.id, agentId: box.id, invitedBy: owner.id })
+    // P5：夹具走 **store 直造**（历史数据：旧版本已把容器写进 participants）——
+    // 守卫在 core 不在 store，故这条"容器已在群"的场景仍可复现。
+    storeAddParticipant(db, { conversationId: group.id, agentId: box.id, invitedBy: owner.id })
 
     const sent = sendMessage(db, { from: owner.id, to: group.id, body: "@所有人 注意" })
 
     expect(wakeAgentsOf(sent.message.seq)).not.toContain(box.id)
     expect(sent.receipts.map((r) => r.agentId)).not.toContain(box.id)
+
+    // P5 新断言：同一条路径经 **core** 拉人已被拒（`container_not_group_member`），
+    // 容器 participant 不可能再新增（存量行仍可经移除路径清掉，见 ui-routes 用例）。
+    expect(() =>
+      addParticipant(db, { conversationId: group.id, agentId: box.id, invitedBy: owner.id }),
+    ).toThrow(ContainerNotGroupMemberError)
+    expect(listParticipants(db, group.id).filter((p) => p.agentId === box.id)).toHaveLength(1)
   })
 
   it('kind:"system" 内部消息豁免：不经提及路由、0 wake_job、全员收件箱可达', () => {

@@ -16,11 +16,12 @@ import { MemberPicker } from "../components/MemberPicker"
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 
-// 一级 root1 → 二级 child-1 → 三级 grand-1；旁支 child-2。
+// 一级 root1 → 二级 child-1 → 三级 grand-1；旁支 child-2；另有一棵 P5 容器子树 box-1 → sess-1。
 const rosterFixture = vi.hoisted(() => {
   const build = (
     id: string,
     children: readonly unknown[] = [],
+    extra: Record<string, unknown> = {},
   ): Record<string, unknown> => ({
     id,
     name: id,
@@ -36,8 +37,12 @@ const rosterFixture = vi.hoisted(() => {
     skills: [],
     unread: 0,
     children,
+    ...extra,
   })
-  return [build("root1", [build("child-1", [build("grand-1")]), build("child-2")])]
+  return [
+    build("root1", [build("child-1", [build("grand-1")]), build("child-2")]),
+    build("box-1", [build("sess-1")], { role_tag: "container" }),
+  ]
 })
 
 vi.mock("../store", () => ({
@@ -75,12 +80,12 @@ afterEach(() => {
   host = null
 })
 
-function render(): HTMLDivElement {
+function render(selected: readonly string[] = []): HTMLDivElement {
   host = document.createElement("div")
   document.body.appendChild(host)
   root = createRoot(host)
   act(() => {
-    root?.render(<MemberPicker selected={[]} onToggle={() => {}} />)
+    root?.render(<MemberPicker selected={selected} onToggle={() => {}} />)
   })
   return host
 }
@@ -133,5 +138,67 @@ describe("MemberPicker 展开（BUG-2 回归）", () => {
     expect(headExpanded(el, "child-1")).toBe(false)
     expect(headExpanded(el, "root1")).toBe(true)
     expect(el.querySelector('[data-node-id="grand-1"]')).toBeNull()
+  })
+})
+
+// ── P5：容器行保留层级但不可勾选（`role_tag="container"`） ──────────────
+
+function checkOf(el: HTMLElement, nodeId: string): HTMLInputElement {
+  const row = el.querySelector(`[data-testid="member-row"][data-node-id="${nodeId}"]`)
+  const check = row?.querySelector('[data-testid="member-check"]')
+  if (!(check instanceof HTMLInputElement)) throw new Error(`no checkbox for ${nodeId}`)
+  return check
+}
+
+describe("MemberPicker 容器不可勾选（P5）", () => {
+  it("容器行仍在树里（保留层级）、显示「容器」徽标，checkbox 禁用且有说明", () => {
+    const el = render()
+    const row = el.querySelector('[data-testid="member-row"][data-node-id="box-1"]')
+    // 关键：**不从树里过滤掉** —— 容器行必须可见（层级/可展开由行的存在保证）。
+    expect(row).not.toBeNull()
+    expect(row?.getAttribute("data-container")).toBe("true")
+    expect(row?.querySelector('[data-testid="container-badge"]')?.textContent).toBe("容器")
+
+    const check = checkOf(el, "box-1")
+    expect(check.disabled).toBe(true)
+    expect(check.checked).toBe(false)
+    expect(check.getAttribute("title")).toContain("不能加入群聊")
+    expect(check.getAttribute("aria-label")).toContain("分组容器")
+  })
+
+  it("容器层级保留且可展开：点开容器仍能看到其会话子节点，且子节点可勾选", () => {
+    const el = render()
+    expect(el.querySelector('[data-node-id="sess-1"]')).toBeNull()
+    click(toggleOf(el, "box-1"))
+    expect(headExpanded(el, "box-1")).toBe(true)
+    expect(el.querySelector('[data-testid="member-row"][data-node-id="sess-1"]')).not.toBeNull()
+    expect(checkOf(el, "sess-1").disabled).toBe(false)
+  })
+
+  it("点击容器 checkbox 不触发 onToggle（禁用态不产生选中）", () => {
+    const toggled: string[] = []
+    host = document.createElement("div")
+    document.body.appendChild(host)
+    root = createRoot(host)
+    act(() => {
+      root?.render(<MemberPicker selected={[]} onToggle={(id) => toggled.push(id)} />)
+    })
+    const check = checkOf(host, "box-1")
+    click(check)
+    expect(toggled).toEqual([])
+    expect(check.checked).toBe(false)
+  })
+
+  it("历史选中态含容器时也不显示为已勾选（防御旧选择列表）", () => {
+    const el = render(["box-1"])
+    expect(checkOf(el, "box-1").checked).toBe(false)
+  })
+
+  it("普通节点语义不变：可勾选（容器禁用不外溢）", () => {
+    const el = render()
+    const check = checkOf(el, "root1")
+    expect(check.disabled).toBe(false)
+    click(check)
+    expect(check.checked).toBe(false) // 受控组件（onToggle 为 no-op）→ 勾选态不落地
   })
 })

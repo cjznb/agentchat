@@ -29,8 +29,10 @@ import { Hono, type Context } from "hono"
 import { removeGroupMember } from "../core/group-ops"
 import {
   addParticipant as gatedAddParticipant,
-  createGroup as gatedCreateGroup,
+  ContainerCannotSendError,
   ContainerNotChatTargetError,
+  ContainerNotGroupMemberError,
+  createGroup as gatedCreateGroup,
   NotParticipantError,
   RecipientNotFound,
   sendMessage,
@@ -126,14 +128,22 @@ export function testRoutes(db?: Db, options?: TestRoutesOptions): Hono {
         if (member === undefined) return c.json({ ok: false, error: "agent_not_found" }, 404)
         memberIds.push(member.id)
       }
-      const outcome = gatedCreateGroup(database, {
-        name: input.name,
-        createdBy: ensureHuman(database).id,
-        memberIds,
-      })
-      return "approved" in outcome
-        ? c.json({ ok: true, conversation: outcome.approved })
-        : c.json({ ok: true, approval: outcome.approval })
+      try {
+        const outcome = gatedCreateGroup(database, {
+          name: input.name,
+          createdBy: ensureHuman(database).id,
+          memberIds,
+        })
+        return "approved" in outcome
+          ? c.json({ ok: true, conversation: outcome.approved })
+          : c.json({ ok: true, approval: outcome.approval })
+      } catch (error) {
+        // P5：memberIds 含容器 → 409 `container_not_group_member`（业务拒绝不落 500）。
+        if (error instanceof ContainerNotGroupMemberError) {
+          return c.json({ ok: false, error: error.code }, 409)
+        }
+        throw error
+      }
     }))
     // 7. 会话改名（群名 / DM 备注名）：复用 `agentRenameSchema`（trim 1..64、禁控制字符）同一口径。
     .patch("/api/test/conversations/:id", handle(async (c, database) => {
@@ -202,6 +212,10 @@ export function testRoutes(db?: Db, options?: TestRoutesOptions): Hono {
           if (error instanceof ContainerNotChatTargetError) {
             return c.json({ ok: false, error: error.code }, 409)
           }
+          // P5：容器不可作发送方（业务拒绝映射 409，不落进 `handle()` 的 500）。
+          if (error instanceof ContainerCannotSendError) {
+            return c.json({ ok: false, error: error.code }, 409)
+          }
           throw error
         }
       })
@@ -233,13 +247,21 @@ export function testRoutes(db?: Db, options?: TestRoutesOptions): Hono {
       return withConversation(c, database, (conversation) => {
         const agent = resolveAgentRef(database, parsed.data.agentId)
         if (agent === undefined) return c.json({ ok: false, error: "agent_not_found" }, 404)
-        const outcome = gatedAddParticipant(database, {
-          conversationId: conversation.id,
-          agentId: agent.id,
-          invitedBy: ensureHuman(database).id,
-          ...(parsed.data.role === undefined ? {} : { role: parsed.data.role }),
-        })
-        return "approved" in outcome ? c.json({ ok: true }) : c.json({ ok: true, approval: outcome.approval })
+        try {
+          const outcome = gatedAddParticipant(database, {
+            conversationId: conversation.id,
+            agentId: agent.id,
+            invitedBy: ensureHuman(database).id,
+            ...(parsed.data.role === undefined ? {} : { role: parsed.data.role }),
+          })
+          return "approved" in outcome ? c.json({ ok: true }) : c.json({ ok: true, approval: outcome.approval })
+        } catch (error) {
+          // P5：容器不可入群 → 409 `container_not_group_member`（业务拒绝不落 500）。
+          if (error instanceof ContainerNotGroupMemberError) {
+            return c.json({ ok: false, error: error.code }, 409)
+          }
+          throw error
+        }
       })
     }))
     // 14. 移出群成员：与生产 `POST /api/groups/:id/members/remove` 共用 `core/group-ops` 唯一实现。
@@ -271,6 +293,10 @@ export function testRoutes(db?: Db, options?: TestRoutesOptions): Hono {
         // 测试面允许任意 agent 作 `from`，故这是可达路径 —— 必须映射 403，而不是落进
         // `guarded()` 的 500（业务拒绝被误读成服务端故障）。
         if (error instanceof Forbidden) return c.json({ ok: false, error: error.code }, 403)
+        // P5：容器不可作发送方（`shout` 经 `sendMessage` 落地）。
+        if (error instanceof ContainerCannotSendError) {
+          return c.json({ ok: false, error: error.code }, 409)
+        }
         throw error
       }
     }))

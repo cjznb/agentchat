@@ -995,26 +995,30 @@ describe("出站身份按会话归属（M2：x-agentchat-session）", () => {
    * 会话头只在随后的 `tools/call` 上（插件注入 → 桥剥离入参后转请求头）。故只有 `routes/mcp.ts`
    * 的**逐请求重解析**分支（`session.ctx.agentId`，`:131` 附近）能让 M2 生效 —— 删掉该分支，
    * 身份会停留在 initialize 时的容器、本用例即失败。
+   *
+   * P5（task-11）更新：`x-agent-id` 命中容器时**视为无身份**（fail-closed），故 ① 处不再
+   * "以容器身份"回带自身 id，而是工具报 `identity_required` —— 身份**只能**由 ② 的逐调用
+   * 会话头赋予。这使本用例的敏感点更硬：删掉逐请求重解析分支即永久无身份。
    */
   it("re-resolves identity on a later tools/call session header (real bridge timing; fails without per-request re-resolution)", async () => {
     const { box, session } = containerWithSession()
     const peer = makeAgent("m2-timing-peer")
 
-    // ① initialize **不带**会话头 → 身份 = `x-agent-id`（容器）。真实桥的 ensureSession 即如此。
+    // ① initialize **不带**会话头 → P5 fail-closed：`x-agent-id` 是容器 ⇒ 视为无身份。
     const init = await rawPost(initializeMessage(), { "x-agent-id": box.id })
     expect(init.status).toBe(200)
     if (init.sessionId === null) throw new Error("initialize returned no mcp-session-id")
     const base = { "mcp-session-id": init.sessionId, "x-agent-id": box.id }
     await rawPost({ jsonrpc: "2.0", method: "notifications/initialized" }, base)
 
-    // 固化敏感点：此刻身份是**容器、不是会话节点**（`status` 工具回带自身 id）。
+    // 固化敏感点：此刻**没有**身份（容器不被当作身份），工具报 identity_required。
     const before = await rawPost(
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "status", arguments: { text: "init" } } },
       base,
     )
-    const beforeStatus = MCP_TOOL_OUTPUTS.status.parse(JSON.parse(textOf(rawResult(before.text))))
-    expect(beforeStatus.id).toBe(box.id)
-    expect(beforeStatus.id).not.toBe(session.id)
+    const beforeResult = rawResult(before.text)
+    expect(toolFailed(beforeResult)).toBe(true)
+    expect(textOf(beforeResult)).toContain("identity_required")
 
     // ② 同一 mcp-session-id 随后发 tools/call **带**会话头（复刻桥剥离入参后转的请求头）。
     const call = await rawPost(
