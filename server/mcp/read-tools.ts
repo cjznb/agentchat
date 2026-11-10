@@ -1,5 +1,5 @@
 /**
- * MCP 读 / 策略工具：`roster` / `conversation` / `group` / `shout`（spec §9）。
+ * MCP 读 / 策略工具：`roster` / `conversation` / `group` / `shout` / `whoami`（spec §9）。
  * 群与喊话入口经 core 审批闸门（Task 7）：返回 `{approval}` 时不执行，交人审批。
  */
 import type { McpToolInput } from "../../shared/contracts"
@@ -9,17 +9,44 @@ import {
   createGroup,
   history,
   shout,
+  unreadFor,
   type ShoutApprovalWaitResult,
 } from "../core/messaging"
 import type { ApprovalRequested } from "../core/permissions"
 import { maskRevokedForReader } from "../core/revoke"
+import { agentDisplayName, getAgent } from "../store/agents"
 import { listConversations, listParticipants, SHOUT_KEY } from "../store/conversations"
 import {
+  McpToolError,
   requireIdentity,
   sendView,
   type SendResultView,
   type ToolContext,
 } from "./context"
+
+/**
+ * `whoami`：读**自己**的身份卡。
+ *
+ * 为什么（真机反馈）：agent 不知道自己的**展示名**（昵称）是什么——`register` 出参里的 `agent.name`
+ * 是机器唯一名（如 `agent-470b943b`），而人类在 UI 里看到/改的是展示名 `COALESCE(custom_name, name)`；
+ * 注入头也只带发送者 id。于是 agent 既说不出自己叫什么，也不知道该拿哪个名字跟人对账。
+ */
+export function runWhoami(ctx: ToolContext): unknown {
+  const requester = requireIdentity(ctx)
+  const agent = getAgent(ctx.db, requester)
+  if (agent === undefined) throw new McpToolError("agent_not_found", `unknown agent: ${requester}`)
+  return {
+    agent_id: agent.id,
+    name: agent.name,
+    display_name: agentDisplayName(agent),
+    vendor: agent.vendor,
+    kind: agent.kind,
+    status: agent.status,
+    role_tag: agent.roleTag ?? null,
+    parent_id: agent.parentId ?? null,
+    unread: unreadFor(ctx.db, agent.id),
+  }
+}
 
 export function runRoster(ctx: ToolContext, input: McpToolInput<"roster">): unknown {
   const requester = requireIdentity(ctx)

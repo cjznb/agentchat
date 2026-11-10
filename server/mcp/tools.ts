@@ -22,7 +22,7 @@ import { getConversation } from "../store/conversations"
 import { getById, type Message } from "../store/messages"
 import { errorResult, McpToolError, requireIdentity, sendView, toolResult, type ToolContext } from "./context"
 import { runAsk, runRespondAsk } from "./ask-tools"
-import { runConversation, runGroup, runRoster, runShout } from "./read-tools"
+import { runConversation, runGroup, runRoster, runShout, runWhoami } from "./read-tools"
 // P4：12 条 description 与使用指南各自成模块（单文件 ≤250 纯行的硬约束；文本量大且与逻辑无关）。
 import { TOOL_DESCRIPTIONS } from "./descriptions"
 import { AGENTCHAT_GUIDE } from "./guide"
@@ -229,6 +229,8 @@ function runTool(name: McpToolName, args: unknown, ctx: ToolContext): Promise<un
       return runAsk(ctx, MCP_TOOL_INPUTS.ask.parse(args))
     case "respond_ask":
       return runRespondAsk(ctx, MCP_TOOL_INPUTS.respond_ask.parse(args))
+    case "whoami":
+      return runWhoami(ctx)
   }
 }
 

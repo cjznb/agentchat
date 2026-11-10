@@ -38,7 +38,7 @@ describe("locked contract values", () => {
     expect(WS_EVENT_TYPES).toEqual(["message", "receipt", "agent", "approval"])
   })
 
-  it("locks MCP_TOOLS to the twelve spec §9 tool names in order when read as an array", () => {
+  it("locks MCP_TOOLS to the thirteen spec §9 tool names in order when read as an array", () => {
     expect(MCP_TOOLS).toEqual([
       "register",
       "send",
@@ -52,6 +52,7 @@ describe("locked contract values", () => {
       "message_status",
       "ask",
       "respond_ask",
+      "whoami",
     ])
   })
 })
@@ -141,8 +142,8 @@ describe("group mentions & ask discriminant extensions (Task 2)", () => {
     readReceipts: [],
   }
 
-  it("keeps MCP_TOOLS at exactly twelve entries and mcpToolNameSchema in sync when extended", () => {
-    expect(MCP_TOOLS).toHaveLength(12)
+  it("keeps MCP_TOOLS at exactly thirteen entries and mcpToolNameSchema in sync when extended", () => {
+    expect(MCP_TOOLS).toHaveLength(13)
     for (const name of MCP_TOOLS) expect(mcpToolNameSchema.parse(name)).toBe(name)
     expect(() => mcpToolNameSchema.parse("mentions")).toThrow()
   })

@@ -335,7 +335,7 @@ describe("桥 ↔ 真 Hub 往返", () => {
 
     const list = await client.request("tools/list", {})
     expect(toolNames(list)).toEqual([...MCP_TOOLS])
-    expect(toolNames(list)).toHaveLength(12)
+    expect(toolNames(list)).toHaveLength(13)
 
     const call = await client.request("tools/call", {
       name: "register",

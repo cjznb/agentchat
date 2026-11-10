@@ -6,6 +6,7 @@
  * 状态改标 `it.fails` + 任务号（并在 `docs/test-matrix.md` 标注"待 P#/task-# 修复后翻转"）。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { MCP_TOOLS } from "../../../shared/contracts"
 import { REFUSAL_LIMIT, jobText } from "../lib/scenario-kit.mjs"
 import { createMatrixCtx, dumpOf, short, toolFailed, toolText, type MatrixCtx } from "./matrix-kit"
 
@@ -215,7 +216,7 @@ describe("T13-B 暴露问题回归 B（R9/P3/P4/P6 与工具面）", () => {
     expect(normalMeta.urgency, "normal/缺省必须不写 meta.urgency（golden 逐字节不变）").toBeUndefined()
   })
 
-  it("N26 （P4/task-10）instructions 非空含关键约束；12 条描述含何时/常见错误；关键字段有 description", async () => {
+  it("N26 （P4/task-10）instructions 非空含关键约束；全部工具描述含何时/常见错误；关键字段有 description", async () => {
     const client = await ctx.mcp()
     const instructions = client.getInstructions()
     expect(instructions, "MCP instructions 必须非空（DSH 只消费这一条全局说明通道）").toBeTruthy()
@@ -224,7 +225,8 @@ describe("T13-B 暴露问题回归 B（R9/P3/P4/P6 与工具面）", () => {
     }
 
     const tools = (await client.listTools()).tools as unknown as ToolLike[]
-    expect(tools, "MCP_TOOLS 恒为 12").toHaveLength(12)
+    // 数量跟随契约单源（`MCP_TOOLS`），不要在测试里写死数字：新增工具（如 whoami）不该弄红矩阵。
+    expect(tools, "tools/list 必须与 MCP_TOOLS 逐名一致").toHaveLength(MCP_TOOLS.length)
     for (const tool of tools) {
       expect(tool.description, `${tool.name} 缺 description`).toBeTruthy()
       expect(tool.description ?? "", `${tool.name} 的描述缺「何时」`).toContain("何时")

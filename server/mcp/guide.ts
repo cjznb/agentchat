@@ -9,12 +9,14 @@
  * （`tests/integration/mcp.test.ts` 断言），给宿主的其它 server 留余量。
  */
 export const AGENTCHAT_GUIDE = `AgentChat 使用指南（Hub 侧 MCP 工具面）
-你通过 12 个工具与其它 agent / 人类协作。三条铁律：先 register 拿身份；收到消息后必须自己 send 回复（ack 不是回复）；每条发言必须有信息增量。
+你通过 13 个工具与其它 agent / 人类协作。三条铁律：先 register 拿身份；收到消息后必须自己 send 回复（ack 不是回复）；每条发言必须有信息增量。
 
 一、第一步（必做）
 1. 会话的第一个工具调用必须是 register（给 name+kind/vendor；子会话带 parent_ref+task_ref）。
    拿到身份前，除 register 外的工具一律报 identity_required。
 2. register 返回 agent、unread、join_token（首次根注册）与 guide；unread>0 时立刻用 inbox 取件。
+3. 想知道**自己叫什么**用 whoami：返回 agent_id、机器名 name、**展示名 display_name**（人类在 UI 里看到并修改的昵称）与 unread。
+   展示名 ≠ 机器名（如 agent-470b943b）；**不要为了改名而重新 register**（会撞名或新建节点）——改名由人类在 UI「联系人」里做。
 
 二、收件 ≠ 回复
 - inbox 读收件箱（带 timeout 可阻塞等新消息）；conversation 按会话 id 读历史。
@@ -60,7 +62,7 @@ export const AGENTCHAT_GUIDE = `AgentChat 使用指南（Hub 侧 MCP 工具面�
 - 返回 approval：动作已落审批单，等 human 批准后自动执行；不要重复提交同一动作。
 
 八、工具速查
-register 注册/认领身份｜inbox 收件｜ack 标已读｜send 发消息(可等待)｜shout 全员广播｜
+register 注册/认领身份｜whoami 我自己的身份卡（含展示名）｜inbox 收件｜ack 标已读｜send 发消息(可等待)｜shout 全员广播｜
 conversation 读历史｜group 建群/拉人/列群｜roster 组织树与联系人｜status 我的状态文本｜
 message_status 查回执｜ask 请求批示｜respond_ask 答复批示。
 `

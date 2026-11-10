@@ -1,5 +1,5 @@
 /**
- * MCP 十二工具 description 单源（P4 工具可发现性）。
+ * MCP 工具 description 单源（P4 工具可发现性）。
  *
  * 为什么单独成文件：本仓硬约束「单文件 ≤ 250 纯行（非空、非注释）」（CONTRIBUTING.md:80）。
  * 另经安装包 app.asar 内 dsh-mcp-client 源码核实：DSH 只消费 tool `description` +
@@ -35,11 +35,11 @@ export const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "常见错误：" + DISCIPLINE + "；not_participant（不在群里，先 group{op:add}）；recipient_not_found（先用 roster 取 id）；identity_required（先 register）；container_not_chat_target（容器不是聊天对象）。",
   ].join("\n"),
   inbox: [
-    "作用：读自己的收件箱（可按会话过滤、after 分页、ack=true 顺手标已读、timeout 阻塞等新消息）。",
+    "作用：读自己的收件箱——**只看未读**（每个会话各自从上次已读位点之后取，全局 seq 升序），可按会话过滤、after 叠加翻页、ack=true 顺手标已读、timeout 阻塞等新消息。",
     "何时用：回合开始或想知道有没有新消息/任务时；等别人回信也可用 timeout。",
-    "何时不用：inbox 不是回复——读完要回就用 send 回给发送者/群，只 ack 对方永远等不到答复。",
-    "邻接区别：inbox=收件视角（未读+提及）；conversation=按会话读全部历史；ack=只标已读。",
-    '示例：{"conversation":"<群 id>","after":0,"ack":true,"timeout":30000}',
+    "何时不用：inbox 不是回复——读完要回就用 send 回给发送者/群，只 ack 对方永远等不到答复；要看**已读的历史**用 conversation。",
+    "邻接区别：inbox=未读收件视角（ack 后不再出现）；conversation=按会话读全部历史；ack=推进已读位点；roster 可见他人未读数。",
+    '示例：{"conversation":"<群 id>","ack":true,"timeout":30000}',
     "常见错误：identity_required（先 register）；把 timeout 等到的消息当成已回复（必须 send）；超时返回 timedOut=true 属正常，不是错误。",
   ].join("\n"),
   ack: [
@@ -113,5 +113,13 @@ export const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "邻接区别：respond_ask 只答复 ask 单；普通消息用 send 回复；ask 是发起侧。",
     '示例：{"ask_id":"<ask id>","choice":"yes"}',
     "常见错误：invalid_choice（choice 不在 options 内且未开 allow_custom）；ask_already_answered（已有人答过）；自由答复要传 text 而不是 choice。",
+  ].join("\n"),
+  whoami: [
+    "作用：读**自己**的身份卡——agent_id、机器名 name、**展示名 display_name**（人类在 UI 里看到并修改的昵称）、vendor/kind/status/role_tag/parent_id 与 unread。",
+    "何时用：想知道自己叫什么/自己是谁、要跟人类对账名字、确认自己已被收养、或看看还有多少未读时。",
+    "何时不用：查别人用 roster；whoami 只读——**改展示名不是本工具**（由人类在 UI「联系人」改，或 PATCH /api/agents/:id）。",
+    "邻接区别：whoami=自己一张卡；roster=整棵节点树（含他人 id/状态/未读）；register=建/认领节点并拿身份；status=改状态文本。",
+    "示例：{}",
+    "常见错误：identity_required（先 register 拿身份再 whoami）；把机器名 name 当成别人看到的昵称（人类看到的是 display_name）。",
   ].join("\n"),
 }

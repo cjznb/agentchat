@@ -1,6 +1,6 @@
 /**
  * Task 8 —— MCP 端点集成测试（brief DoD）：真实 MCP SDK 客户端连 `POST /mcp`（Bearer）。
- * ① `tools/list` 恰为锁定十二名 + 金样例过 `MCP_TOOL_INPUTS`
+ * ① `tools/list` 恰为锁定工具名 + 金样例过 `MCP_TOOL_INPUTS`
  * ② `send{wait}` 端到端：对方 core 回信 → 调用方在 wait 内解锁拿到 reply
  * ③ 错误契约：未知收件人 RecipientNotFound / 子 shout Forbidden / `to:'*'` use_shout_tool
  *    / 缺身份 identity_required / 无 Bearer 401
@@ -37,7 +37,7 @@ import { getAgent, insertAgent, renameAgent, type Agent } from "../../server/sto
 import { listApprovals } from "../../server/store/approvals"
 import { ensureShoutConversation } from "../../server/store/conversations"
 
-/** 十二工具金样例（运行时注入真实 peer id、可答复 ask id 与成员会话 id；键集合即「接线错误」检测基准）。 */
+/** 全部工具金样例（运行时注入真实 peer id、可答复 ask id 与成员会话 id；键集合即「接线错误」检测基准）。 */
 function goldenInputs(
   peerId: string,
   answerableAskId: string,
@@ -56,6 +56,7 @@ function goldenInputs(
     message_status: { ids: ["abcdef"] },
     ask: { to: "human", question: "golden ask?", options: ["yes", "no"], allow_custom: true },
     respond_ask: { ask_id: answerableAskId, choice: "yes" },
+    whoami: {},
   }
 }
 
@@ -245,8 +246,8 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<vo
   throw new Error("condition not met in time")
 }
 
-describe("tools/list 与十二工具金样例端到端（DoD ①，Important #1）", () => {
-  it("advertises the contract schemas and executes every one of the twelve tools with its golden input", async () => {
+describe("tools/list 与全部工具金样例端到端（DoD ①，Important #1）", () => {
+  it("advertises the contract schemas and executes every tool with its golden input", async () => {
     const actor = makeAgent("mcp-golden-actor")
     const peer = makeAgent("mcp-golden-peer")
     // 预置一条可答复 ask（peer → actor：actor 为 target），令 respond_ask 金样例有落点。
@@ -286,7 +287,14 @@ describe("tools/list 与十二工具金样例端到端（DoD ①，Important #1�
           name,
           keys: expect.arrayContaining(Object.keys(golden[name])),
         })
-        expect(Object.keys(properties).length).toBeGreaterThan(0)
+        // 无参工具（金样例为空对象，如 `whoami`）合法地广告 `properties: {}`；
+        // 该锁只用于揪「有参工具被拍平成空壳 schema」的接线错误。
+        if (Object.keys(golden[name]).length > 0) {
+          expect({ name, propertyCount: Object.keys(properties).length > 0 }).toEqual({
+            name,
+            propertyCount: true,
+          })
+        }
       }
       const groupProps = byName.get("group")?.inputSchema.properties ?? {}
       expect(groupProps["op"]).toMatchObject({ enum: ["create", "add", "list"] })
@@ -1086,7 +1094,7 @@ describe("P4 工具可发现性（instructions／description／is_member／错�
     return typeof description === "string" && description.length > 0
   }
 
-  it("injects a ≤8KB guide via instructions and advertises six-line descriptions on all twelve tools", async () => {
+  it("injects a ≤8KB guide via instructions and advertises six-line descriptions on all tools", async () => {
     const actor = makeAgent("p4-discover-actor")
     const client = await connect(actor.id)
     try {
@@ -1253,6 +1261,50 @@ describe("P6 紧急度（urgency）端到端", () => {
       expect(textOf(bogus)).toContain("Input validation error")
     } finally {
       await client.close()
+    }
+  })
+})
+
+describe("whoami：agent 能查到自己的展示名（真机反馈「不知道自己昵称」）", () => {
+  it("返回机器名与展示名（= custom_name ?? name）；改名后展示名变、机器名不变；unread 与未读一致", async () => {
+    const actor = makeAgent("whoami-actor")
+    const peer = makeAgent("whoami-peer")
+    const client = await connect(actor.id)
+    try {
+      // ① 未改名：展示名 == 机器名
+      const first = await callTool(client, "whoami", {})
+      expect(toolFailed(first)).toBe(false)
+      const card1 = MCP_TOOL_OUTPUTS.whoami.parse(JSON.parse(textOf(first)))
+      expect(card1.agent_id).toBe(actor.id)
+      expect(card1.name).toBe("whoami-actor")
+      expect(card1.display_name).toBe("whoami-actor")
+      expect(card1.unread).toBe(0)
+
+      // ② 人类在 UI 改名（等价 PATCH /api/agents/:id → store.renameAgent）：展示名变、机器名不变
+      renameAgent(db, actor.id, "人类给我起的昵称")
+      const second = await callTool(client, "whoami", {})
+      const card2 = MCP_TOOL_OUTPUTS.whoami.parse(JSON.parse(textOf(second)))
+      expect(card2.display_name).toBe("人类给我起的昵称")
+      expect(card2.name).toBe("whoami-actor")
+
+      // ③ unread 与收件箱口径一致
+      sendMessage(db, { from: peer.id, to: actor.id, body: "给你一条" })
+      const third = await callTool(client, "whoami", {})
+      const card3 = MCP_TOOL_OUTPUTS.whoami.parse(JSON.parse(textOf(third)))
+      expect(card3.unread).toBe(1)
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("没有身份时 whoami 报 identity_required（不会泄漏他人信息）", async () => {
+    const anonymous = await connect()
+    try {
+      const result = await callTool(anonymous, "whoami", {})
+      expect(toolFailed(result)).toBe(true)
+      expect(textOf(result)).toContain("identity_required")
+    } finally {
+      await anonymous.close()
     }
   })
 })

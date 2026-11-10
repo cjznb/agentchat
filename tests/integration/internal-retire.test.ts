@@ -132,6 +132,6 @@ describe("POST /internal/retire", () => {
     expect(malformed.status).toBe(400)
 
     // 退役不进 MCP 面
-    expect(MCP_TOOLS).toHaveLength(12)
+    expect(MCP_TOOLS).toHaveLength(13)
   })
 })
