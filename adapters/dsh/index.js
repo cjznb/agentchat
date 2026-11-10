@@ -258,8 +258,11 @@ export function apply(ctx, config) {
     await reportInstance(state, true)
   }
 
-  /** 会话标题 → Hub 展示名（`custom_name`；`name` 不动）：见 `lib/title.js`。`config.titleAsName: false` 可关。 */
-  const syncTitle = createTitleSync({ ctx, hub, log: warn, enabled: cfg["titleAsName"] !== false })
+  /**
+   * 会话标题 → Hub 展示名（`custom_name`；`name` 不动）：见 `lib/title.js`。`config.titleAsName: false` 可关。
+   * 传 `home` 以便把「上次同步值 / 已脱离」持久化到 `<home>/agents/dsh.titles.json`——重启后仍不覆盖用户改名。
+   */
+  const syncTitle = createTitleSync({ ctx, hub, home, log: warn, enabled: cfg["titleAsName"] !== false })
 
   /**
    * 原生工具面（**P7 起默认开启**）：逐调用按调用者会话注入身份（`x-agentchat-session`）——多会话与
@@ -417,7 +420,8 @@ export function apply(ctx, config) {
         // 空闲期到达的消息将**永远无人认领**——真机症状：AgentChat 里一直「排队中」。
         ensurePolling(sessionId, entry.nodeId)
         // 展示名 = DSH 会话标题（可读）；`name` 仍是机器唯一名。失败只记日志。
-        guard(syncTitle(sessionId, agent, entry.nodeId))
+        // 机器名一并传入：标题同步据此判断"当前展示名 ≠ 机器名"= 已有人（用户）改过名，不得覆盖。
+        guard(syncTitle(sessionId, agent, entry.nodeId, sessionName(header, sessionId)))
         return entry
       } catch (error) {
         warn(`会话节点注册失败（${sessionId}）：${describe(error)}`)

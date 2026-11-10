@@ -46,6 +46,7 @@ export const DELIVERY_RESULTS = /** @type {const} */ (["delivered", "refused"])
  *   reportResult(agentId: string, items: ReadonlyArray<{messageId: string, result: string}>): Promise<void>,
  *   retire(agentId: string): Promise<void>,
  *   renameAgent(agentId: string, name: string): Promise<void>,
+ *   readAgentDisplayName(agentId: string): Promise<string | undefined>,
  *   mcp(): {list(): Promise<unknown[]>, call(name: string, args: unknown, taskRef?: string): Promise<string>, reset(): void},
  * }}
  */
@@ -107,6 +108,27 @@ export function createHubClient(options) {
       const path = `/api/agents/${encodeURIComponent(agentId)}`
       const result = await send(path, { name: displayName }, bearer, "PATCH")
       expectStatus(200, result, `PATCH ${path}`)
+    },
+    /**
+     * 读节点**展示名**（`GET /api/agents/:id` → `node.name`，即 `COALESCE(custom_name, name)`）。
+     *
+     * 用途：`lib/title.js` 的"标题同步不得覆盖用户手动改名"判定——同步前先看 Hub 上的当前名，
+     * 与"我们上次写入的值"不一致即视为用户改过名，停用该会话的自动同步。
+     * 404（节点已不存在）→ `undefined`；响应形状异常 → `undefined`（调用方按"读不到"降级）。
+     */
+    async readAgentDisplayName(agentId) {
+      const path = `/api/agents/${encodeURIComponent(agentId)}`
+      const result = await send(path, undefined, bearer, "GET")
+      if (result.status === 404) return undefined
+      expectStatus(200, result, `GET ${path}`)
+      let parsed
+      try {
+        parsed = JSON.parse(result.text)
+      } catch {
+        return undefined
+      }
+      const name = parsed?.node?.name
+      return typeof name === "string" && name !== "" ? name : undefined
     },
     /**
      * **原生工具面**用：通用 MCP 客户端（一次握手后可反复 `list()`/`call()`；逐调用身份经
