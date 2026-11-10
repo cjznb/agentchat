@@ -15,6 +15,7 @@
  * @property {boolean} noOpen
  * @property {boolean} testApi
  * @property {boolean} build
+ * @property {boolean} checkUpdate
  * @property {boolean} help
  * @property {boolean} version
  * @property {string[]} passthrough
@@ -44,6 +45,8 @@ export const HELP_TEXT = `agentchat —— 一行命令启动 AgentChat Hub
   --test-api      开启 /api/test/* 测试接口（等价 env AGENTCHAT_TEST_API=1；仅回环、含破坏性操作，
                   仅用于自动化/真机测试，切勿对生产数据目录开启）
   --build         启动前强制重建前端（默认仅在 client/dist 缺失时构建）
+  --check-update  检查是否有新版本（需要 Hub 正在运行；只检查、**不**自动升级。
+                  退出码 0=已最新、1=有更新、2=检查失败）
   -h, --help      显示本帮助
   -v, --version   显示版本
   --              其后的参数原样透传给 Hub 入口
@@ -53,6 +56,7 @@ export const HELP_TEXT = `agentchat —— 一行命令启动 AgentChat Hub
   agentchat --port 5000 --home ./.data
   agentchat --no-open
   agentchat --test-api --home ./.test-data
+  agentchat --check-update
 `
 
 /** 读取 `--flag value` / `--flag=value` 两种形式的取值。返回取值与下一个待处理下标。 */
@@ -97,6 +101,7 @@ export function parseArgs(argv) {
     noOpen: false,
     testApi: false,
     build: false,
+    checkUpdate: false,
     help: false,
     version: false,
     passthrough: [],
@@ -126,6 +131,11 @@ export function parseArgs(argv) {
     }
     if (arg === "--build") {
       parsed.build = true
+      index += 1
+      continue
+    }
+    if (arg === "--check-update") {
+      parsed.checkUpdate = true
       index += 1
       continue
     }

@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { HELP_TEXT, childEnv, parseArgs } from "./cli-args.mjs"
+import { runUpdateCheckCommand } from "./update-check.mjs"
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -83,6 +84,18 @@ function main() {
   }
   if (parsed.version) {
     process.stdout.write(`${readVersion()}\n`)
+    return
+  }
+  // `--check-update`：只查询运行中的 Hub 并打印，不构建、不启动、不自动升级。
+  if (parsed.checkUpdate) {
+    void runUpdateCheckCommand(parsed)
+      .then((code) => process.exit(code))
+      .catch((error) => {
+        console.error(
+          `[agentchat] 更新检查失败：${error instanceof Error ? error.message : String(error)}`,
+        )
+        process.exit(2)
+      })
     return
   }
   const status = buildClient(parsed.build)

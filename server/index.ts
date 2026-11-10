@@ -24,6 +24,7 @@ import { mcpRoutes } from "./routes/mcp"
 import { notificationRoutes } from "./routes/notifications"
 import { testRoutes } from "./routes/test"
 import { uiRoutes } from "./routes/ui"
+import { versionRoutes, type VersionRoutesOptions } from "./routes/version"
 import { attachWsServer } from "./ws"
 
 /** 组装选项：internal 的 token 路径 + MCP 的 join_token 落盘 home / 会话 TTL（测试注入）。 */
@@ -42,6 +43,11 @@ export interface AppOptions extends InternalRoutesOptions {
    * **默认关闭**：不传且 env `AGENTCHAT_TEST_API` 未开时，这些路径根本不存在（404）。
    */
   readonly testApi?: boolean
+  /**
+   * 版本面（`/api/version*`）注入点：数据源 / fetch / 时钟 / 厂商列表（测试）。
+   * `vendors` 缺省取 `options.adapters ?? config.adapters`。
+   */
+  readonly version?: VersionRoutesOptions
 }
 
 export function createApp(db?: Db, options?: AppOptions): Hono {
@@ -54,6 +60,14 @@ export function createApp(db?: Db, options?: AppOptions): Hono {
   const testApi = options?.testApi ?? config.testApi
   if (hasClient) app.use("*", serveStatic({ root: distDir }))
   app.get("/api/health", (c) => c.json({ status: "ok" }))
+  // 版本面：只读、无鉴权（与 /api/health 同级）；厂商列表与适配器登记同源。
+  app.route(
+    "/",
+    versionRoutes({
+      ...(options?.version ?? {}),
+      vendors: options?.version?.vendors ?? options?.adapters ?? config.adapters,
+    }),
+  )
   app.route("/", uiRoutes(db))
   app.route("/", notificationRoutes(db))
   app.route("/", internalRoutes(db, options))

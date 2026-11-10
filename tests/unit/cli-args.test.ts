@@ -4,7 +4,7 @@
  * 解析与映射均为纯函数，不触碰真实环境或子进程。
  */
 import { describe, expect, it } from "vitest"
-import { childEnv, parseArgs } from "../../bin/cli-args.mjs"
+import { HELP_TEXT, childEnv, parseArgs } from "../../bin/cli-args.mjs"
 
 const parse = (...argv: string[]) => parseArgs(argv)
 
@@ -15,6 +15,7 @@ describe("parseArgs", () => {
     expect(parsed.home).toBeUndefined()
     expect(parsed.noOpen).toBe(false)
     expect(parsed.build).toBe(false)
+    expect(parsed.checkUpdate).toBe(false)
     expect(parsed.help).toBe(false)
     expect(parsed.version).toBe(false)
     expect(parsed.passthrough).toEqual([])
@@ -50,6 +51,22 @@ describe("parseArgs", () => {
     const parsed = parse("--no-open", "--build")
     expect(parsed.noOpen).toBe(true)
     expect(parsed.build).toBe(true)
+  })
+
+  it("recognizes --check-update (只检查、不启动) 并可与端口共存", () => {
+    expect(parse("--check-update").checkUpdate).toBe(true)
+    const parsed = parse("--check-update", "--port", "5000")
+    expect(parsed.checkUpdate).toBe(true)
+    expect(parsed.port).toBe(5000)
+    expect(parsed.errors).toEqual([])
+    // 只认完整开关，带值形式按未知参数拒绝（避免把 URL 之类误吞）。
+    expect(parse("--check-update=x").errors.some((e) => e.includes("无法识别"))).toBe(true)
+  })
+
+  it("help text documents --check-update 与退出码语义", () => {
+    expect(HELP_TEXT).toContain("--check-update")
+    expect(HELP_TEXT).toContain("退出码")
+    expect(HELP_TEXT).toContain("自动升级")
   })
 
   it("recognizes help and version in short and long forms", () => {
