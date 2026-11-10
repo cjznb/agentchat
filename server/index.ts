@@ -22,6 +22,7 @@ import { adminRoutes } from "./routes/admin"
 import { internalRoutes, type InternalRoutesOptions } from "./routes/internal"
 import { mcpRoutes } from "./routes/mcp"
 import { notificationRoutes } from "./routes/notifications"
+import { testRoutes } from "./routes/test"
 import { uiRoutes } from "./routes/ui"
 import { attachWsServer } from "./ws"
 
@@ -36,6 +37,11 @@ export interface AppOptions extends InternalRoutesOptions {
   readonly isLoopback?: (c: Context) => boolean
   /** 管理端点时钟（缺省 `Date.now`；测试固定快照目录名）。 */
   readonly adminNow?: () => number
+  /**
+   * 是否挂载 `/api/test/*` 测试接口（缺省 `config.testApi`）。
+   * **默认关闭**：不传且 env `AGENTCHAT_TEST_API` 未开时，这些路径根本不存在（404）。
+   */
+  readonly testApi?: boolean
 }
 
 export function createApp(db?: Db, options?: AppOptions): Hono {
@@ -44,6 +50,8 @@ export function createApp(db?: Db, options?: AppOptions): Hono {
   const distDir = options?.distDir ?? fileURLToPath(new URL("../client/dist", import.meta.url))
   const indexPath = join(distDir, "index.html")
   const hasClient = existsSync(indexPath)
+  // 测试接口的挂载开关：显式选项优先，缺省取进程配置（env `AGENTCHAT_TEST_API` > config.json）。
+  const testApi = options?.testApi ?? config.testApi
   if (hasClient) app.use("*", serveStatic({ root: distDir }))
   app.get("/api/health", (c) => c.json({ status: "ok" }))
   app.route("/", uiRoutes(db))
@@ -58,6 +66,16 @@ export function createApp(db?: Db, options?: AppOptions): Hono {
       ...(options?.isLoopback === undefined ? {} : { isLoopback: options.isLoopback }),
     }),
   )
+  // 测试接口：**仅**在开关为真时挂载 —— 关闭态下 `/api/test/*` 落 notFound（404），
+  // 路由表里不存在，不泄露路径存在性。模块内仍自带回环守卫（三重防线见 routes/test.ts 头注释）。
+  if (testApi) {
+    app.route(
+      "/",
+      testRoutes(db, {
+        ...(options?.isLoopback === undefined ? {} : { isLoopback: options.isLoopback }),
+      }),
+    )
+  }
   app.notFound((c) => {
     const protectedPath = ["/api", "/mcp", "/internal"].some((prefix) => c.req.path.startsWith(prefix))
     if (protectedPath || c.req.path.startsWith("/assets/")) return c.text("Not Found", 404)
@@ -86,16 +104,20 @@ export interface StartOptions {
   readonly sessionTtlMs?: number
   /** 已配置厂商（缺省 `config.adapters`）；启动时注册 pull 占位适配器。 */
   readonly adapters?: readonly string[]
+  /** 是否挂载 `/api/test/*` 测试接口（缺省 `config.testApi`）。 */
+  readonly testApi?: boolean
 }
 
 export async function start(options: StartOptions = {}): Promise<RunningServer> {
   const port = options.port ?? config.port
+  const testApi = options.testApi ?? config.testApi
   const server: ServerType = serve({
     fetch: createApp(options.db, {
       ...(options.hubTokenPath === undefined ? {} : { hubTokenPath: options.hubTokenPath }),
       ...(options.home === undefined ? {} : { home: options.home }),
       ...(options.sessionTtlMs === undefined ? {} : { sessionTtlMs: options.sessionTtlMs }),
       ...(options.adapters === undefined ? {} : { adapters: options.adapters }),
+      ...(options.testApi === undefined ? {} : { testApi: options.testApi }),
     }).fetch,
     port,
   })
@@ -115,8 +137,18 @@ export async function start(options: StartOptions = {}): Promise<RunningServer> 
     server.once("error", reject)
   })
 
+  const url = `http://127.0.0.1:${info.port}`
+  // 测试接口开启时打一条醒目告警：这是破坏性测试面（清库/硬删/删会话），绝不能对着真实数据目录跑。
+  // 放在 `start()`（而非 `createApp()`）里 —— 单元测试会反复调用 createApp，不该被噪声淹没。
+  if (testApi) {
+    console.warn(
+      `[agentchat] ⚠ 测试接口已开启：${url}/api/test/*（仅回环）——含清库/硬删/删会话等破坏性操作，` +
+        "切勿对生产数据目录（~/.agentchat）开启；关闭请去除 env AGENTCHAT_TEST_API 或 config.json 的 testApi。",
+    )
+  }
+
   return {
-    url: `http://127.0.0.1:${info.port}`,
+    url,
     close: () =>
       new Promise<void>((resolve, reject) => {
         // 强制关闭 keep-alive 与已升级（WebSocket）连接：Node 的 `server.close` 会为它们

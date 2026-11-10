@@ -11,6 +11,7 @@ import {
   type AgentStatus,
 } from "../../shared/contracts"
 import type { Db } from "../db"
+import { deleteConversationCascade } from "./conversations"
 
 const skillsSchema = z.array(z.string())
 
@@ -396,4 +397,221 @@ export function listAgents(db: Db): Agent[] {
     .prepare<[], AgentRow>("SELECT * FROM agents ORDER BY created_at ASC, name ASC")
     .all()
   return rows.map(toAgent)
+}
+
+// ── 硬删除（`/api/test/*` 测试面，不可恢复）：引用清点 + 单事务级联清理 ─────────────
+
+/**
+ * 该 agent 的**行级引用清点**（`force` 守卫判据，并作为 `agent_in_use` 的报错明细）。
+ * `children` 由外键现实导出：他人行的 `parent_id` / `root_id` 指向本 id；自身
+ * `root_id = id`（根节点）不算，故显式排除自身 —— 否则每个根都会「有子」而永远删不掉。
+ */
+export interface AgentReferences {
+  readonly children: number
+  readonly messages: number
+  readonly approvals: number
+  readonly conversations: number
+  readonly participants: number
+  readonly readStates: number
+  readonly wakeJobs: number
+  readonly keys: number
+}
+
+interface AgentReferenceRow {
+  readonly children: number
+  readonly messages: number
+  readonly approvals: number
+  readonly conversations: number
+  readonly participants: number
+  readonly readStates: number
+  readonly wakeJobs: number
+  readonly keys: number
+}
+
+const ZERO_REFERENCES: AgentReferences = {
+  children: 0,
+  messages: 0,
+  approvals: 0,
+  conversations: 0,
+  participants: 0,
+  readStates: 0,
+  wakeJobs: 0,
+  keys: 0,
+}
+
+/**
+ * 一次查齐全部引用计数：八个标量子查询在同一语句内取快照（无中间态，`$id` 重复引用
+ * 由 better-sqlite3 命名参数支持）。调用方在同一 `BEGIN IMMEDIATE` 事务内调用时，
+ * 返回值即删除判据。
+ */
+export function agentReferences(db: Db, id: string): AgentReferences {
+  const row = db
+    .prepare<{ id: string }, AgentReferenceRow>(
+      `SELECT
+         (SELECT COUNT(*) FROM agents WHERE id <> $id AND (parent_id = $id OR root_id = $id)) AS children,
+         (SELECT COUNT(*) FROM messages WHERE from_agent_id = $id)        AS messages,
+         (SELECT COUNT(*) FROM approvals WHERE requester_agent_id = $id)  AS approvals,
+         (SELECT COUNT(*) FROM conversations WHERE created_by = $id)      AS conversations,
+         (SELECT COUNT(*) FROM participants WHERE agent_id = $id)         AS participants,
+         (SELECT COUNT(*) FROM read_states WHERE agent_id = $id)          AS readStates,
+         (SELECT COUNT(*) FROM wake_jobs WHERE agent_id = $id)            AS wakeJobs,
+         (SELECT COUNT(*) FROM agent_keys WHERE agent_id = $id)           AS keys`,
+    )
+    .get({ id })
+  return row ?? ZERO_REFERENCES
+}
+
+/** 硬删守卫 1：仍有子节点（`parent_id` / `root_id` 指向它）—— `force` 也不删子节点，避免孤儿树。 */
+export class AgentHasChildrenError extends Error {
+  readonly code = "agent_has_children"
+  constructor(
+    readonly agentId: string,
+    readonly count: number,
+  ) {
+    super(`agent ${agentId} still has ${count} child node(s)`)
+    this.name = "AgentHasChildrenError"
+  }
+}
+
+/** 硬删守卫 2：未 `force` 而该 agent 仍被业务数据引用（消息 / 审批单 / 其创建的会话）。 */
+export class AgentInUseError extends Error {
+  readonly code = "agent_in_use"
+  constructor(
+    readonly agentId: string,
+    readonly refs: AgentReferences,
+  ) {
+    super(
+      `agent ${agentId} is in use (messages=${refs.messages}, approvals=${refs.approvals}, conversations=${refs.conversations})`,
+    )
+    this.name = "AgentInUseError"
+  }
+}
+
+/**
+ * 硬删报告。**口径（lead 确认的 A 口径）**：各删除字段 = 本次 `deleteAgentHard`
+ * 一个事务内、相应表**实际减少的行数**（含会话级联删除的副作用行数），调用方据此对账
+ * 「库里无残留」；不是对 `AgentReferences` 的预估。唯一例外 `clearedInvites` 是 UPDATE
+ * 影响的 `participants.invited_by` 置 NULL 行数，不走差值。
+ */
+export interface AgentDeleteReport {
+  readonly id: string
+  readonly deletedConversations: number
+  readonly deletedMessages: number
+  readonly deletedApprovals: number
+  readonly deletedWakeJobs: number
+  readonly deletedParticipants: number
+  readonly deletedReadStates: number
+  readonly deletedKeys: number
+  /** 置 NULL 的 `participants.invited_by` 行数（UPDATE 的 `.changes`）。 */
+  readonly clearedInvites: number
+}
+
+interface TableCounts {
+  readonly conversations: number
+  readonly messages: number
+  readonly approvals: number
+  readonly wakeJobs: number
+  readonly participants: number
+  readonly readStates: number
+  readonly keys: number
+}
+
+/** 删除前后的全库行数快照（A 口径的取数：表级差值 = 本次事务实际删除的行数）。 */
+function tableCounts(db: Db): TableCounts {
+  const row = db
+    .prepare<[], TableCounts>(
+      `SELECT
+         (SELECT COUNT(*) FROM conversations) AS conversations,
+         (SELECT COUNT(*) FROM messages)      AS messages,
+         (SELECT COUNT(*) FROM approvals)     AS approvals,
+         (SELECT COUNT(*) FROM wake_jobs)     AS wakeJobs,
+         (SELECT COUNT(*) FROM participants)  AS participants,
+         (SELECT COUNT(*) FROM read_states)   AS readStates,
+         (SELECT COUNT(*) FROM agent_keys)    AS keys`,
+    )
+    .get()
+  // 无 FROM 的聚合查询恒返回一行；`undefined` 仅为类型收窄（不可达）。
+  if (row === undefined) throw new Error("tableCounts: aggregate query returned no row")
+  return row
+}
+
+/**
+ * 硬删除 agent（**不可恢复**）：`db.transaction(...).immediate()` 单事务，顺序不可变 ——
+ * 见下方各步注释（顺序由 `PRAGMA foreign_keys=ON` 下的外键现实决定）。
+ *
+ * 1. 未知 id → `AgentNotFoundError`
+ * 2. `refs.children > 0` → `AgentHasChildrenError`（`force` 也不删子节点，避免孤儿树）
+ * 3. 非 `force` 且有消息 / 审批单 / 其创建的会话 → `AgentInUseError`（**任何删除之前**抛，
+ *    保证失败路径零写入）
+ * 4. 其创建的会话逐个 `deleteConversationCascade` 整体级联（外键顺序由该函数单点保证，勿复制 SQL）
+ * 5. 其**剩余**消息（在他人创建的会话里）：先删引用这批 seq 的 wake_jobs，再删 messages
+ * 6. 其发起的 approvals
+ * 7. read_states + participants（自身的成员行；先于第 8 步，自引用方可安全置 NULL）
+ * 8. `participants.invited_by = id` 置 NULL（外键要求，非删除）
+ * 9. agent_keys
+ * 10. 以它为唤醒目标的 wake_jobs（第 5 步只覆盖「其消息所引用」那批，两批可不相交）
+ * 11. agents 行本身
+ */
+export function deleteAgentHard(
+  db: Db,
+  id: string,
+  options?: { readonly force?: boolean },
+): AgentDeleteReport {
+  const force = options?.force ?? false
+  const tx = db.transaction((): AgentDeleteReport => {
+    if (getAgent(db, id) === undefined) throw new AgentNotFoundError(id)
+    const refs = agentReferences(db, id)
+    if (refs.children > 0) throw new AgentHasChildrenError(id, refs.children)
+    if (!force && (refs.messages > 0 || refs.approvals > 0 || refs.conversations > 0)) {
+      throw new AgentInUseError(id, refs)
+    }
+    const before = tableCounts(db)
+
+    // 4) 其创建的会话：整体级联删除（含会话内他人的消息 —— 计入 deletedMessages 的差值口径）。
+    const created = db
+      .prepare<[string], { id: string }>("SELECT id FROM conversations WHERE created_by = ?")
+      .all(id)
+    for (const row of created) deleteConversationCascade(db, row.id)
+
+    // 5) 剩余消息（他人创建的会话里）：wake_jobs（引用 messages.seq）先于 messages 删除。
+    db.prepare<[string]>(
+      "DELETE FROM wake_jobs WHERE message_id IN (SELECT seq FROM messages WHERE from_agent_id = ?)",
+    ).run(id)
+    db.prepare<[string]>("DELETE FROM messages WHERE from_agent_id = ?").run(id)
+
+    // 6) 其发起的审批 / 请求批示单。
+    db.prepare<[string]>("DELETE FROM approvals WHERE requester_agent_id = ?").run(id)
+
+    // 7) 已读位点 + 成员行（会话内的部分已随第 4 步级联删除）。
+    db.prepare<[string]>("DELETE FROM read_states WHERE agent_id = ?").run(id)
+    db.prepare<[string]>("DELETE FROM participants WHERE agent_id = ?").run(id)
+
+    // 8) 他人成员行的邀请人指向本 id → 置 NULL（UPDATE 的 changes 即 clearedInvites）。
+    const clearedInvites = db
+      .prepare<[string]>("UPDATE participants SET invited_by = NULL WHERE invited_by = ?")
+      .run(id).changes
+
+    // 9) join_token 指纹。
+    db.prepare<[string]>("DELETE FROM agent_keys WHERE agent_id = ?").run(id)
+
+    // 10) 以本 agent 为唤醒目标的 job。
+    db.prepare<[string]>("DELETE FROM wake_jobs WHERE agent_id = ?").run(id)
+
+    // 11) 节点行本身。
+    db.prepare<[string]>("DELETE FROM agents WHERE id = ?").run(id)
+
+    const after = tableCounts(db)
+    return {
+      id,
+      deletedConversations: before.conversations - after.conversations,
+      deletedMessages: before.messages - after.messages,
+      deletedApprovals: before.approvals - after.approvals,
+      deletedWakeJobs: before.wakeJobs - after.wakeJobs,
+      deletedParticipants: before.participants - after.participants,
+      deletedReadStates: before.readStates - after.readStates,
+      deletedKeys: before.keys - after.keys,
+      clearedInvites,
+    }
+  })
+  return tx.immediate()
 }

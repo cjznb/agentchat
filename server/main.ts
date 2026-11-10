@@ -37,6 +37,8 @@ export interface BootstrapOptions {
   readonly onDispatcherError?: (error: unknown) => void
   /** 启动警告出口（缺省 `console.warn`）；测试注入收集器。 */
   readonly log?: (message: string) => void
+  /** 是否挂载 `/api/test/*` 测试接口（缺省 `config.testApi`，即 env `AGENTCHAT_TEST_API`）。 */
+  readonly testApi?: boolean
 }
 
 /**
@@ -103,6 +105,7 @@ export async function bootstrap(options: BootstrapOptions = {}): Promise<HubHand
     home,
     hubTokenPath,
     ...(options.sessionTtlMs === undefined ? {} : { sessionTtlMs: options.sessionTtlMs }),
+    ...(options.testApi === undefined ? {} : { testApi: options.testApi }),
     adapters,
   })
   let closed = false

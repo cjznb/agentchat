@@ -210,6 +210,31 @@ export function getConversation(db: Db, id: string): Conversation | undefined {
   return row === undefined ? undefined : toConversation(row)
 }
 
+/** store 层按 id 查找会话失败（行不存在）—— 路由层据此映射 404 `conversation_not_found`。 */
+export class ConversationNotFoundError extends Error {
+  readonly code = "conversation_not_found"
+  constructor(readonly conversationId: string) {
+    super(`conversation not found: ${conversationId}`)
+    this.name = "ConversationNotFoundError"
+  }
+}
+
+/**
+ * 会话改名（群名 / DM 备注名；`PATCH /api/test/conversations/:id`）：只写 `conversations.name`
+ * —— `key` 是会话身份（DM 由成员排序导出、群由 id 导出），改名不得动摇取或建幂等，故
+ * `key`/`kind`/`created_by` 一律不动。未知会话抛 `ConversationNotFoundError`，
+ * 返回更新后的会话供回执（单行 `UPDATE ... RETURNING`，语句自身原子）。
+ */
+export function renameConversation(db: Db, id: string, name: string): Conversation {
+  const row = db
+    .prepare<{ id: string; name: string }, ConversationRow>(
+      "UPDATE conversations SET name = $name WHERE id = $id RETURNING *",
+    )
+    .get({ id, name })
+  if (row === undefined) throw new ConversationNotFoundError(id)
+  return toConversation(row)
+}
+
 export function getConversationByKey(db: Db, key: string): Conversation | undefined {
   const row = db
     .prepare<[string], ConversationRow>("SELECT * FROM conversations WHERE key = ?")
@@ -246,6 +271,34 @@ export function isParticipant(db: Db, conversationId: string, agentId: string): 
     )
     .get(conversationId, agentId)
   return row !== undefined
+}
+
+/**
+ * 会话统计（会话列表 / dump / 删除回执用）：消息条数、最新消息 seq 与参与人数，
+ * 三个标量子查询一次取齐（同一语句内快照，无中间态）。未知会话返回全 0 —— 本函数
+ * **不做存在性判定**（需要 404 的调用方先用 `getConversation`），因此会话被删后仍可安全调用对账。
+ */
+export function conversationStats(
+  db: Db,
+  conversationId: string,
+): { readonly messageCount: number; readonly lastSeq: number; readonly participantCount: number } {
+  const row = db
+    .prepare<
+      [string, string, string],
+      {
+        readonly messageCount: number
+        readonly lastSeq: number
+        readonly participantCount: number
+      }
+    >(
+      `SELECT (SELECT COUNT(*) FROM messages WHERE conversation_id = ?) AS messageCount,
+              (SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ?) AS lastSeq,
+              (SELECT COUNT(*) FROM participants WHERE conversation_id = ?) AS participantCount`,
+    )
+    .get(conversationId, conversationId, conversationId)
+  // 无 FROM 的聚合查询恒返回一行；`undefined` 仅为类型收窄（不可达）。
+  if (row === undefined) throw new Error("conversationStats: aggregate query returned no row")
+  return row
 }
 
 /** 喊话广播会话（决议 3）：全库唯一，`key='shout'`、kind=group、**无 participants 行**。 */

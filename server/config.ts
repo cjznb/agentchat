@@ -7,6 +7,8 @@
  * - 厂商：env `AGENTCHAT_ADAPTERS`（逗号分隔）→ 文件 `adapters` → `[]`
  * - openBrowser：env `AGENTCHAT_NO_OPEN`（`1`/`true` = 关）→ env `AGENTCHAT_OPEN`（`1`/`true` = 开、
  *   `0`/`false` = 关）→ 文件 `openBrowser` → `DEFAULT_OPEN_BROWSER`
+ * - testApi：env `AGENTCHAT_TEST_API`（`1`/`true` = 开）→ 文件 `testApi` → `false`
+ *   （测试接口 `/api/test/*` 的挂载开关；**默认关闭**，生产行为不受影响）
  * - DB = `<home>/agentchat.db`；HUB_TOKEN = `<home>/hub_token`；配置文件 = `<home>/config.json`
  *
  * **只读**：Hub **不**创建 `config.json`（由安装器/CLI 写）；文件缺失用默认、不报错，
@@ -29,6 +31,8 @@ const fileSchema = z.object({
   adapters: z.array(z.string()).optional(),
   port: z.number().int().min(0).max(65535).optional(),
   openBrowser: z.boolean().optional(),
+  /** 测试接口开关（默认 false；env `AGENTCHAT_TEST_API` 优先）。 */
+  testApi: z.boolean().optional(),
 })
 
 /** 厂商 id 规范化：trim、过滤空项、去重（保留首次出现顺序）。 */
@@ -72,6 +76,8 @@ export interface HubConfig {
   readonly adapters: readonly string[]
   /** 启动后是否自动打开浏览器（供 CLI/启动器消费）。 */
   readonly openBrowser: boolean
+  /** 是否挂载 `/api/test/*` 测试接口（默认 `false`；仅回环可用）。 */
+  readonly testApi: boolean
 }
 
 export type ConfigWarn = (message: string) => void
@@ -85,6 +91,7 @@ interface FileConfig {
   readonly adapters?: readonly string[]
   readonly port?: number
   readonly openBrowser?: boolean
+  readonly testApi?: boolean
 }
 
 function errorText(error: unknown): string {
@@ -120,6 +127,7 @@ function readConfigFile(path: string, warn: ConfigWarn): FileConfig {
     ...(parsed.data.adapters === undefined ? {} : { adapters: normalizeAdapters(parsed.data.adapters) }),
     ...(parsed.data.port === undefined ? {} : { port: parsed.data.port }),
     ...(parsed.data.openBrowser === undefined ? {} : { openBrowser: parsed.data.openBrowser }),
+    ...(parsed.data.testApi === undefined ? {} : { testApi: parsed.data.testApi }),
   }
 }
 
@@ -140,6 +148,8 @@ export function loadConfig(
   const noOpen = envFlag(envText(env, "AGENTCHAT_NO_OPEN"))
   const openFlag = envFlag(envText(env, "AGENTCHAT_OPEN"))
   const openBrowser = noOpen === true ? false : openFlag ?? file.openBrowser ?? DEFAULT_OPEN_BROWSER
+  // 测试接口开关：env 显式给出即压过文件（`0`/`false` 可显式关闭）；否则取文件值，缺省关闭。
+  const testApi = envFlag(envText(env, "AGENTCHAT_TEST_API")) ?? file.testApi ?? false
   return {
     port,
     home,
@@ -148,6 +158,7 @@ export function loadConfig(
     configPath,
     adapters,
     openBrowser,
+    testApi,
   }
 }
 

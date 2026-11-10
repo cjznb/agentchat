@@ -3,7 +3,8 @@
  *
  * - `parseArgs(argv)`：把参数数组解析成结构化结果 + 校验错误列表（不打印、不退出）。
  * - `childEnv(parsed, base)`：把解析结果映射为子进程（Hub 入口）的环境变量覆盖。
- *   `--port`/`--home`/`--no-open` 分别落到 `AGENTCHAT_PORT`/`AGENTCHAT_HOME`/`AGENTCHAT_NO_OPEN`，
+ *   `--port`/`--home`/`--no-open`/`--test-api` 分别落到
+ *   `AGENTCHAT_PORT`/`AGENTCHAT_HOME`/`AGENTCHAT_NO_OPEN`/`AGENTCHAT_TEST_API`，
  *   由 `server/config.ts` 的「env > config.json > 默认」优先级统一消费。
  */
 
@@ -12,6 +13,7 @@
  * @property {number | undefined} port
  * @property {string | undefined} home
  * @property {boolean} noOpen
+ * @property {boolean} testApi
  * @property {boolean} build
  * @property {boolean} help
  * @property {boolean} version
@@ -24,6 +26,7 @@
  * @property {string | undefined} home
  * @property {number | undefined} port
  * @property {boolean} noOpen
+ * @property {boolean} [testApi]
  */
 
 const PORT_MAX = 65535
@@ -38,6 +41,8 @@ export const HELP_TEXT = `agentchat —— 一行命令启动 AgentChat Hub
   --port <n>      监听端口（等价 env AGENTCHAT_PORT，优先于 config.json）
   --home <dir>    数据目录（等价 env AGENTCHAT_HOME；默认 ~/.agentchat）
   --no-open       启动后不自动打开浏览器（等价 env AGENTCHAT_NO_OPEN=1）
+  --test-api      开启 /api/test/* 测试接口（等价 env AGENTCHAT_TEST_API=1；仅回环、含破坏性操作，
+                  仅用于自动化/真机测试，切勿对生产数据目录开启）
   --build         启动前强制重建前端（默认仅在 client/dist 缺失时构建）
   -h, --help      显示本帮助
   -v, --version   显示版本
@@ -47,6 +52,7 @@ export const HELP_TEXT = `agentchat —— 一行命令启动 AgentChat Hub
   agentchat
   agentchat --port 5000 --home ./.data
   agentchat --no-open
+  agentchat --test-api --home ./.test-data
 `
 
 /** 读取 `--flag value` / `--flag=value` 两种形式的取值。返回取值与下一个待处理下标。 */
@@ -89,6 +95,7 @@ export function parseArgs(argv) {
     port: undefined,
     home: undefined,
     noOpen: false,
+    testApi: false,
     build: false,
     help: false,
     version: false,
@@ -119,6 +126,11 @@ export function parseArgs(argv) {
     }
     if (arg === "--build") {
       parsed.build = true
+      index += 1
+      continue
+    }
+    if (arg === "--test-api") {
+      parsed.testApi = true
       index += 1
       continue
     }
@@ -153,5 +165,6 @@ export function childEnv(parsed, base) {
   if (parsed.home !== undefined) env.AGENTCHAT_HOME = parsed.home
   if (parsed.port !== undefined) env.AGENTCHAT_PORT = String(parsed.port)
   if (parsed.noOpen) env.AGENTCHAT_NO_OPEN = "1"
+  if (parsed.testApi === true) env.AGENTCHAT_TEST_API = "1"
   return env
 }

@@ -230,3 +230,38 @@ export function inboxMessages(db: Db, query: InboxQuery): Message[] {
     .all(query)
   return rows.map(toMessage)
 }
+
+// ── 硬删除原语（`/api/test/*` 测试面）：外键现实决定必须先删 wake_jobs 再删消息 ──
+
+/**
+ * 按**短随机码**删除单条消息（`DELETE /api/test/messages/:id`）。
+ *
+ * 外键现实：`wake_jobs.message_id REFERENCES messages(seq)` 且 `PRAGMA foreign_keys=ON`，
+ * 故同一 `BEGIN IMMEDIATE` 事务内先删引用该消息的 wake_jobs，再删 `messages` 行 ——
+ * 注意 `messages.id` 是短码，被引用的主键是 `seq`（子查询换算）。返回是否真的删掉
+ * （`false` = 短码不存在，路由层据此 404 `message_not_found`）。
+ */
+export function deleteMessageById(db: Db, id: string): boolean {
+  const tx = db.transaction((messageId: string): boolean => {
+    db.prepare<[string]>(
+      "DELETE FROM wake_jobs WHERE message_id IN (SELECT seq FROM messages WHERE id = ?)",
+    ).run(messageId)
+    return db.prepare<[string]>("DELETE FROM messages WHERE id = ?").run(messageId).changes > 0
+  })
+  return tx.immediate(id)
+}
+
+/**
+ * 清空会话全部消息（`POST /api/test/conversations/:id/purge`）：保留会话与成员，
+ * 只删消息及其 wake_jobs。同事务、同顺序（先 wake_jobs 后 messages），返回删除的**消息**条数
+ * （不含 wake_jobs —— 调用方要的是「清掉几条消息」）。
+ */
+export function deleteMessagesInConversation(db: Db, conversationId: string): number {
+  const tx = db.transaction((id: string): number => {
+    db.prepare<[string]>(
+      "DELETE FROM wake_jobs WHERE message_id IN (SELECT seq FROM messages WHERE conversation_id = ?)",
+    ).run(id)
+    return db.prepare<[string]>("DELETE FROM messages WHERE conversation_id = ?").run(id).changes
+  })
+  return tx.immediate(conversationId)
+}

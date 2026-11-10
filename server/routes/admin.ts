@@ -84,8 +84,8 @@ function remoteAddress(env: unknown): string | undefined {
   return typeof address === "string" ? address : undefined
 }
 
-/** 仅回环（IPv4 / IPv6 / IPv4-mapped）视为可信来源。 */
-function defaultIsLoopback(c: Context): boolean {
+/** 仅回环（IPv4 / IPv6 / IPv4-mapped）视为可信来源。`routes/test.ts` 复用同一判定（同源守卫）。 */
+export function defaultIsLoopback(c: Context): boolean {
   const address = remoteAddress(c.env)
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1"
 }
