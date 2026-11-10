@@ -36,6 +36,51 @@ function clearBrowserLocalState(): number {
   return typeof localStorage === "undefined" ? 0 : clearAgentchatLocalStorage(localStorage)
 }
 
+/**
+ * ⑤-13 复制按钮：路径与日志命令不该让用户手抄。
+ * 剪贴板缺失/写入失败一律静默（与 `MessageBubble` 的复制同口径，不弹错）；成功后 1.5s 复原文案。
+ */
+function CopyButton({
+  value,
+  label,
+  testid,
+}: {
+  readonly value: string
+  readonly label: string
+  readonly testid: string
+}) {
+  const [copied, setCopied] = useState(false)
+  const copy = useCallback(() => {
+    try {
+      const clip = navigator.clipboard
+      if (clip === undefined) return
+      void clip.writeText(value).then(
+        () => {
+          setCopied(true)
+          window.setTimeout(() => setCopied(false), 1500)
+        },
+        () => {
+          /* 写入失败：静默 */
+        },
+      )
+    } catch {
+      /* clipboard 不可用：静默 */
+    }
+  }, [value])
+  return (
+    <button
+      type="button"
+      className="settings-copy"
+      data-testid={testid}
+      aria-label={`复制${label}`}
+      title={`复制${label}`}
+      onClick={copy}
+    >
+      {copied ? "已复制" : "复制"}
+    </button>
+  )
+}
+
 export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
   const [info, setInfo] = useState<AdminInfo | null>(null)
   const [confirmWord, setConfirmWord] = useState("")
@@ -138,12 +183,31 @@ export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
           <h2>数据位置</h2>
           <dl className="settings-paths">
             <dt>数据目录</dt>
-            <dd data-testid="settings-home">{home}</dd>
+            <dd data-testid="settings-home">
+              <code className="settings-value">{home}</code>
+              <CopyButton value={home} label="数据目录" testid="settings-copy-home" />
+            </dd>
             <dt>日志目录</dt>
-            <dd data-testid="settings-logs">{logs}</dd>
+            <dd data-testid="settings-logs">
+              <code className="settings-value">{logs}</code>
+              <CopyButton value={logs} label="日志目录" testid="settings-copy-logs" />
+            </dd>
           </dl>
           <p className="settings-hint">
-            查看日志：<code>tail -f {logs}/*.log</code>（Windows PowerShell：<code>Get-Content -Wait &lt;日志文件&gt;</code>）
+            查看日志（POSIX）：<code>tail -f {logs}/*.log</code>{" "}
+            <CopyButton
+              value={`tail -f ${logs}/*.log`}
+              label="POSIX 日志命令"
+              testid="settings-copy-log-cmd"
+            />
+          </p>
+          <p className="settings-hint">
+            查看日志（PowerShell）：<code>Get-Content -Wait {logs}\*.log</code>{" "}
+            <CopyButton
+              value={`Get-Content -Wait ${logs}\\*.log`}
+              label="PowerShell 日志命令"
+              testid="settings-copy-log-cmd-win"
+            />
           </p>
         </section>
 
@@ -167,7 +231,7 @@ export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
           </p>
           <button
             type="button"
-            className="settings-action"
+            className="settings-danger"
             data-testid="settings-prune"
             disabled={busy}
             onClick={startPrune}
