@@ -100,6 +100,20 @@ describe("CardActions 答复控件渲染门槛（P4/8）", () => {
     expect(container.textContent).toContain("否")
   })
 
+  it("④-12 只读态选项按钮化：同款 card-choice 外观 + 明确禁用（不再是纯文本链接）", () => {
+    const item = entry({ target: "agent-zhang" })
+    const container = renderActions(cardFromEntry(item), item)
+    const readonly = container.querySelectorAll('[data-testid="card-choice-readonly"]')
+    expect(readonly).toHaveLength(2)
+    for (const node of Array.from(readonly)) {
+      expect(node.tagName).toBe("BUTTON")
+      expect(node.classList.contains("card-choice")).toBe(true)
+      expect((node as HTMLButtonElement).disabled).toBe(true)
+    }
+    // 可答复控件判定不受影响（只读态的按钮是 disabled 且 testid 不同）。
+    expect(hasRespondControls(container)).toBe(false)
+  })
+
   it("pending 批示 target=human → 答复控件存在（现状不变锁）", () => {
     const item = entry({ target: "human" })
     const container = renderActions(cardFromEntry(item), item)

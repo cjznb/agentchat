@@ -133,13 +133,22 @@ test("场景f：桌面 rail 指示条贴 rail 右缘（P2-5 方案A）", async (
 test("V1.1：ellipsis 截断豁免（clientWidth>0 门槛）", async ({ page }) => {
   await page.setContent(
     '<style>.trunc{width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:16px/1.4 sans-serif}' +
-      '.zero{width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:16px/1.4 sans-serif}</style>' +
-      '<div class="trunc">averyveryverylongmembername</div><div class="zero">x</div>',
+      '.zero{width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:16px/1.4 sans-serif}' +
+      // UI-1 ④-10：sr-only 标准写法（1px 盒 + clip-path）——视觉隐藏，不算溢出。
+      '.sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;' +
+      'white-space:nowrap;clip-path:inset(50%);font:16px/1.4 sans-serif}' +
+      '.sr-clip{position:absolute;width:1px;height:1px;overflow:hidden;white-space:nowrap;' +
+      'clip:rect(0 0 0 0);font:16px/1.4 sans-serif}</style>' +
+      '<div class="trunc">averyveryverylongmembername</div><div class="zero">x</div>' +
+      '<div class="sr">视觉隐藏但保留可访问名的长文本</div>' +
+      '<div class="sr-clip">另一种 clip 写法的长文本</div>',
   )
   const offenders = await scanOverflow(page)
   const classes = offenders.map((offender) => offender.className)
   expect(classes).not.toContain("trunc")
   expect(classes).toContain("zero")
+  expect(classes).not.toContain("sr")
+  expect(classes).not.toContain("sr-clip")
 })
 
 test("场景g1：添加成员弹窗可见态（轮D补景）", async ({ page }) => {

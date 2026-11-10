@@ -114,3 +114,61 @@ describe("UI-1 ①-4 禁用主按钮统一（描边 + 灰底，取代 jade 填�
     expect(allBlocks(css, ".card-choice:disabled")).toContain("cursor: not-allowed")
   })
 })
+
+/* ── ④ 响应式与视觉一致性 ─────────────────────────────────────────── */
+
+/** 45rem 媒体块文本（首个 ≤45rem 媒体查询的平衡括号块）。 */
+function narrowMedia(): string {
+  const start = css.indexOf("@media (max-width: 45rem)")
+  expect(start, "≤45rem 媒体块应存在").toBeGreaterThanOrEqual(0)
+  const open = css.indexOf("{", start)
+  let depth = 0
+  for (let index = open; index < css.length; index += 1) {
+    if (css[index] === "{") depth += 1
+    else if (css[index] === "}") {
+      depth -= 1
+      if (depth === 0) return css.slice(start, index + 1)
+    }
+  }
+  throw new Error("unbalanced media block")
+}
+
+describe("UI-1 ④-10 窄屏底部 tab（单字 + 条高压缩）", () => {
+  it("标签在窄屏视觉隐藏但保留可访问名（clip 而非 display:none）", () => {
+    const media = narrowMedia()
+    const rule = media.slice(media.indexOf(".rail-label"))
+    expect(rule).toContain("position: absolute")
+    expect(rule).toContain("clip-path: inset(50%)")
+    expect(rule).not.toContain("display: none")
+    // 必须指名 .rail-label：通知 tab 的 span:last-child 是 rail-badge（误伤会藏掉未读徽标）。
+    expect(media).not.toContain(".rail-button > span:last-child")
+  })
+
+  it("字形回到单字尺寸、按钮高度压到一行且触摸目标仍为 target-size", () => {
+    const media = narrowMedia()
+    expect(media).toContain(".rail-glyph { font-size: var(--text-heading); }")
+    expect(media).toContain(".rail-button { min-height: var(--target-size); padding: 0 var(--space-1); }")
+  })
+
+  it("既有断言不回归：指示条仍收敛到 bottom 0", () => {
+    const media = narrowMedia()
+    expect(media).toContain(".rail-button::after { inset: auto var(--space-3) 0;")
+  })
+})
+
+describe("UI-1 ④-11 列表/聊天分区感与头部对齐", () => {
+  it("中栏与聊天区之间用 strong hairline 分界", () => {
+    expect(allBlocks(css, ".context-list")).toContain(
+      "border-right: var(--line-thin) solid var(--color-hairline-strong)",
+    )
+  })
+
+  it("两栏头部（含聊天/通知头）统一白底分区带", () => {
+    expect(css).toContain(".context-list header, .view-header, .chat-header, .notif-head { background: var(--color-raised); }")
+  })
+
+  it("头部 eyebrow 与标题排版同源（同一规则同时覆盖列表头与视图头）", () => {
+    expect(css).toContain(".context-list header p, .view-header p {")
+    expect(css).toContain(".context-list h1, .view-header h1 {")
+  })
+})

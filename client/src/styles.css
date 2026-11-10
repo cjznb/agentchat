@@ -132,9 +132,12 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   min-height: 0;
   color: var(--color-ink);
   background: var(--color-list);
-  border-right: var(--line-thin) solid var(--color-hairline);
+  /* ④-11 分区感：与聊天区（--color-view）之间用 strong hairline 分界（原 hairline 太弱）。 */
+  border-right: var(--line-thin) solid var(--color-hairline-strong);
 }
 .context-list header, .view-header { min-height: calc(var(--space-12) * 2); padding: var(--space-6); border-bottom: var(--line-thin) solid var(--color-hairline); }
+/* ④-11 头部对齐：两栏标题带同高、同字号、同 eyebrow 排版；右栏头给白底形成分区带。 */
+.context-list header, .view-header, .chat-header, .notif-head { background: var(--color-raised); }
 .context-list header p, .view-header p { margin: 0 0 var(--space-2); color: var(--color-muted); font: 600 var(--text-label)/1.4 var(--font-utility); }
 .context-list header p { letter-spacing: 0.08em; }
 .context-list h1, .view-header h1 { margin: 0; font-size: var(--text-title); line-height: 1.25; }
@@ -888,6 +891,22 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   .mode-rail { grid-row: 3; flex-direction: row; justify-content: center; padding: var(--space-2); }
   .brand-mark, .hub-status { display: none; }
   .rail-actions { grid-template-columns: repeat(5, 1fr); max-width: calc(var(--space-12) * 7); margin: 0; }
+  /* ④-10 底部 tab：只留单字字形（标签视觉隐藏但保留可访问名），条高压到一行，
+     把高度还给消息区。触摸目标仍保持 --target-size（44px）。
+     注意选择器要指名 `.rail-label`：通知 tab 的 `span:last-child` 可能是 `rail-badge`。 */
+  .rail-button { min-height: var(--target-size); padding: 0 var(--space-1); }
+  .rail-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    clip-path: inset(50%);
+  }
+  .rail-glyph { font-size: var(--text-heading); }
   .rail-button::after { inset: auto var(--space-3) 0; width: auto; height: var(--space-1); border-radius: var(--radius-small); }
   .context-list { grid-row: 1; border-right: 0; border-bottom: var(--line-thin) solid var(--color-hairline); }
   .context-list header, .view-header { min-height: auto; padding: var(--space-4); }
