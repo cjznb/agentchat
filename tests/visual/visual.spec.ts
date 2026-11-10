@@ -84,6 +84,19 @@ test("场景d2：设置页", async ({ page }) => {
   await shot(page, "settings", "full")
   await shot(page, "settings", "panel", page.getByTestId("settings-panel"))
   await expectNoOverflow(page, "settings")
+  // ⑥ 版本与更新卡：先产图再交互（红灯不影响产图），覆盖"已加载"与"检查更新结果"两态。
+  const card = page.getByTestId("version-card")
+  await card.scrollIntoViewIfNeeded()
+  await expect(card).toBeVisible()
+  await expect(page.getByTestId("version-hub")).toHaveText("v0.2.0")
+  await expect(page.getByTestId("version-adapter")).toHaveCount(2)
+  await shot(page, "version-card", "loaded", card)
+  await page.getByTestId("version-check").click()
+  await expect(page.getByTestId("version-result")).toBeVisible()
+  await expect(page.getByTestId("version-latest")).toHaveText("v0.3.0")
+  await expect(page.getByTestId("version-update-available")).toHaveText("有可用更新")
+  await shot(page, "version-card", "result", card)
+  await expectNoOverflow(page, "version-card")
 })
 
 test("场景e：窄视口45rem 主视图+rail 指示条不越界（P2-3）", async ({ page }) => {

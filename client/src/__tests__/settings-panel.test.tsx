@@ -41,9 +41,21 @@ async function renderPanel(api: SettingsApi): Promise<HTMLDivElement> {
   document.body.appendChild(host)
   root = createRoot(host)
   await act(async () => {
-    root?.render(<Settings api={api} />)
+    // ⑥ 版本卡片：注入 hermetic stub，避免设置页用例触发真实 fetch。
+    root?.render(<Settings api={api} versionApi={stubVersionApi} />)
   })
   return host
+}
+
+/** 版本卡片 stub（本轮设置页用例只关心 rest 的接口；卡片自身有独立用例）。 */
+const stubVersionApi = {
+  load: async () => ({
+    ok: true as const,
+    hub: { name: "agentchat", version: "0.2.0", compareUrl: "https://example.test" },
+    adapters: [],
+    checkedAt: null,
+  }),
+  check: async () => ({ ok: false as const, code: "no_tags" }),
 }
 
 function find(container: HTMLElement, testid: string): Element | null {

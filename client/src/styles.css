@@ -1181,6 +1181,37 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .settings-copy:hover { color: var(--color-jade); border-color: var(--color-jade); }
 .settings-copy:active { color: var(--color-raised); background: var(--color-jade); border-color: var(--color-jade); }
 .settings-copy:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: var(--space-1); }
+
+/* ══ UI-1 ⑥ 设置页「版本与更新」卡片 ══════════════════════════════════
+   只读展示 + 手动步骤；`outdated` 走 error 族红字（与 danger 规范一致），未上报保持中性。 */
+.version-line { margin: var(--space-2) 0 0; font-size: var(--text-body); line-height: 1.6; overflow-wrap: anywhere; }
+.version-line b { font-family: var(--font-utility); }
+.version-link { margin-inline-start: var(--space-2); color: var(--color-jade); font: 600 var(--text-label)/1.6 var(--font-utility); word-break: break-all; }
+.version-adapters { display: grid; gap: var(--space-1); margin: var(--space-3) 0 0; padding: 0; list-style: none; }
+.version-adapter {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: var(--line-thin) solid var(--color-hairline);
+  border-radius: var(--radius-medium);
+  background: var(--color-list);
+}
+.version-adapter-name { font: 700 var(--text-label)/1.4 var(--font-utility); }
+.version-adapter-version { min-width: 0; overflow: hidden; color: var(--color-muted); font: 500 var(--text-label)/1.4 var(--font-utility); text-overflow: ellipsis; white-space: nowrap; }
+.version-adapter-state { padding: 0 var(--space-2); border-radius: var(--radius-large); color: var(--color-muted); background: color-mix(in srgb, var(--color-muted) 10%, transparent); font: 600 var(--text-label)/1.6 var(--font-utility); white-space: nowrap; }
+.version-adapter-state[data-state="outdated"] { color: var(--color-error); background: color-mix(in srgb, var(--color-error) 12%, var(--color-raised)); }
+.version-adapter-state[data-state="current"] { color: var(--color-jade); background: var(--color-jade-soft); }
+.version-actions { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-3); }
+.version-result { margin-top: var(--space-3); padding-top: var(--space-3); border-top: var(--line-thin) solid var(--color-hairline); }
+.version-flag { margin-inline-start: var(--space-2); padding: 0 var(--space-2); border-radius: var(--radius-large); font: 600 var(--text-label)/1.6 var(--font-utility); }
+.version-flag[data-available="true"] { color: var(--color-error); background: color-mix(in srgb, var(--color-error) 12%, var(--color-raised)); }
+.version-flag[data-available="false"] { color: var(--color-jade); background: var(--color-jade-soft); }
+.version-error-code { margin-inline-start: var(--space-1); color: var(--color-muted); font-family: var(--font-utility); }
+.version-outdated { margin: var(--space-2) 0 0; padding-left: var(--space-5); color: var(--color-error); font-size: var(--text-label); line-height: 1.6; }
+.version-manual { margin-top: var(--space-3); padding: var(--space-3); border: var(--line-thin) dashed var(--color-hairline-strong); border-radius: var(--radius-medium); }
+.version-steps { margin: var(--space-2) 0 0; padding-left: var(--space-5); color: var(--color-muted); font-size: var(--text-label); line-height: 1.7; }
 /* Task 8: mention highlight / chip / badge —— B1 token 化（同族 jade/AA 对比度，无裸 hex） */
 .mention-hit { background: var(--color-jade-soft); color: var(--color-jade); border-radius: var(--radius-small); padding: 0 2px; }
 .mention-chip { display: inline-block; margin-inline-start: 6px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--color-jade-soft); color: var(--color-jade); font-size: 11px; line-height: 16px; }

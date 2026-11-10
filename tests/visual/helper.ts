@@ -27,6 +27,8 @@ import {
   messagesByConversation,
   notifications,
   roster,
+  versionCheckResponse,
+  versionInfoResponse,
 } from "./fixtures/api-fixtures"
 
 /** 层2 产图根目录（test-results/ 已由 .gitignore 兜住）。 */
@@ -82,6 +84,9 @@ export async function mockApi(page: Page): Promise<void> {
       )
     }
     if (method === "GET" && path === "/api/admin/info") return respond(adminInfoResponse)
+    // UI-1 ⑥ 版本与更新：GET 只读概览；POST /api/version/check 仅在点按钮时被调用。
+    if (method === "GET" && path === "/api/version") return respond(versionInfoResponse)
+    if (method === "POST" && path === "/api/version/check") return respond(versionCheckResponse)
     if (path.startsWith("/api/agents/")) return respond(agentCardResponse)
     const segments = path.split("/")
     if (segments[1] === "api" && segments[2] === "conversations" && segments.length === 5) {

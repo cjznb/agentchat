@@ -11,6 +11,7 @@ import type { AdminInfo, ResetResult } from "../../../shared/contracts"
 import { loadAdminInfo, pruneSessions, resetHub, type PruneSessionsResult } from "../adminApi"
 import { ApiError } from "../api"
 import { MdScopeBlock } from "./MdScopeBlock"
+import { VersionCard, type VersionApi } from "./VersionCard"
 import {
   clearAgentchatLocalStorage,
   isResetConfirmed,
@@ -81,7 +82,14 @@ function CopyButton({
   )
 }
 
-export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
+export function Settings({
+  api = defaultApi,
+  versionApi,
+}: {
+  readonly api?: SettingsApi
+  /** ⑥ 版本卡片的 API 注入（缺省真实实现）；测试用它保持 hermetic。 */
+  readonly versionApi?: VersionApi
+}) {
   const [info, setInfo] = useState<AdminInfo | null>(null)
   const [confirmWord, setConfirmWord] = useState("")
   const [keepBackups, setKeepBackups] = useState(false)
@@ -211,9 +219,10 @@ export function Settings({ api = defaultApi }: { readonly api?: SettingsApi }) {
           </p>
         </section>
 
+        <VersionCard {...(versionApi === undefined ? {} : { api: versionApi })} />
+
         <section className="settings-block">
-          <h2>清除本地状态</h2>
-          <p className="settings-hint">清除浏览器保存的展开态、选人器等界面状态（不影响 Hub 数据）。</p>
+          <h2>清除本地状态</h2>          <p className="settings-hint">清除浏览器保存的展开态、选人器等界面状态（不影响 Hub 数据）。</p>
           <button type="button" className="settings-action" data-testid="settings-clear-local" onClick={clearLocal}>
             清除本地状态
           </button>
