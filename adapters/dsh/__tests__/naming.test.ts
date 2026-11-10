@@ -15,7 +15,7 @@ import { HubToolError } from "../lib/hub.js"
 import { alternateTitle, normalizeTitle, TITLE_MAX_CHARS } from "../lib/title.js"
 import { createMessageBuilder, MESSAGE_SOURCE, messageFactoryCandidates } from "../lib/message.js"
 import { registerWithNameRetry } from "../lib/register.js"
-import { createSessionHint, idSuffix, sessionName } from "../lib/session-hint.js"
+import { createSessionHint, basenameAny, idSuffix, sessionName } from "../lib/session-hint.js"
 import { currentPath, readToken, writeToken } from "../lib/token.js"
 
 const homes: string[] = []
@@ -50,6 +50,20 @@ describe("会话节点命名（真机撞名事故的根因）", () => {
 
   it("无 cwd 时回退 `dsh-<短标识>`", () => {
     expect(sessionName({}, UUID_A)).toBe("dsh-91fa2fb6")
+  })
+
+  it("工作目录名跨平台：Windows 反斜杠路径在 POSIX 上也只取最后一段（CI 真机事故）", () => {
+    // 事故：`node:path` 的 `basename` 在 Linux 上不认反斜杠 → 整条 `C:\...` 变成节点名，
+    // 于是 ubuntu CI 上 naming/plugin 全套名字断言全红（本机 Windows 却是绿的）。
+    expect(basenameAny(CWD)).toBe("default-workspace")
+    expect(basenameAny("/home/runner/work/agentchat/agentchat")).toBe("agentchat")
+    expect(basenameAny("C:/mixed\\style/dir")).toBe("dir") // 混合分隔符与尾随分隔符
+    expect(basenameAny("C:\\work\\proj-sess-1\\")).toBe("proj-sess-1")
+    expect(basenameAny("")).toBe("")
+    expect(basenameAny(undefined)).toBe("")
+    // 端到端：同一条 Windows cwd 在任意平台都得到同一节点名
+    expect(sessionName({ cwd: CWD }, UUID_A)).toBe("default-workspace-91fa2fb6")
+    expect(sessionName({ cwd: "C:\\work\\proj-sess-1" }, UUID_A)).toBe("proj-sess-1-91fa2fb6")
   })
 })
 

@@ -30,7 +30,6 @@
  * 纪律：所有文件操作都**不抛错**（`lib/token.js` 的写/删函数已自吞异常）；本模块无定时器、
  * 无网络、无第三方依赖，只做内存集合与「值真变了才触盘」的一次文件写。
  */
-import { basename } from "node:path"
 import { hostname } from "node:os"
 import { clearToken, currentPath, readToken, writeToken } from "./token.js"
 
@@ -62,6 +61,23 @@ export function idSuffix(id) {
 }
 
 /**
+ * **跨平台**取路径最后一段（POSIX 与 Windows 分隔符都认）。
+ *
+ * 为什么不能用 `node:path` 的 `basename`（CI 真机事故）：本适配器在**任意平台**都可能拿到
+ * Windows 风格的 `cwd`（DSH 会话头里的 `cwd` 由宿主给出，且测试/快照里就带 `C:\...`）。
+ * POSIX 上 `basename("C:\\Users\\x\\default-workspace")` 因反斜杠不是分隔符而**整串返回**，
+ * 于是节点名变成一整条 Windows 路径（既不可读，也让"同目录不同会话"的名字断言在 Linux CI 上全红）。
+ *
+ * @param {unknown} value 原始路径（非字符串或空 → `""`）
+ * @returns {string} 最后一段；无有效段 → `""`
+ */
+export function basenameAny(value) {
+  if (typeof value !== "string" || value === "") return ""
+  const parts = value.split(/[\\/]+/u).filter((part) => part !== "")
+  return parts.length === 0 ? "" : parts[parts.length - 1]
+}
+
+/**
  * 会话节点可读名：`<工作目录名>-<会话 id 短标识>`，无 cwd 则 `dsh-<短标识>`。
  *
  * **必须唯一**：Hub 的 `agents.name` 与展示名（`COALESCE(custom_name, name)`）都有唯一索引，
@@ -72,7 +88,7 @@ export function idSuffix(id) {
  */
 export function sessionName(header, sessionId) {
   const suffix = idSuffix(sessionId)
-  const cwd = typeof header["cwd"] === "string" && header["cwd"] !== "" ? basename(header["cwd"]) : ""
+  const cwd = basenameAny(header?.["cwd"])
   return cwd === "" ? `dsh-${suffix}` : `${cwd}-${suffix}`
 }
 
