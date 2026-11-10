@@ -31,7 +31,12 @@ import { config } from "../config"
 import { openDb, type Db } from "../db"
 import { AgentNotFoundError, getAgent, touchAgent } from "../store/agents"
 import { getConversationByKey, SHOUT_KEY } from "../store/conversations"
-import { DEFAULT_INBOX_LIMIT, getById, inboxMessages, type Message } from "../store/messages"
+import {
+  claimableInboxMessages,
+  DEFAULT_INBOX_LIMIT,
+  getById,
+  type Message,
+} from "../store/messages"
 import { applyDeliveryResult, getWakeJob, makeJobsDue } from "../store/wake"
 import { claimWakeBacklogJob } from "../store/wake-claims"
 
@@ -117,16 +122,26 @@ export interface WakeBacklogResult {
   readonly conversations: readonly string[]
 }
 
+/** 单次 wake 最多推进的候选页数：只兜并发认领导致的页内落空，正常一页即满。 */
+const MAX_CLAIM_PAGES = 3
+
 /**
- * 认领积压（pull 在途租约）：候选来自收件箱（按参与+未读），但 **runtime 分支以
- * `wake_jobs` 行为投递台账（spec §14.4）**——非 system 消息无该 (message,agent) job 行
- * 即跳过（不注入、不补建），@ 闸门由此在投递层生效；`kind === "system"` 豁免走原
- * inbox 路径（ask 卡 / 入群通知必须达）。logical（含 human）只取件不建 job、不门控。
- * runtime 认领即置 `sending` + `CLAIM_TIMEOUT_MS` 租约（**不是** `accepted`——`accepted`
- * 只由 `/internal/result {delivered}` 派生）；有行时经 `claimWakeBacklogJob` 认领，
- * 崩溃未回执则租约过期后下一次 wake 重投。已终态或在途租约仍有效的 `sending` 不重复认领。
- * 回执 stage 因此为 `sending`。
+ * 认领积压（pull 在途租约）：候选来自**该 agent 当前可认领的行**
+ * （`store/messages.claimableInboxMessages`，SQL 层与下方判据逐条对齐），
+ * 但 **runtime 分支以 `wake_jobs` 行为投递台账（spec §14.4）**——非 system 消息无该
+ * (message,agent) job 行即跳过（不注入、不补建），@ 闸门由此在投递层生效；
+ * `kind === "system"` 豁免走原 inbox 路径（ask 卡 / 入群通知必须达）。logical（含 human）
+ * 只取件不建 job、不门控。runtime 认领即置 `sending` + `CLAIM_TIMEOUT_MS` 租约（**不是**
+ * `accepted`——`accepted` 只由 `/internal/result {delivered}` 派生）；有行时经
+ * `claimWakeBacklogJob` 认领，崩溃未回执则租约过期后下一次 wake 重投。已终态或在途租约仍
+ * 有效的 `sending` 不重复认领。回执 stage 因此为 `sending`。
  * **已撤回消息一律跳过**（`revoked_at != null`）：不进 `messages`、不补建 job，从投递入口封死原文。
+ *
+ * **P2 修复（认领页饥饿）**：改前固定 `after=0, LIMIT 50` 取「最旧 50 条」再在 JS 里
+ * `continue`，窗口永不前进——收件方累计可见消息 >50 后新消息永久 `pending`。现在候选
+ * 查询只返回可认领行，页内不会出现「取出来只为跳过」的行，页与页之间自然推进；
+ * 循环（≤ `MAX_CLAIM_PAGES` 页）只是并发认领导致页内落空时的兜底，
+ * 单次响应规模仍由 `DEFAULT_INBOX_LIMIT` 封顶。
  */
 export function claimWakeBacklog(
   db: Db,
@@ -136,38 +151,50 @@ export function claimWakeBacklog(
   if (agent === undefined) return { messages: [], receipts: [], conversations: [] }
   const now = input.now ?? Date.now()
   const shoutConversationId = getConversationByKey(db, SHOUT_KEY)?.id ?? ""
-  const page = inboxMessages(db, {
-    agentId: input.agentId,
-    shoutConversationId,
-    after: 0,
-    limit: DEFAULT_INBOX_LIMIT,
-  })
   const messages: Message[] = []
   const receipts: { messageId: string; stage: ReceiptStage }[] = []
   const conversations = new Set<string>()
-  for (const message of page) {
-    if (message.fromAgentId === input.agentId) continue // T4 交接：过滤自发消息（from != target）
-    // 已撤回：**绝不投递、绝不补建 job**——覆盖发送时 offline（无 job）与 logical 两条路径。
-    // 撤回已取消既有 job；无 job 的收件方若在此补建会把原文重新注入，正是必须封死的洞。
-    if (message.revokedAt !== undefined) continue
-    const stage = receiptState(db, message, input.agentId)
-    if (stage === "delivered" || stage === "read") continue
-    if (agent.kind === "runtime") {
-      // G1 投递门（§14.4）：非 system 消息无 job 行 → 跳过（不注入、不补建）。
-      // system 豁免（ask 卡/入群通知必须达）；撤回跳过已在最前，不会走到这里补建。
-      if (message.kind !== "system" && getWakeJob(db, message.seq, input.agentId) === undefined) {
-        continue
+  let after = 0
+  for (let page = 0; page < MAX_CLAIM_PAGES; page += 1) {
+    const candidates = claimableInboxMessages(db, {
+      agentId: input.agentId,
+      shoutConversationId,
+      after,
+      limit: DEFAULT_INBOX_LIMIT,
+      now,
+      runtimeGated: agent.kind === "runtime",
+    })
+    if (candidates.length === 0) break
+    for (const message of candidates) {
+      if (messages.length >= DEFAULT_INBOX_LIMIT) break // 单次响应规模上限
+      if (message.fromAgentId === input.agentId) continue // T4 交接：过滤自发消息（from != target）
+      // 已撤回：**绝不投递、绝不补建 job**——覆盖发送时 offline（无 job）与 logical 两条路径。
+      // 撤回已取消既有 job；无 job 的收件方若在此补建会把原文重新注入，正是必须封死的洞。
+      if (message.revokedAt !== undefined) continue
+      const stage = receiptState(db, message, input.agentId)
+      if (stage === "delivered" || stage === "read") continue
+      if (agent.kind === "runtime") {
+        // G1 投递门（§14.4）：非 system 消息无 job 行 → 跳过（不注入、不补建）。
+        // system 豁免（ask 卡/入群通知必须达）；撤回跳过已在最前，不会走到这里补建。
+        if (message.kind !== "system" && getWakeJob(db, message.seq, input.agentId) === undefined) {
+          continue
+        }
+        const claimed = claimWakeBacklogJob(db, {
+          messageSeq: message.seq,
+          agentId: input.agentId,
+          now,
+        })
+        if (claimed === undefined) continue // 终态或在途租约仍有效：不重复认领
+        conversations.add(message.conversationId)
       }
-      const claimed = claimWakeBacklogJob(db, {
-        messageSeq: message.seq,
-        agentId: input.agentId,
-        now,
-      })
-      if (claimed === undefined) continue // 终态或在途租约仍有效：不重复认领
-      conversations.add(message.conversationId)
+      messages.push(message)
+      receipts.push({ messageId: message.id, stage: receiptState(db, message, input.agentId) })
     }
-    messages.push(message)
-    receipts.push({ messageId: message.id, stage: receiptState(db, message, input.agentId) })
+    if (messages.length >= DEFAULT_INBOX_LIMIT) break
+    if (candidates.length < DEFAULT_INBOX_LIMIT) break // 候选已取空
+    const last = candidates[candidates.length - 1]
+    if (last === undefined) break
+    after = last.seq // 本页满但认领落空（并发）：推进游标，下一页继续
   }
   return { messages, receipts, conversations: [...conversations] }
 }

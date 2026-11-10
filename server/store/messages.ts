@@ -231,6 +231,74 @@ export function inboxMessages(db: Db, query: InboxQuery): Message[] {
   return rows.map(toMessage)
 }
 
+export interface ClaimableInboxQuery extends InboxQuery {
+  /** 注入时钟：`sending` 在途租约的到期判定（`retry_at <= now`）用。 */
+  readonly now: number
+  /**
+   * runtime 收件方的投递台账闸门（spec §14.4：jobs 即唯一台账）；logical（含 human）
+   * 不门控、纯收件箱。
+   */
+  readonly runtimeGated: boolean
+}
+
+/** 绑定参数（`runtimeGated` 落 SQL 为 0/1；better-sqlite3 不支持 boolean 绑定）。 */
+interface ClaimableInboxParams {
+  readonly agentId: string
+  readonly shoutConversationId: string
+  readonly after: number
+  readonly limit: number
+  readonly now: number
+  readonly runtimeGated: number
+}
+
+/**
+ * /internal/wake 的**可认领候选**（P2 修复：认领页饥饿）。
+ *
+ * 与 `inboxMessages` 的唯一差别是：候选集在 SQL 层就与 `claimWakeBacklog` 的 JS 判据
+ * 逐条对齐，因此**每一页都能被吃满**——被认领/已读/已撤回/无 job 的行不再占据窗口，
+ * `after = 0` 的下一页自然推进。改前只取「最旧 50 条」再在 JS 里跳过，窗口永不前进：
+ * 收件方累计可见消息 >50 后新消息永远进不了这一页（永久 `pending, attempts=0`）。
+ *
+ * 判据镜像（与 `claimWakeBacklog` 分支一一对应，任一改动必须两边同步）：
+ * - `revoked_at IS NULL` ← 撤回守卫（绝不投递、绝不补建 job）
+ * - `from_agent_id != agentId` ← 自发消息过滤
+ * - 无 `read_states` 位点 `>= seq` ← 回执 `read` 跳过
+ * - runtime：`pending` ｜ `sending` 且租约过期 ｜ **system 且无 job 行**
+ *   （system 豁免：ask 卡/入群通知必须达）；非 runtime 不加此闸
+ * - 可见性（参与会话 + 喊话广播 + human 超级观察者）与 `inboxMessages` 完全一致
+ */
+export function claimableInboxMessages(db: Db, query: ClaimableInboxQuery): Message[] {
+  const rows = db
+    .prepare<ClaimableInboxParams, MessageRow>(
+      `SELECT * FROM messages
+        WHERE seq > $after
+          AND revoked_at IS NULL
+          AND from_agent_id != $agentId
+          AND NOT EXISTS (
+            SELECT 1 FROM read_states r
+             WHERE r.conversation_id = messages.conversation_id
+               AND r.agent_id = $agentId
+               AND r.last_read_seq >= messages.seq)
+          AND (conversation_id = $shoutConversationId
+               OR EXISTS (SELECT 1 FROM agents WHERE id = $agentId AND vendor = 'human')
+               OR conversation_id IN (SELECT conversation_id FROM participants WHERE agent_id = $agentId))
+          AND (
+            $runtimeGated = 0
+            OR EXISTS (
+              SELECT 1 FROM wake_jobs j
+               WHERE j.message_id = messages.seq AND j.agent_id = $agentId
+                 AND (j.state = 'pending' OR (j.state = 'sending' AND j.retry_at <= $now)))
+            OR (kind = 'system'
+                AND NOT EXISTS (
+                  SELECT 1 FROM wake_jobs j2
+                   WHERE j2.message_id = messages.seq AND j2.agent_id = $agentId)))
+        ORDER BY seq ASC
+        LIMIT $limit`,
+    )
+    .all({ ...query, runtimeGated: query.runtimeGated ? 1 : 0 })
+  return rows.map(toMessage)
+}
+
 // ── 硬删除原语（`/api/test/*` 测试面）：外键现实决定必须先删 wake_jobs 再删消息 ──
 
 /**
