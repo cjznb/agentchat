@@ -268,6 +268,7 @@ export function apply(ctx, config) {
    * 原生工具面（**P7 起默认开启**）：逐调用按调用者会话注入身份（`x-agentchat-session`）——多会话与
    * 子代理天然精确，且不依赖共享的 `dsh.current`。见 `lib/native-tools.js`。
    *
+   * **注册走自动重试（P8）**：加载时 Hub 没起来也能自愈（见文件末尾的 `startAutoRegister()`）。
    * 回退：`config.nativeTools: false`（或 env `AGENTCHAT_NATIVE_TOOLS=0`）关闭原生面——此时必须另有
    * MCP 桥工具行（安装器 `--with-mcp-bridge`），否则 DSH agent 没有 AgentChat 工具可用。
    */
@@ -516,7 +517,10 @@ export function apply(ctx, config) {
   })
   ctx.on("agent/status", (payload) => guard(onStatus(payload)))
   ctx.on("agent/disposed", (payload) => guard(onDisposed(payload)))
-  guard(nativeTools?.registerAll())
+  // 原生工具面**自动注册**（P8）：插件加载时 Hub 常还没起来，一次失败就永不再试 = 「收得到、发不出」，
+  // 只能重启 DSH。`startAutoRegister()` 首次立即尝试、失败按指数退避重试到成功为止（`dispose()` 停表）。
+  // 仍然走 `guard`：启动异常只记日志，绝不冒泡到宿主。
+  guard(nativeTools?.startAutoRegister())
 
   ctx.effect(
     () => () => {

@@ -14,11 +14,21 @@
  * 纪律：
  * - **绝不抛**给宿主：注册失败逐工具忽略并记日志；调用失败转成文本结果（模型可见、可自救）；
  * - **拿不到调用者会话就拒发**（不回落容器、不猜）：返回明确文案，避免再次污染审计；
- * - 工具定义从 Hub 的 `tools/list` **动态生成**（不硬编码 schema，Hub 加工具自动跟随）。
+ * - 工具定义从 Hub 的 `tools/list` **动态生成**（不硬编码 schema，Hub 加工具自动跟随）；
+ * - **P8 自动注册**：插件加载时 Hub 常常还没起来（一次失败就永不再试 = 「收得到、发不出」，只能重启
+ *   DSH）；`startAutoRegister()` 会指数退避重试到成功为止，`dispose()` 停止定时器并反注册。
  *
  * @module lib/native-tools
  */
+import { createAutoRegister } from "./tool-register.js"
 import { describe, isRecord } from "./util.js"
+
+/**
+ * 自动注册句柄（= `lib/tool-register.js` 的 `createAutoRegister` 返回值）。
+ *
+ * @typedef {{start: () => void, stop: () => void, attempts: () => number, failures: () => number,
+ *   succeeded: () => boolean, running: () => boolean, nextDelayMs: () => number | undefined}} AutoRegisterHandle
+ */
 
 /** 原生工具名前缀（与 MCP 面的 `mcp__agentchat__*` 区分，避免同一模型看到两个同名工具）。 */
 export const TOOL_PREFIX = "agentchat_"
@@ -66,7 +76,9 @@ export function toolDefinition(tool, run) {
  *   sessions: Map<string, {nodeId: string}>, log: (message: string) => void,
  *   service?: {register?(definition: Record<string, unknown>): (() => void) | undefined}}} options
  *   `service` 缺省取 `ctx.get("tools")`（测试可注入）；**必须以方法形式调用** `register`（内部用 `this`）
- * @returns {{registerAll: () => Promise<number>, dispose: () => void, definitions: Record<string, unknown>[]}}
+ * @returns {{registerAll: (log?: (message: string) => void) => Promise<number>,
+ *   startAutoRegister: (overrides?: object) => AutoRegisterHandle | undefined,
+ *   dispose: () => void, definitions: Record<string, unknown>[]}}
  */
 export function createNativeTools(options) {
   /**
@@ -94,19 +106,31 @@ export function createNativeTools(options) {
   const registered = []
   /** 现役定义（测试与排查用）。 */
   const definitions = []
+  /** 已 dispose：此后的注册请求一律拒绝，且竞态里刚注册上的工具立刻反注册（见下）。 */
+  let disposed = false
+  /** 自动注册句柄（`startAutoRegister()` 幂等：已启动即返回同一句柄，不叠加定时器）。 */
+  let retry
 
-  async function registerAll() {
+  /**
+   * 单次注册尝试（**行为与 P7 完全一致**，仅多了可选日志出口）：返回实际注册成功的工具数。
+   *
+   * @param {(message: string) => void} [log] 诊断出口；缺省 `options.log`。自动注册会传入一个
+   *   **捕获式**出口，由调度器按节流策略决定是否真的落日志（避免每轮重试刷屏）。
+   * @returns {Promise<number>}
+   */
+  async function registerAll(log = options.log) {
+    if (disposed) return 0
     let service
     try {
       service = options.service ?? options.ctx.get?.("tools")
     } catch (error) {
-      options.log(`取 tools 服务失败（忽略）：${String(error)}`)
+      log(`取 tools 服务失败（忽略）：${String(error)}`)
       return 0
     }
     if (typeof service?.register !== "function") {
       // **响亮告警**（P7）：默认工具面就是原生面；拿不到 tools 服务时本会话没有任何 AgentChat 工具，
       // 必须让用户看见并给出可执行的补救（保留 MCP 桥工具行）——绝不静默降级。
-      options.log(
+      log(
         "原生工具面不可用：宿主没有 tools 服务（ctx.get('tools')）→ 本插件未注册任何 AgentChat 工具；" +
           "若你依赖 MCP 桥工具行，请用 `node adapters/dsh/install.mjs --with-mcp-bridge` 重装（或升级 DSH）",
       )
@@ -115,6 +139,8 @@ export function createNativeTools(options) {
     const tools = await mcp().list()
     let count = 0
     for (const tool of tools) {
+      // dispose 竞态：反注册后绝不继续注册（否则宿主工具表里会留下调用不到的僵尸工具）。
+      if (disposed) break
       if (!isRecord(tool) || typeof tool["name"] !== "string") continue
       const definition = toolDefinition(
         /** @type {{name: string, description?: unknown, inputSchema?: unknown}} */ (tool),
@@ -124,22 +150,76 @@ export function createNativeTools(options) {
         // **必须以方法形式调用**（`service.register(...)`）：注册表内部用到 `this`
         // （真机事故：解构成裸函数后调用 → `this` undefined → TypeError: reading 'layers' → 12 个工具全部注册失败）。
         const disposer = service.register(definition)
-        registered.push(typeof disposer === "function" ? disposer : () => {})
+        const off = typeof disposer === "function" ? disposer : () => {}
+        if (disposed) {
+          // 注册期间恰好 dispose：立刻反注册这一个，绝不留在宿主里。
+          off()
+          break
+        }
+        registered.push(off)
         definitions.push(definition)
         count += 1
       } catch (error) {
         // 宿主 schema 校验拒绝（例如 Hub 用了宿主不支持的 schema 关键字）：跳过该工具即可。
-        options.log(`注册原生工具 ${String(tool["name"])} 失败（忽略）：${String(error)}`)
+        log(`注册原生工具 ${String(tool["name"])} 失败（忽略）：${String(error)}`)
       }
     }
-    options.log(`原生工具面已注册 ${count} 个工具（逐调用按会话注入身份，不依赖共享文件）`)
+    log(`原生工具面已注册 ${count} 个工具（逐调用按会话注入身份，不依赖共享文件）`)
     return count
+  }
+
+  /**
+   * 启动**自动注册**（P8）：首次立即尝试；失败（拿不到 `tools` 服务 / `mcp().list()` 抛错 / 注册 0 个）
+   * 按指数退避重试——`5s → 10s → 20s → 40s → 封顶 60s`（±10% 抖动）；**一旦成功即停止**，此后不再重试。
+   *
+   * 为什么需要：插件加载时 Hub 常还没起来，一次失败就永不再试 = 「收得到消息、发不出去」，只能重启 DSH。
+   *
+   * 幂等：重复调用返回同一句柄（不会叠加定时器）。`dispose()` 会 `stop()` 它。**绝不抛**给宿主。
+   *
+   * @param {{log?: (message: string) => void, baseMs?: number, capMs?: number, logEveryAttempts?: number,
+   *   logEveryMs?: number, jitter?: number, now?: () => number, random?: () => number,
+   *   setTimeout?: (fn: () => void, ms: number) => unknown, clearTimeout?: (id: unknown) => void}} [overrides]
+   *   单测注入点（定时器/时钟/随机数）；生产不传。
+   * @returns {AutoRegisterHandle | undefined} 句柄（构造失败时 `undefined`）
+   */
+  function startAutoRegister(overrides = {}) {
+    if (retry !== undefined) return retry
+    try {
+      retry = createAutoRegister({
+        // 捕获式日志：由调度器按节流策略 flush（首次失败/原因变化/每 N 次/每 N 分钟）。
+        attempt: async () => {
+          const captured = []
+          const count = await registerAll((message) => captured.push(message))
+          return { count, captured }
+        },
+        log: overrides.log ?? options.log,
+        baseMs: overrides.baseMs,
+        capMs: overrides.capMs,
+        logEveryAttempts: overrides.logEveryAttempts,
+        logEveryMs: overrides.logEveryMs,
+        jitter: overrides.jitter,
+        now: overrides.now,
+        random: overrides.random,
+        setTimeout: overrides.setTimeout,
+        clearTimeout: overrides.clearTimeout,
+      })
+      retry.start()
+      return retry
+    } catch (error) {
+      options.log(`原生工具面自动注册启动失败（忽略）：${describe(error)}`)
+      return undefined
+    }
   }
 
   return {
     registerAll,
+    startAutoRegister,
     definitions,
     dispose() {
+      // 顺序有意义：先置 disposed（在途的 registerAll 立刻停止/反注册），再停表（不再有下一次尝试）。
+      disposed = true
+      retry?.stop()
+      retry = undefined
       for (const disposer of registered.splice(0)) {
         try {
           disposer()
