@@ -1254,3 +1254,54 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
   cursor: not-allowed;
 }
 .card-choice:disabled { cursor: not-allowed; }
+
+/* ══ UI-1 ② 信息层级：会话列表 + 消息元信息 ══════════════════════════════
+   ②-5 会话行 = 头像/标识 + 标题&摘要 + 行尾（被@/时间/未读）；群聊分组头带计数。
+   ②-6 回执前置 + tone 分级；行内操作收进 hover/「⋯」菜单。②-7 作者行层级降噪。 */
+
+/* 会话行三列（头像 | 主体 | 行尾）；child 行多一列状态点。后置覆盖既有列定义。 */
+.conversation-item,
+.conversation-flat { grid-template-columns: auto minmax(0, 1fr) auto; }
+.conversation-child { grid-template-columns: auto auto minmax(0, 1fr) auto; }
+.fold-content { grid-template-columns: auto minmax(0, 1fr); }
+/* 标题也要省略号：多出的头像/时间列会压缩可用宽度（层1 的 ellipsis 豁免随之生效）。 */
+.conversation-body strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-avatar { width: var(--space-6); height: var(--space-6); font: 650 var(--text-label)/1 var(--font-ui); }
+.row-avatar[data-kind="group"] { color: var(--color-jade); background: var(--color-jade-soft); }
+.row-avatar[data-kind="shout"] { color: var(--color-raised); background: var(--color-jade); }
+.conversation-side { display: inline-flex; flex: 0 0 auto; align-items: center; gap: var(--space-2); }
+.conversation-time { color: var(--color-muted); font: 500 var(--text-label)/1 var(--font-utility); white-space: nowrap; }
+.group-section-count {
+  min-width: var(--space-4);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-large);
+  color: var(--color-jade);
+  background: var(--color-jade-soft);
+  font: 700 var(--text-label)/1.6 var(--font-utility);
+  text-align: center;
+}
+
+/* ②-6 回执 tone 分级：排队(弱) → 唤醒中(琥珀) → 已送达(正文色) → 已读(jade 加粗，见上)。 */
+.receipt[data-tone="pending"] { color: var(--color-muted); }
+.receipt[data-tone="progress"] { color: var(--color-amber); }
+.receipt[data-tone="delivered"] { color: var(--color-ink); }
+/* 脚注可换行：回执/时间/chip/操作同排时宁可折行，也不横向溢出（层1 零容忍）。 */
+.bubble-foot { flex-wrap: wrap; }
+.bubble-actions { display: inline-flex; align-items: center; gap: var(--space-2); visibility: hidden; opacity: 0; transition: opacity var(--duration-micro) var(--ease-standard); }
+.message-row:hover .bubble-actions,
+.message-row:focus-within .bubble-actions,
+.bubble-actions[data-open="true"] { visibility: visible; opacity: 1; }
+.bubble-actions-toggle {
+  padding: 0 var(--space-2);
+  border: var(--line-thin) solid transparent;
+  border-radius: var(--radius-small);
+  color: var(--color-muted);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+  transition: color var(--duration-micro) var(--ease-standard), border-color var(--duration-micro) var(--ease-standard);
+}
+.bubble-actions-toggle:hover { color: var(--color-ink); border-color: var(--color-hairline); }
+.bubble-actions-toggle:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: var(--space-1); }
+/* ②-7 作者行降噪：`[子·根名]` → 紧凑「子」chip，全量层级说明在 title/aria。 */
+.child-badge { padding: 0 var(--space-1); border: var(--line-thin) solid color-mix(in srgb, var(--color-jade) 32%, transparent); border-radius: var(--radius-small); font-size: var(--text-label); }

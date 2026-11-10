@@ -3,6 +3,8 @@
  * 发送者头像 + 厂商徽标 + 子节点徽标、己方四级回执。纯展示，数据全由 props 注入。
  * Task 8：正文 `@名字` 高亮（`splitMentions` 分段）+ `meta.mentions` 正文未写的提及 chip。
  * 轮 2 T3：正文 MD⇄原文视图（mdScope 订阅 + 单条手动覆盖）+ 脚注 MD⇄原文/复制按钮。
+ * UI-1 ②-6/②-7：回执**前置**并按 tone 分级着色；行内操作收进 hover/「⋯」菜单（触屏与键盘
+ * 都可达：⋯ 常显 + `:focus-within` 展开）；作者行层级说明由 `[子·根名]` 收进 tooltip。
  */
 import { Fragment, useEffect, useState } from "react"
 import type { ChatMessage } from "../../../shared/contracts"
@@ -71,6 +73,9 @@ export function MessageBubble({
   useEffect(() => subscribe(setMdScope), [])
   const [mdOverride, setMdOverride] = useState<"md" | "raw" | null>(null)
   const [copied, setCopied] = useState(false)
+  // UI-1 ②-6：行内操作（看原文/复制/撤回）收进 hover 或「⋯」菜单；菜单态由此开关控制
+  // （触屏无 hover，故 ⋯ 常显；键盘 focus-within 也会把操作展开）。
+  const [actionsOpen, setActionsOpen] = useState(false)
 
   if (message.kind === "system") {
     if (card !== null) {
@@ -174,8 +179,14 @@ export function MessageBubble({
               </>
             ) : null}
             {childBadge !== null ? (
-              <span className="child-badge" data-testid="child-badge">
-                [子·{childBadge}]
+              // ②-7 降噪：层级说明不再占行内宽度，收进 tooltip/aria（`data-testid` 不变）。
+              <span
+                className="child-badge"
+                data-testid="child-badge"
+                title={`子节点 · 主实例：${childBadge}`}
+                aria-label={`子节点，主实例 ${childBadge}`}
+              >
+                子
               </span>
             ) : null}
           </header>
@@ -202,40 +213,7 @@ export function MessageBubble({
           </p>
         )}
         <footer className="bubble-foot">
-          <time className="bubble-time">{formatClock(message.createdAt)}</time>
-          {showMdButtons ? (
-            <>
-              <button
-                className="bubble-md-toggle"
-                data-testid="bubble-md-toggle"
-                type="button"
-                title={view === "md" ? "看原文" : "看排版"}
-                onClick={() => setMdOverride(view === "md" ? "raw" : "md")}
-              >
-                {view === "md" ? "看原文" : "看排版"}
-              </button>
-              <button
-                className="bubble-copy"
-                data-testid="bubble-copy"
-                type="button"
-                onClick={copyBody}
-              >
-                {copied ? "已复制" : "复制"}
-              </button>
-            </>
-          ) : null}
-          {revoked === "marked" ? (
-            <span className="revoke-mark" data-testid="revoke-mark">
-              已撤回
-            </span>
-          ) : null}
-          {revoked === "placeholder"
-            ? null
-            : chipNames.map((name) => (
-                <span className="mention-chip" data-testid="mention-chip" key={name}>
-                  提及: {name}
-                </span>
-              ))}
+          {/* ②-6：回执**前置**（状态先于时间读），图标 + tone 分级着色的语义在 CSS。 */}
           {receipt !== null ? (
             <span
               className="receipt"
@@ -250,16 +228,71 @@ export function MessageBubble({
               <span className="receipt-label">{receipt.label}</span>
             </span>
           ) : null}
-          {showRevoke ? (
-            <button
-              className="bubble-revoke"
-              data-testid="revoke-button"
-              type="button"
-              disabled={revoking}
-              onClick={onRevoke}
-            >
-              {revoking ? "撤回中…" : "撤回"}
-            </button>
+          <time className="bubble-time">{formatClock(message.createdAt)}</time>
+          {revoked === "marked" ? (
+            <span className="revoke-mark" data-testid="revoke-mark">
+              已撤回
+            </span>
+          ) : null}
+          {revoked === "placeholder"
+            ? null
+            : chipNames.map((name) => (
+                <span className="mention-chip" data-testid="mention-chip" key={name}>
+                  提及: {name}
+                </span>
+              ))}
+          {showMdButtons || showRevoke ? (
+            <>
+              <button
+                className="bubble-actions-toggle"
+                data-testid="bubble-actions-toggle"
+                type="button"
+                aria-expanded={actionsOpen}
+                aria-label={`${actionsOpen ? "收起" : "展开"}消息操作`}
+                title="消息操作"
+                onClick={() => setActionsOpen((previous) => !previous)}
+              >
+                ⋯
+              </button>
+              <span
+                className="bubble-actions"
+                data-testid="bubble-actions"
+                data-open={actionsOpen ? "true" : undefined}
+              >
+                {showMdButtons ? (
+                  <>
+                    <button
+                      className="bubble-md-toggle"
+                      data-testid="bubble-md-toggle"
+                      type="button"
+                      title={view === "md" ? "看原文" : "看排版"}
+                      onClick={() => setMdOverride(view === "md" ? "raw" : "md")}
+                    >
+                      {view === "md" ? "看原文" : "看排版"}
+                    </button>
+                    <button
+                      className="bubble-copy"
+                      data-testid="bubble-copy"
+                      type="button"
+                      onClick={copyBody}
+                    >
+                      {copied ? "已复制" : "复制"}
+                    </button>
+                  </>
+                ) : null}
+                {showRevoke ? (
+                  <button
+                    className="bubble-revoke"
+                    data-testid="revoke-button"
+                    type="button"
+                    disabled={revoking}
+                    onClick={onRevoke}
+                  >
+                    {revoking ? "撤回中…" : "撤回"}
+                  </button>
+                ) : null}
+              </span>
+            </>
           ) : null}
         </footer>
       </div>

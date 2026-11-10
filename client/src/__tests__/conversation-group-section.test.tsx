@@ -17,6 +17,7 @@ import { act } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createRoot, type Root } from "react-dom/client"
 import type { ConversationSummary, RosterNode } from "../../../shared/contracts"
+import { formatListTime } from "../chat"
 
 const storeState = vi.hoisted(() => ({
   conversations: [] as unknown[],
@@ -269,6 +270,92 @@ describe("C1 会话列表群聊分组头", () => {
     expect(el.querySelector('[data-testid="conversation-item"][data-kind="group"]')).toBeNull()
     // 非群行照常可见（分区不吞其他行）。
     expect(row(el, "d1")).not.toBeNull()
+  })
+})
+
+// ── UI-1 ②-5：会话行信息层级 ────────────────────────────────────────
+
+/** 带最后消息 + 未读 + 时间的群/DM 行夹具（②-5 断言的输入面）。 */
+function richConversation(
+  id: string,
+  kind: "dm" | "group",
+  key: string,
+  name: string,
+  unread: number,
+  lastBody: string | null,
+): ConversationSummary {
+  const lastMessage =
+    lastBody === null
+      ? null
+      : { id: `m-${id}`, seq: 1, from: "n1", body: lastBody, createdAt: Date.now() }
+  return {
+    id,
+    kind,
+    key,
+    name,
+    unread,
+    createdAt: Date.now() - 60_000,
+    lastMessage,
+    participants: [],
+    mentions: [],
+  } as unknown as ConversationSummary
+}
+
+describe("UI-1 ②-5 会话行信息层级（头像/摘要/时间/未读 + 群聊计数）", () => {
+  beforeEach(() => {
+    localStorage.clear()
+    storeState.roster = [
+      makeNode("n1", "节点一", "runtime"),
+      makeNode("n2", "节点二", "logical"),
+    ]
+    storeState.conversations = [
+      richConversation("g1", "group", "g1", "产品群", 3, "收到，20:00 前给出回归清单。"),
+      richConversation("g2", "group", "g2", "运营群", 0, null),
+      richConversation("d1", "dm", "dm:h1_n1", "节点一私聊", 1, "分支已推送，等待评审。"),
+    ]
+    storeState.openConversationId = null
+  })
+
+  it("每行有头像/标识 + 摘要 + 时间戳；未读徽标仍在（0 未读不出）", () => {
+    const el = mount(<ConversationList />)
+    // DM 行（群行默认折叠在分组区里，先展开）。DM 走 fold-root 行：时间在兄弟节点
+    // `.fold-meta` 里（行尾列），故取整行 `<li>` 作用域而不是只取可点按钮。
+    const dmRow = (row(el, "d1") as Element).closest("li") as Element
+    expect(dmRow.querySelector('[data-testid="row-avatar"]')).not.toBeNull()
+    expect(dmRow.querySelector('[data-testid="conversation-preview"]')?.textContent).toBe(
+      "分支已推送，等待评审。",
+    )
+    expect(dmRow.querySelector('[data-testid="conversation-time"]')?.textContent).toBeTruthy()
+    expect(dmRow.querySelector('[data-testid="unread-badge"]')?.textContent).toBe("1")
+
+    click(find(el, "group-section-toggle"))
+    const g1 = row(el, "g1") as Element
+    const g2 = row(el, "g2") as Element
+    // 群行头像为语义字「群」；无最后消息 → 摘要回落「暂无消息」。
+    expect(g1.querySelector('[data-testid="row-avatar"]')?.textContent).toBe("群")
+    expect(g2.querySelector('[data-testid="conversation-preview"]')?.textContent).toBe("暂无消息")
+    expect(g1.querySelector('[data-testid="unread-badge"]')?.textContent).toBe("3")
+    expect(g2.querySelector('[data-testid="unread-badge"]')).toBeNull()
+  })
+
+  it("群聊分组头带计数（群聊 2），且默认折叠行为不变", () => {
+    const el = mount(<ConversationList />)
+    const header = find(el, "group-section-header")
+    expect(header?.textContent).toContain("群聊")
+    expect(find(el, "group-section-count")?.textContent).toBe("2")
+    // 默认收起：计数可见但群行不可见（既有折叠语义零变化）。
+    expect(find(el, "group-section-toggle")?.getAttribute("aria-expanded")).toBe("false")
+    expect(row(el, "g1")).toBeNull()
+    click(find(el, "group-section-toggle"))
+    expect(row(el, "g1")).not.toBeNull()
+  })
+
+  it("时间戳分级：今天 → HH:MM；昨天 → 昨天（纯函数口径）", () => {
+    const now = new Date(2026, 4, 20, 15, 30).getTime()
+    expect(formatListTime(new Date(2026, 4, 20, 9, 5).getTime(), now)).toBe("09:05")
+    expect(formatListTime(new Date(2026, 4, 19, 23, 59).getTime(), now)).toBe("昨天")
+    expect(formatListTime(new Date(2026, 3, 2, 1, 0).getTime(), now)).toBe("4月2日")
+    expect(formatListTime(new Date(2025, 11, 31, 1, 0).getTime(), now)).toBe("2025/12/31")
   })
 })
 

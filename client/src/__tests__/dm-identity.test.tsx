@@ -99,19 +99,25 @@ describe("私聊身份行（BUG-1）", () => {
 })
 
 describe("群聊徽标与身份行共存", () => {
-  it("showChildBadge=true 时 child-badge 与 sender-name 皆渲染", () => {
+  it("showChildBadge=true 时 child-badge 与 sender-name 皆渲染（UI-1 ②-7：徽标降噪为「子」+ tooltip 载全量层级）", () => {
     const hostEl = render(props({ showChildBadge: true }))
-    expect(find(hostEl, "child-badge")?.textContent).toBe("[子·容器]")
+    const badge = find(hostEl, "child-badge")
+    expect(badge?.textContent).toBe("子")
+    // 层级信息未丢：完整说明移到 tooltip/aria（②-7 的降噪口径）。
+    expect(badge?.getAttribute("title")).toBe("子节点 · 主实例：容器")
+    expect(badge?.getAttribute("aria-label")).toBe("子节点，主实例 容器")
     expect(hostEl.querySelector(".sender-name")?.textContent).toBe("小艾")
   })
 })
 
 describe("showChildBadge 缺省行为", () => {
-  it("不传 showChildBadge 时徽标照常渲染（与改前一致）", () => {
+  it("不传 showChildBadge 时徽标照常渲染（与改前一致，仅形态降噪）", () => {
     const input = props()
     expect("showChildBadge" in input).toBe(false)
     const hostEl = render(input)
-    expect(find(hostEl, "child-badge")?.textContent).toBe("[子·容器]")
+    const badge = find(hostEl, "child-badge")
+    expect(badge?.textContent).toBe("子")
+    expect(badge?.getAttribute("title")).toContain("容器")
     expect(hostEl.querySelector(".sender-name")).not.toBeNull()
   })
 })

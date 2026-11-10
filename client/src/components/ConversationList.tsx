@@ -26,7 +26,7 @@ import {
 } from "../fold"
 import { useStore } from "../store"
 import { conversationMentioned } from "../unread"
-import { Badge, Body, MentionBadge, StatusDot } from "./conversation-row"
+import { Badge, Body, MentionBadge, RowAvatar, RowTime, Side, StatusDot } from "./conversation-row"
 import { GroupSection, GROUP_SECTION_KEY } from "./GroupSection"
 
 // 分组展开态键仍从本模块导出（既有消费方导入路径不变，实现已移至 GroupSection）。
@@ -67,9 +67,9 @@ function ChildItem({
         type="button"
       >
         {node === undefined ? null : <StatusDot status={node.status} />}
+        <RowAvatar name={node?.name ?? conversation.name ?? "私聊"} vendor={node?.vendor} kind="node" />
         <Body name={node?.name ?? conversation.name ?? "私聊"} conversation={conversation} />
-        {mentioned ? <MentionBadge /> : null}
-        <Badge count={conversation.unread} />
+        <Side conversation={conversation} unread={conversation.unread} mentioned={mentioned} />
       </button>
     </li>
   )
@@ -108,9 +108,13 @@ function FlatItem({
         onClick={() => onOpen(conversation.id)}
         type="button"
       >
+        <RowAvatar
+          name={flatName(row)}
+          vendor={row.node?.vendor}
+          kind={row.kind === "group" ? "group" : row.kind === "shout" ? "shout" : "node"}
+        />
         <Body name={flatName(row)} conversation={conversation} />
-        {mentioned ? <MentionBadge /> : null}
-        <Badge count={row.unread} />
+        <Side conversation={conversation} unread={row.unread} mentioned={mentioned} />
       </button>
     </li>
   )
@@ -163,10 +167,14 @@ function RootItem({
           }}
           type="button"
         >
+          <RowAvatar name={name} vendor={row.node?.vendor} kind="node" />
           <Body name={name} conversation={conversation} />
-          {mentioned ? <MentionBadge /> : null}
         </button>
         <span className="fold-meta">
+          {mentioned ? <MentionBadge /> : null}
+          {conversation === null ? null : (
+            <RowTime createdAt={conversation.lastMessage?.createdAt ?? conversation.createdAt} />
+          )}
           {row.children.length > 0 ? (
             <span className="fold-summary" data-testid="fold-summary">
               {row.children.length} 子
@@ -242,7 +250,7 @@ export function ConversationList({ onCreateGroup }: ConversationListProps = {}) 
             <FlatItem key={row.id} row={row} activeId={state.openConversationId} onOpen={open} roster={state.roster} />
           ))}
           {groupRows.length === 0 ? null : (
-            <GroupSection>
+            <GroupSection count={groupRows.length}>
               {groupRows.map((row) => (
                 <FlatItem key={row.id} row={row} activeId={state.openConversationId} onOpen={open} roster={state.roster} />
               ))}
