@@ -13,6 +13,7 @@ import {
   cardOutcome,
   cardSubject,
   entriesForTab,
+  filterNotifications,
   formatMoment,
   kindLabel,
   statusLabel,
@@ -91,13 +92,20 @@ export interface NotificationsViewProps {
 export function NotificationsView({ onJump }: NotificationsViewProps) {
   const { state, markNotificationRead } = useStore()
   const [tab, setTab] = useState<NotificationTab>("actionable")
+  // ③-9：通知搜索（主题/发起方/类型/状态/时间任一命中）。
+  const [query, setQuery] = useState("")
   const rosterView = useMemo(() => buildRosterView(state.roster), [state.roster])
   const names = useMemo(() => {
     const map = new Map<string, string>()
     for (const [id, view] of rosterView.byId) map.set(id, view.name)
     return map
   }, [rosterView])
-  const entries = entriesForTab(tab, state.notifications, state.notificationsAll)
+  const all = entriesForTab(tab, state.notifications, state.notificationsAll)
+  const entries = useMemo(
+    () => filterNotifications(all, query, names),
+    [all, query, names],
+  )
+  const searching = query.trim() !== ""
   const unread = unreadCount(state.notifications)
 
   const open = useCallback(
@@ -148,6 +156,15 @@ export function NotificationsView({ onJump }: NotificationsViewProps) {
         >
           全部 <b>{state.notificationsAll.length}</b>
         </button>
+        <input
+          className="list-search-input notif-search"
+          data-testid="notification-search"
+          type="search"
+          value={query}
+          placeholder="搜索通知…"
+          aria-label="搜索通知"
+          onChange={(event) => setQuery(event.target.value)}
+        />
       </div>
       <div
         id="notif-panel"
@@ -157,7 +174,11 @@ export function NotificationsView({ onJump }: NotificationsViewProps) {
       >
         {entries.length === 0 ? (
           <p className="notif-empty" data-testid="notifications-empty">
-            {tab === "actionable" ? "没有需要你处理的单据。" : "还没有任何通知。"}
+            {searching
+              ? `没有匹配「${query.trim()}」的通知。`
+              : tab === "actionable"
+                ? "没有需要你处理的单据。"
+                : "还没有任何通知。"}
           </p>
         ) : (
           <ul className="notif-list" data-testid="notifications-list">

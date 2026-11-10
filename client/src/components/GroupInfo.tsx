@@ -158,6 +158,7 @@ export function GroupInfo({ conversationId, onClose }: GroupInfoProps) {
       {pickerOpen ? (
         <MemberAddDialog
           conversationId={conversationId}
+          existingMemberIds={entry?.members ?? []}
           onClose={closePicker}
           onSuccess={onAddSuccess}
         />

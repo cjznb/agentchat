@@ -20,6 +20,7 @@ import { vendorBadge } from "../chat"
 import { useStore } from "../store"
 import { aggregateUnread } from "../unread"
 import {
+  filterTreeRows,
   foldTree,
   isContainerNode,
   loadExpandedTree,
@@ -206,6 +207,10 @@ export interface OrgTreeListProps {
   readonly selectedId: string | null
   readonly onSelect: (nodeId: string) => void
   readonly onToggle: (nodeId: string) => void
+  /** ③-9 搜索词；缺省 = 不过滤（既有纯展示调用零变化）。 */
+  readonly query?: string | undefined
+  /** ③-9 搜索框回调；给出才渲染搜索行（纯展示消费方不需要输入框）。 */
+  readonly onQueryChange?: ((query: string) => void) | undefined
 }
 
 /** 纯展示组织树（无 store 依赖；jsdom 组件测试直接渲染）。 */
@@ -215,30 +220,54 @@ export function OrgTreeList({
   selectedId,
   onSelect,
   onToggle,
+  query = "",
+  onQueryChange,
 }: OrgTreeListProps) {
-  if (rows.length === 0) {
-    return (
-      <div className="list-empty" data-testid="org-tree-empty">
-        <span aria-hidden="true">—</span>
-        <p>等待 Agent 加入</p>
-        <small>节点注册后自动出现在这里</small>
-      </div>
-    )
-  }
+  const filtered = useMemo(() => filterTreeRows(rows, query), [rows, query])
+  const searching = query.trim() !== ""
+  // 搜索期间强制展开命中项的祖先（否则"搜到了却看不见"）。
+  const effectiveExpanded =
+    searching && onQueryChange !== undefined
+      ? [...new Set([...expandedIds, ...filtered.expandIds])]
+      : expandedIds
+  const visible = onQueryChange === undefined && query === "" ? rows : filtered.rows
   return (
-    <ul className="org-tree" data-testid="org-tree">
-      {rows.map((row) => (
-        <OrgRow
-          key={row.node.id}
-          row={row}
-          depth={0}
-          expandedIds={expandedIds}
-          selectedId={selectedId}
-          onSelect={onSelect}
-          onToggle={onToggle}
-        />
-      ))}
-    </ul>
+    <div className="list-pane" data-testid="org-pane">
+      {onQueryChange === undefined ? null : (
+        <div className="list-search">
+          <input
+            className="list-search-input"
+            data-testid="org-search"
+            type="search"
+            value={query}
+            placeholder="搜索 Agent 名字…"
+            aria-label="搜索 Agent"
+            onChange={(event) => onQueryChange(event.target.value)}
+          />
+        </div>
+      )}
+      {visible.length === 0 ? (
+        <div className="list-empty" data-testid={searching ? "org-tree-no-match" : "org-tree-empty"}>
+          <span aria-hidden="true">—</span>
+          <p>{searching ? `没有匹配「${query.trim()}」的节点` : "等待 Agent 加入"}</p>
+          <small>{searching ? "换个关键词试试" : "节点注册后自动出现在这里"}</small>
+        </div>
+      ) : (
+        <ul className="org-tree" data-testid="org-tree">
+          {visible.map((row) => (
+            <OrgRow
+              key={row.node.id}
+              row={row}
+              depth={0}
+              expandedIds={effectiveExpanded}
+              selectedId={selectedId}
+              onSelect={onSelect}
+              onToggle={onToggle}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
   )
 }
 
@@ -247,6 +276,8 @@ export function OrgTree({ selectedId, onSelect }: OrgTreeProps) {
   const [expanded, setExpanded] = useState<readonly string[]>(() =>
     loadExpandedTree(browserStorage()),
   )
+  // ③-9：通讯录搜索（名字子串，保留层级并强制展开命中祖先）。
+  const [query, setQuery] = useState("")
   const rows = useMemo(
     () => foldTree(state.roster, aggregateUnread(state.conversations, state.roster)),
     [state.roster, state.conversations],
@@ -272,6 +303,8 @@ export function OrgTree({ selectedId, onSelect }: OrgTreeProps) {
       selectedId={selectedId}
       onSelect={onSelect}
       onToggle={toggle}
+      query={query}
+      onQueryChange={setQuery}
     />
   )
 }

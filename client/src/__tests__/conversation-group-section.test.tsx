@@ -357,15 +357,44 @@ describe("UI-1 ②-5 会话行信息层级（头像/摘要/时间/未读 + 群�
     expect(formatListTime(new Date(2026, 3, 2, 1, 0).getTime(), now)).toBe("4月2日")
     expect(formatListTime(new Date(2025, 11, 31, 1, 0).getTime(), now)).toBe("2025/12/31")
   })
+
+  it("③-9 搜索框过滤会话（名字/摘要），无命中给明确空态", () => {
+    const el = mount(<ConversationList />)
+    const search = find(el, "conversation-search") as HTMLInputElement
+    expect(search).not.toBeNull()
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set
+    const type = (text: string): void => {
+      act(() => {
+        setValue?.call(search, text)
+        search.dispatchEvent(new Event("input", { bubbles: true }))
+      })
+    }
+
+    // 摘要在消息里、不在会话名里 → 按摘要也能命中（DM 行）。
+    type("分支已推送")
+    expect(row(el, "d1")).not.toBeNull()
+    expect(row(el, "g1")).toBeNull()
+
+    type("不存在的关键词")
+    expect(find(el, "conversation-no-match")).not.toBeNull()
+    expect(row(el, "d1")).toBeNull()
+
+    type("")
+    expect(row(el, "d1")).not.toBeNull()
+    expect(find(el, "conversation-no-match")).toBeNull()
+  })
 })
 
 // ── C2：添加成员弹窗 ────────────────────────────────────────────────
 
 describe("C2 GroupInfo 添加成员弹窗", () => {
   beforeEach(() => {
+    // groups mock 的成员 = n1/n2（已在群）；n3/n4 为可拉入的新成员（③-8 区分两者的夹具面）。
     storeState.roster = [
       makeNode("n1", "执行者", "runtime"),
       makeNode("n2", "成员乙", "runtime"),
+      makeNode("n3", "新人丙", "runtime"),
+      makeNode("n4", "新人丁", "runtime"),
     ]
     storeState.conversations = []
     storeState.openConversationId = null
@@ -390,6 +419,39 @@ describe("C2 GroupInfo 添加成员弹窗", () => {
     expect(dialog?.querySelector('[data-testid="member-picker"]')).not.toBeNull()
     expect(find(el, "member-add-confirm")).not.toBeNull()
     expect(find(el, "member-add-cancel")).not.toBeNull()
+    // ③-8：搜索框 + 已选计数同排出现。
+    expect(find(el, "member-add-search")).not.toBeNull()
+    expect(find(el, "member-add-count")?.textContent).toBe("已选 0 名")
+  })
+
+  it("③-8 已在群成员标注「已在群」且不可勾选；搜索框按名字过滤", async () => {
+    const el = await mountGroupInfo()
+    click(find(el, "group-add-open"))
+    const rowOf = (id: string): Element | null =>
+      el.querySelector(`[data-testid="member-row"][data-node-id="${id}"]`)
+
+    // 已在群（groups mock members=n1,n2）→ 徽标 + 禁用。
+    expect(rowOf("n1")?.getAttribute("data-existing")).toBe("true")
+    expect(rowOf("n1")?.querySelector('[data-testid="existing-badge"]')?.textContent).toBe("已在群")
+    expect(
+      (rowOf("n1")?.querySelector('[data-testid="member-check"]') as HTMLInputElement).disabled,
+    ).toBe(true)
+    // 非成员可勾选。
+    expect(rowOf("n3")?.getAttribute("data-existing")).toBeNull()
+    expect(
+      (rowOf("n3")?.querySelector('[data-testid="member-check"]') as HTMLInputElement).disabled,
+    ).toBe(false)
+
+    // 搜索：只留命中的行（层级保留）。React 受控输入需走原生 value setter 才能触发 onChange。
+    const search = find(el, "member-add-search") as HTMLInputElement
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set
+    act(() => {
+      setValue?.call(search, "新人丁")
+      search.dispatchEvent(new Event("input", { bubbles: true }))
+    })
+    expect(rowOf("n4")).not.toBeNull()
+    expect(rowOf("n3")).toBeNull()
+    expect(rowOf("n1")).toBeNull()
   })
 
   it("弹窗内多选两个成员后确认 → addGroupMember 被调用且弹窗关闭", async () => {
@@ -397,17 +459,21 @@ describe("C2 GroupInfo 添加成员弹窗", () => {
     const el = await mountGroupInfo()
     click(find(el, "group-add-open"))
     const dialog = find(el, "member-add-dialog") as Element
-    const checks = dialog.querySelectorAll('[data-testid="member-check"]')
+    // ③-8：已在群的 n1/n2 不可选，取前两个**可勾选**的新成员。
+    const checks = Array.from(
+      dialog.querySelectorAll<HTMLInputElement>('[data-testid="member-check"]'),
+    ).filter((check) => !check.disabled)
     expect(checks.length).toBeGreaterThanOrEqual(2)
-    click(checks[0])
-    click(checks[1])
+    click(checks[0] as Element)
+    click(checks[1] as Element)
     expect((checks[0] as HTMLInputElement).checked).toBe(true)
     expect((checks[1] as HTMLInputElement).checked).toBe(true)
+    expect(find(el, "member-add-count")?.textContent).toBe("已选 2 名")
     click(find(el, "member-add-confirm"))
     await act(async () => {})
     expect(api.addGroupMember).toHaveBeenCalledTimes(2)
-    expect(api.addGroupMember).toHaveBeenCalledWith("g1", "n1")
-    expect(api.addGroupMember).toHaveBeenCalledWith("g1", "n2")
+    expect(api.addGroupMember).toHaveBeenCalledWith("g1", "n3")
+    expect(api.addGroupMember).toHaveBeenCalledWith("g1", "n4")
     expect(find(el, "member-add-dialog")).toBeNull()
   })
 

@@ -10,6 +10,8 @@ import { MemberPicker } from "./MemberPicker"
 
 export interface MemberAddDialogProps {
   readonly conversationId: string
+  /** ③-8 已在群成员 id（由 GroupInfo 的群成员表传入）：标注「已在群」且不可选。 */
+  readonly existingMemberIds?: readonly string[] | undefined
   /** 取消 / Esc / 遮罩 / 关闭按钮：关闭弹窗（挂载态卸载即清空选择）。 */
   readonly onClose: () => void
   /** 确认提交成功：关闭弹窗并刷新（父层回调）。 */
@@ -29,8 +31,14 @@ export function memberAddErrorMessage(code: string | undefined): string {
   return "添加失败，请重试。"
 }
 
-export function MemberAddDialog({ conversationId, onClose, onSuccess }: MemberAddDialogProps) {
+export function MemberAddDialog({
+  conversationId,
+  existingMemberIds = [],
+  onClose,
+  onSuccess,
+}: MemberAddDialogProps) {
   const [picked, setPicked] = useState<readonly string[]>([])
+  const [query, setQuery] = useState("")
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
 
@@ -95,7 +103,27 @@ export function MemberAddDialog({ conversationId, onClose, onSuccess }: MemberAd
           </button>
         </div>
         <div className="member-add-body">
-          <MemberPicker selected={picked} onToggle={togglePick} />
+          {/* ③-8：搜索框（按名字子串，保留层级）+ 已选计数。 */}
+          <div className="member-add-search">
+            <input
+              className="list-search-input"
+              data-testid="member-add-search"
+              type="search"
+              value={query}
+              placeholder="搜索成员名字…"
+              aria-label="搜索成员"
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            <span className="member-add-count" data-testid="member-add-count">
+              已选 {picked.length} 名
+            </span>
+          </div>
+          <MemberPicker
+            selected={picked}
+            onToggle={togglePick}
+            filter={query}
+            existing={existingMemberIds}
+          />
         </div>
         <div className="member-add-foot">
           {addError !== null ? (

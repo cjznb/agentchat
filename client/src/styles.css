@@ -1305,3 +1305,42 @@ input::placeholder, textarea::placeholder { color: var(--color-muted); opacity: 
 .bubble-actions-toggle:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: var(--space-1); }
 /* ②-7 作者行降噪：`[子·根名]` → 紧凑「子」chip，全量层级说明在 title/aria。 */
 .child-badge { padding: 0 var(--space-1); border: var(--line-thin) solid color-mix(in srgb, var(--color-jade) 32%, transparent); border-radius: var(--radius-small); font-size: var(--text-label); }
+
+/* ══ UI-1 ③ 交互可用性：列表搜索 / 空态引导 / 已在群区分 ═════════════════
+   三处列表（会话 / 通讯录 / 通知）共用 `.list-pane` + `.list-search-input`；
+   空态统一 `.list-empty`（已有）。 */
+
+/* 列表 = 搜索行（auto）+ 滚动列表（1fr）：中栏既有 grid 行的第二格里自撑满。 */
+.list-pane { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+.list-search { padding: var(--space-2) var(--space-3) 0; }
+.list-search-input {
+  width: 100%;
+  min-height: var(--target-size);
+  padding: var(--space-2) var(--space-3);
+  border: var(--line-thin) solid var(--color-hairline);
+  border-radius: var(--radius-medium);
+  color: var(--color-ink);
+  background: var(--color-raised);
+  font: var(--text-body)/1.4 var(--font-ui);
+}
+.list-search-input:focus-visible { outline: var(--line-signal) solid var(--color-jade); outline-offset: calc(var(--space-1) * -1); }
+.notif-search { width: auto; flex: 1; min-width: 8rem; }
+
+/* ③-8 弹窗内：搜索 + 已选计数同排。 */
+.member-add-search { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
+.member-add-search .list-search-input { flex: 1; }
+.member-add-count { flex: 0 0 auto; color: var(--color-muted); font: 600 var(--text-label)/1 var(--font-utility); white-space: nowrap; }
+
+/* ③-8 「已在群」：灰显 + 徽标（不是隐藏 —— 用户要知道为什么点不动）。 */
+.existing-badge {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border: var(--line-thin) solid var(--color-hairline);
+  border-radius: var(--radius-large);
+  color: var(--color-muted);
+  background: color-mix(in srgb, var(--color-muted) 10%, var(--color-raised));
+  font: 600 var(--text-label)/1.6 var(--font-utility);
+  white-space: nowrap;
+}
+.picker-row[data-existing="true"] > .picker-head .picker-label { cursor: not-allowed; }
+.picker-row[data-existing="true"] > .picker-head .picker-name { color: var(--color-muted); }

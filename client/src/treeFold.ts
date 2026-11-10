@@ -129,6 +129,36 @@ function subtreeHasLive(row: TreeRow): boolean {
   return live || row.children.some(subtreeHasLive)
 }
 
+/**
+ * 树搜索（UI-1 ③-8/③-9）：按名字子串（大小写不敏感）过滤，**保留命中项的全部祖先**，
+ * 使结果仍以原有层级显示。返回过滤后的行 + 需**强制展开**的祖先 id ——
+ * 否则命中的叶子藏在默认折叠的父行里，用户"搜到了却看不见"。
+ */
+export interface FilteredTree {
+  readonly rows: readonly TreeRow[]
+  readonly expandIds: readonly string[]
+}
+
+export function filterTreeRows(rows: readonly TreeRow[], query: string): FilteredTree {
+  const needle = query.trim().toLowerCase()
+  if (needle === "") return { rows, expandIds: [] }
+  const expandIds: string[] = []
+  const keep = (row: TreeRow): TreeRow | null => {
+    const children = row.children
+      .map((child) => keep(child))
+      .filter((child): child is TreeRow => child !== null)
+    const selfMatch = row.node.name.toLowerCase().includes(needle)
+    if (!selfMatch && children.length === 0) return null
+    // 自身不命中但后代命中 → 该祖先必须展开（否则命中项被折叠吞掉）。
+    if (!selfMatch && children.length > 0) expandIds.push(row.node.id)
+    return { ...row, children }
+  }
+  const filtered = rows
+    .map((row) => keep(row))
+    .filter((row): row is TreeRow => row !== null)
+  return { rows: filtered, expandIds }
+}
+
 // ── 视觉纯映射：role 标签颜色 / 状态点（spec §11.2） ───────────────────
 
 export type RoleTone = "executor" | "organizer" | "supervisor" | "other" | "none"
