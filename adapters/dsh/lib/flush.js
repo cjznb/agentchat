@@ -1,9 +1,19 @@
 /**
- * idle 拉取闭环（与 `adapters/opencode/flush.ts` 同一闭环，但**与宿主解耦**）：
- * 上报 idle 心跳 → `POST /internal/wake` 认领积压 → 经 `deliver` 注入宿主 → `POST /internal/result` 回执。
+ * 空闲/忙时拉取闭环（与 `adapters/opencode/flush.ts` 同一闭环，但**与宿主解耦**）：
+ * 上报心跳（`idle` / `busy`）→ `POST /internal/wake` 认领积压 → 经 `deliver` 注入宿主 →
+ * `POST /internal/result` 回执。
  *
  * 唯一宿主相关操作是注入函数 `deliver(nodeId, texts)`（返回 `"delivered"` / `"refused"`），
  * 由调用方提供；本模块因此可用于任何宿主（DSH 插件、桥、hook）。
+ *
+ * ## 心跳状态（`options.state`）
+ * 心跳**必须携带会话的真实忙闲**：忙时发 `idle` 会把 Hub 上的 `busy` 反翻成 `online`
+ * （状态回退、roster 显示错误、回执语义漂移）。忙时取件的调用方须传 `state: "busy"`。
+ *
+ * ## 只心跳、不认领（`options.claim === false`）
+ * 忙时注入配额用尽等场景下，调用方可以只要心跳：本轮**不** `wake`。这保证绝不出现
+ * 「认领了却投不出去」——那要么留下未回执的在途租约（消息延迟到租约过期才重投），
+ * 要么把消息误报成 `refused` 并累计成 Hub 侧终态。
  *
  * ## 去重（闭环的**唯一权威**）
  * `seen` 有界去重集记录**已成功注入**的 messageId：
@@ -19,7 +29,7 @@
 import { describe } from "./util.js"
 
 /**
- * 把认领到的消息渲染为注入文本（措辞与 `adapters/claude-code/common.mjs:formatMessages` 一致）：
+ * 把认领到的消息渲染为注入文本：
  * 头部 + 沟通规则行 + 每条 `- [id] 来自 <fromAgentId>：<body>`；空白正文条目被丢弃。
  *
  * @param {ReadonlyArray<{id: string, fromAgentId: string, body: string}>} messages
@@ -37,25 +47,30 @@ export function formatMessages(messages) {
 }
 
 /**
- * 构造 `flush(nodeId, agentId)`。
+ * 构造 `flush(nodeId, agentId, options)`。
  *
  * @param {{
  *   hub: {wake(agentId: string): Promise<ReadonlyArray<{id: string, fromAgentId: string, body: string}>>,
  *     reportResult(agentId: string, items: ReadonlyArray<{messageId: string, result: string}>): Promise<void>},
  *   deliver: (nodeId: string, texts: readonly string[]) => Promise<"delivered" | "refused">,
  *   seen: {has(id: string): boolean, add(id: string): void},
- *   heartbeat: (agentId: string) => Promise<void>,
+ *   heartbeat: (agentId: string, state: "idle" | "busy") => Promise<void>,
  *   log: (message: string) => void,
  * }} deps
- * @returns {(nodeId: string, agentId: string) => Promise<boolean>}
+ * @returns {(nodeId: string, agentId: string,
+ *   options?: {state?: "idle" | "busy", claim?: boolean}) => Promise<boolean>}
+ *   `options.state` 缺省 `"idle"`；`options.claim === false` = 本轮只心跳、不认领。
  */
 export function createIdleFlush(deps) {
-  return async (nodeId, agentId) => {
+  return async (nodeId, agentId, options) => {
+    const state = options?.state ?? "idle"
     try {
-      await deps.heartbeat(agentId)
+      await deps.heartbeat(agentId, state)
     } catch (error) {
-      deps.log(`idle heartbeat failed: ${describe(error)}`)
+      deps.log(`${state} heartbeat failed: ${describe(error)}`)
     }
+    // 只心跳不认领：配额用尽的忙回合绝不能 wake（否则认领了却没注入，只能等租约过期重投）。
+    if (options?.claim === false) return true
     let messages
     try {
       messages = await deps.hub.wake(agentId)

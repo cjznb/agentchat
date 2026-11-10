@@ -90,8 +90,8 @@ node adapters/test/cli.mjs --scenario busy --spawn        # 单场景
 ### S6 忙碌中的投递时机（Q2 主证据）
 - 步骤：B 置 `busy` → A 发消息 → 等 3 个轮询周期不 flush → dump 看 job 与 `pending_reason` → B 置 `idle` → flush。
 - 观测：**记录发送时刻与最终送达时刻的毫秒差**，以及这段区间内 job 的状态与 `attempts`（是否被 dispatcher 尝试过、退避到多少）。
-- 期望：忙碌期间消息**只能排队**（`pending_reason='busy'`）；`idle`/`online` 上报会 `makeJobsDue` 使其立即到期，下一次取件即送达。
-- 失败判据：忙碌期间消息被丢弃；或 `idle` 后仍长时间不投（退避未复位）。
+- 期望（P3 之后，task-9）：忙碌期间适配器**继续取件**，消息在**最近的 step 边界**经 `steer` 注入（默认每个 busy 回合最多 1 次插入，`busyInjectMax`；忙时心跳上报 `busy` 而非 `idle`）。**回退开关** `busyInject:false` 可恢复旧行为（忙时不取件，消息排队到回合结束）。
+- 失败判据：忙碌期间消息被丢弃；或 `idle` 后仍长时间不投（退避未复位）；或忙时心跳把 Hub 上的 `busy` 翻成 `online`。
 
 ### S7 注入被拒（refused）
 - 步骤：B 的 deliver 设 `refused` → flush → 再 flush。

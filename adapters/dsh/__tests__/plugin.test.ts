@@ -590,8 +590,8 @@ describe("agent/status：busy/idle 与空闲取件", () => {
     expect(resultsFor(nodeB)).toContainEqual({ agentId: nodeB, items: [{ messageId: "m-shared", result: "delivered" }] })
     h.dispose()
   })
-  it("busy 状态停轮询（跨过一个轮询周期不 wake），且 running 期间不注入", async () => {
-    const h = await setup()
+  it("busyInject:false 回退：running 时停轮询（跨过一个轮询周期不 wake），且不注入", async () => {
+    const h = await setup({ pollMs: POLL_MS, busyInject: false })
     const agent = fakeAgent(sessionHeader("sess-1"))
     h.on("agent/created")({ agent })
     expect(await waitUntil(() => registered(h.kit, "sess-1"))).toBe(true)
@@ -603,6 +603,74 @@ describe("agent/status：busy/idle 与空闲取件", () => {
     expect(pathBodies(h.kit, "/internal/wake")).toHaveLength(1)
     expect(agent.followups).toHaveLength(0)
     expect(agent.steers).toHaveLength(0)
+    h.dispose()
+  })
+  it("running 期间继续取件：≤1 个忙时轮询周期内经 steer 注入，且心跳报 busy（绝不报 idle）", async () => {
+    const BUSY_MS = 1500 // 与空闲间隔（1000）不同：证明忙时确实换了间隔，而不是沿用空闲轮询
+    const h = await setup({ pollMs: POLL_MS, busyPollMs: BUSY_MS })
+    const agent = fakeAgent(sessionHeader("sess-busy"))
+    h.on("agent/created")({ agent })
+    expect(await waitUntil(() => registered(h.kit, "sess-busy"))).toBe(true)
+    const nodeId = `agent-${h.kit.toolArgs.findIndex((args) => args["task_ref"] === "sess-busy") + 1}`
+    const statesOf = (id: string): Json[] => stateBodies(h.kit).filter((body) => body["agentId"] === id)
+    const stateCount = (): number => h.kit.requests.filter((r) => r.path === "/internal/state").length
+
+    // 先空闲一轮（空 wake）：确认会话节点的 idle 心跳已落，作为「忙时不得再报 idle」的基线。
+    h.on("agent/status")({ agent, status: "idle" })
+    expect(await waitUntil(() => statesOf(nodeId).some((body) => body["state"] === "idle"))).toBe(true)
+    const mark = stateCount()
+
+    // 回合开始；消息在忙时到达。
+    h.kit.onInternal = (path) =>
+      path === "/internal/wake" ? { messages: [{ id: "m-busy", fromAgentId: "peer-1", body: "忙时到达" }] } : undefined
+    const started = Date.now()
+    h.on("agent/status")({ agent, status: "running" })
+
+    // 旧行为（running 即停轮询）下这里永远等不到注入 —— 真机症状「忙时完全收不到」。
+    expect(await waitUntil(() => agent.steers.length === 1, BUSY_MS + 900)).toBe(true)
+    const elapsed = Date.now() - started
+    expect(elapsed).toBeGreaterThanOrEqual(BUSY_MS - 100) // 忙时用 busyPollMs（沿用空闲间隔会更早触发）
+    expect(elapsed).toBeLessThanOrEqual(BUSY_MS + 900) // ≤1 个忙时轮询周期（+ 调度余量）
+    expect(agent.followups).toHaveLength(0) // 忙时注入走 steer（最近的 step 边界），不开新回合
+    expect(agent.steers[0]?.content[0]?.text).toContain("[m-busy]")
+    expect(agent.steers[0]?.content[0]?.text).toContain("忙时到达")
+
+    // 忙时心跳必须携带真实状态：忙起点之后该会话节点的**每一条**状态上报都是 busy。
+    const busy = stateBodies(h.kit).slice(mark).filter((body) => body["agentId"] === nodeId)
+    expect(busy.length).toBeGreaterThanOrEqual(2) // onStatus 的 busy + 至少一次忙时心跳
+    expect(busy.map((body) => body["state"])).toEqual(busy.map(() => "busy"))
+    h.dispose()
+  })
+  it("忙时配额（busyInjectMax 默认 1）：每回合最多插一次，其余排队到回合结束才注入", async () => {
+    const h = await setup({ pollMs: POLL_MS, busyPollMs: POLL_MS })
+    const agent = fakeAgent(sessionHeader("sess-quota"))
+    h.on("agent/created")({ agent })
+    expect(await waitUntil(() => registered(h.kit, "sess-quota"))).toBe(true)
+
+    // 忙时第一条：注入一次（steer）。
+    let inbox = [{ id: "m-1", fromAgentId: "peer", body: "忙时第一条" }]
+    h.kit.onInternal = (path) => (path === "/internal/wake" ? { messages: inbox } : undefined)
+    h.on("agent/status")({ agent, status: "running" })
+    expect(await waitUntil(() => agent.steers.length === 1, 2 * POLL_MS + 900)).toBe(true)
+    expect(agent.followups).toHaveLength(0)
+
+    // 同一忙回合内第二条到达：配额已用尽 → 只心跳、不认领（wake 计数冻结，回合不被继续切碎）。
+    inbox = [...inbox, { id: "m-2", fromAgentId: "peer", body: "忙时第二条" }]
+    const wakes = pathBodies(h.kit, "/internal/wake").length
+    const states = stateBodies(h.kit).length
+    await settle(2 * POLL_MS + 300) // 跨过两个忙时轮询周期
+    expect(pathBodies(h.kit, "/internal/wake")).toHaveLength(wakes)
+    expect(stateBodies(h.kit).length).toBeGreaterThan(states) // 心跳仍在：忙时节点不会假离线
+    expect(agent.steers).toHaveLength(1)
+    expect(agent.followups).toHaveLength(0)
+
+    // 回合结束（idle）：积压一次性送达，走 followup；已注入的 m-1 不重复注入。
+    h.on("agent/status")({ agent, status: "idle" })
+    expect(await waitUntil(() => agent.followups.length === 1)).toBe(true)
+    expect(agent.followups[0]?.content[0]?.text).toContain("[m-2]")
+    expect(agent.followups[0]?.content[0]?.text).not.toContain("[m-1]")
+    expect(agent.steers).toHaveLength(1)
+    h.dispose()
   })
   it("轮询在途时切到 running → 该轮交付改走 steer（busy 语义）而非 followup", async () => {
     const h = await setup()

@@ -18,7 +18,7 @@ import { createHubClient, HubError, HubToolError } from "../lib/hub.js"
 import { createFileLog } from "../lib/log.js"
 import { IdlePoller, DEFAULT_POLL_MS, MAX_POLL_MS, MIN_POLL_MS, parsePollMs } from "../lib/poll.js"
 import { agentIdPath, clearToken, readToken, seenPath, tokenPath, writeJson, readJson, writeToken } from "../lib/token.js"
-import { createBoundedSet, createTaskQueue, describe as describeError, isRecord } from "../lib/util.js"
+import { createBoundedSet, createTaskQueue, describe as describeError, isRecord, parseCount, parseSwitch } from "../lib/util.js"
 
 const homes: string[] = []
 
@@ -464,6 +464,30 @@ describe("util", () => {
     expect(seen.has("a")).toBe(false)
   })
 
+  it("parseSwitch：布尔/1/0/on/off/yes/no 都认；空串与无法识别回落 fallback", () => {
+    expect(parseSwitch(true, false)).toBe(true)
+    expect(parseSwitch(false, true)).toBe(false)
+    expect(parseSwitch(1, false)).toBe(true) // YAML `busyInject: 1`
+    expect(parseSwitch(0, true)).toBe(false)
+    expect(parseSwitch(" ON ", false)).toBe(true)
+    expect(parseSwitch("0", true)).toBe(false)
+    expect(parseSwitch("NO", true)).toBe(false)
+    expect(parseSwitch("", true)).toBe(true) // 空串 ≠ false
+    expect(parseSwitch(undefined, true)).toBe(true)
+    expect(parseSwitch("maybe", false)).toBe(false)
+  })
+
+  it("parseCount：空串/负数/非数值回落 fallback；小数向下取整；0 合法", () => {
+    expect(parseCount(2, 1)).toBe(2)
+    expect(parseCount("3", 1)).toBe(3)
+    expect(parseCount("2.9", 1)).toBe(2)
+    expect(parseCount("", 1)).toBe(1) // 空串 ≠ 0
+    expect(parseCount(undefined, 1)).toBe(1)
+    expect(parseCount("-1", 1)).toBe(1)
+    expect(parseCount("abc", 1)).toBe(1)
+    expect(parseCount(0, 1)).toBe(0) // 0 = 忙时不注入，是合法配额
+  })
+
   it("createTaskQueue 串行保序并吞掉任务异常；flush 等待排空", async () => {
     const queue = createTaskQueue()
     const order: string[] = []
@@ -620,13 +644,23 @@ describe("parsePollMs / IdlePoller", () => {
 // ── idle 拉取闭环 ────────────────────────────────────────────────────────────
 
 interface FlushHarness {
-  readonly flush: (nodeId: string, agentId: string) => Promise<boolean>
+  readonly flush: (
+    nodeId: string,
+    agentId: string,
+    options?: { readonly state?: HeartbeatState; readonly claim?: boolean },
+  ) => Promise<boolean>
   readonly deliveries: Array<{ readonly nodeId: string; readonly texts: readonly string[] }>
   readonly receipts: Array<ReadonlyArray<{ messageId: string; result: string }>>
   readonly heartbeats: string[]
+  /** 每轮心跳的 `agentId:state`（忙时必须 `busy`，见 `heartbeat` 参数化）。 */
+  readonly heartbeatStates: string[]
+  /** 每次 `wake` 收到的 `agentId`（`claim:false` 时应当为空）。 */
+  readonly wakes: string[]
   readonly logs: string[]
   readonly seen: { has(id: string): boolean; add(id: string): void; size(): number }
 }
+
+type HeartbeatState = "idle" | "busy"
 
 function makeFlush(
   messages: ReadonlyArray<{ id: string; fromAgentId: string; body: string }>,
@@ -635,10 +669,15 @@ function makeFlush(
   const deliveries: FlushHarness["deliveries"] = []
   const receipts: FlushHarness["receipts"] = []
   const heartbeats: string[] = []
+  const heartbeatStates: string[] = []
+  const wakes: string[] = []
   const logs: string[] = []
   const seen = createBoundedSet(256)
   const hub = {
-    wake: async () => messages,
+    wake: async (agentId: string) => {
+      wakes.push(agentId)
+      return messages
+    },
     reportResult: async (_agentId: string, items: ReadonlyArray<{ messageId: string; result: string }>) => {
       receipts.push(items)
     },
@@ -650,12 +689,13 @@ function makeFlush(
       return typeof outcome === "function" ? outcome() : outcome
     },
     seen,
-    heartbeat: async (agentId) => {
+    heartbeat: async (agentId: string, state: HeartbeatState) => {
       heartbeats.push(agentId)
+      heartbeatStates.push(`${agentId}:${state}`)
     },
     log: (message) => logs.push(message),
   })
-  return { flush, deliveries, receipts, heartbeats, logs, seen }
+  return { flush, deliveries, receipts, heartbeats, heartbeatStates, wakes, logs, seen }
 }
 
 describe("createIdleFlush 闭环", () => {
@@ -719,6 +759,28 @@ describe("createIdleFlush 闭环", () => {
     await expect(h.flush("node-1", "agent-7")).resolves.toBe(true)
     expect(h.deliveries).toHaveLength(0)
     expect(h.receipts).toHaveLength(0)
+  })
+
+  it("心跳携带真实状态：state:'busy' → 上报 busy；缺省仍是 idle", async () => {
+    const h = makeFlush([{ id: "m1", fromAgentId: "a1", body: "第一条" }])
+    await expect(h.flush("node-1", "agent-7", { state: "busy" })).resolves.toBe(true)
+    expect(h.heartbeatStates).toEqual(["agent-7:busy"]) // 忙时报 busy，绝不把 Hub 的 busy 反翻成 online
+    expect(h.deliveries).toHaveLength(1)
+    expect(h.receipts).toEqual([[{ messageId: "m1", result: "delivered" }]])
+
+    const idle = makeFlush([])
+    await idle.flush("node-1", "agent-7") // 不传 options = 旧的 idle 语义
+    expect(idle.heartbeatStates).toEqual(["agent-7:idle"])
+  })
+
+  it("claim:false → 只发心跳：绝不 wake/注入/回执/写 seen（忙时配额用尽）", async () => {
+    const h = makeFlush([{ id: "m1", fromAgentId: "a1", body: "第一条" }])
+    await expect(h.flush("node-1", "agent-7", { state: "busy", claim: false })).resolves.toBe(true)
+    expect(h.heartbeatStates).toEqual(["agent-7:busy"])
+    expect(h.wakes).toEqual([]) // 不认领：消息留在 Hub 排队，绝不留未回执的在途租约
+    expect(h.deliveries).toHaveLength(0)
+    expect(h.receipts).toHaveLength(0)
+    expect(h.seen.has("m1")).toBe(false)
   })
 
   it("deliver 返回 refused → 回执 refused 且**不**记入 seen（下次仍可注入）", async () => {

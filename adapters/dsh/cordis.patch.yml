@@ -12,3 +12,8 @@
       config:
         # 空闲轮询间隔（毫秒）。可选；不写则读 `AGENTCHAT_POLL_MS`，再退回 10s。
         pollMs: 10000
+        # 忙时取件（P3）：`running` 期间按 `busyPollMs` 继续取件，经 `agent.steer` 在最近 step 边界交付。
+        # 三个键都可选；不写则读同名 env（AGENTCHAT_BUSY_*），再退回下列默认值。
+        # busyInject: true      # 设 false = 回退旧行为（忙时停轮询，消息排队到回合结束）
+        # busyPollMs: 5000      # 忙时轮询间隔（钳制 [1s, 1h]）
+        # busyInjectMax: 1      # 每个忙回合最多注入几次（0 = 忙时只发心跳不注入）

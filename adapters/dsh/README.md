@@ -21,7 +21,7 @@ AgentChat Hub ──HTTP(/internal/*)+MCP──> adapters/dsh/index.js（Host �
 | DSH 扩展点 | 适配器动作 |
 |---|---|
 | `agent/created` | 懒注册实例节点 `dsh@<host>`（`role_tag=container`，`join_token` 落盘 `<home>/agents/dsh.token`）；把该会话注册为实例节点的子节点（`task_ref=<session.header.id>`），报 `online` |
-| `agent/status` = `running` | 会话节点报 `busy`，停空闲轮询 |
+| `agent/status` = `running` | 会话节点报 `busy`，并切到**忙时轮询**（默认 5s）：回合进行中认领到的消息经 `agent.steer` 在最近 step 边界交付（每回合最多 `busyInjectMax`=1 次，其余排队到回合结束） |
 | `agent/status` = `idle` | 会话节点报 `idle` → `POST /internal/wake` 取件 → `agent.followup(消息)` → `POST /internal/result` 回执；启动空闲轮询（默认 10s） |
 | `agent/disposed` | 只停本地跟踪，**不退役节点**（见下） |
 | 插件卸载 | 停轮询；实例节点（根）报 `offline` |
@@ -31,7 +31,7 @@ AgentChat Hub ──HTTP(/internal/*)+MCP──> adapters/dsh/index.js（Host �
 
 核实自 DSH 运行时：`agent.followup(msg)` 开新回合并**唤醒**驱动；`agent.steer(msg)` 在最近的 step
 边界交付并唤醒；`agent.inject(msg)` **不唤醒**（会一直躺在收件箱，直到别的输入到来）。
-取件必须唤醒，故空闲用 `followup`，若注入时恰好 `running` 则改用 `steer`。
+取件必须唤醒，故空闲用 `followup`，`running` 用 `steer`（见上「忙时取件」）。
 注入消息来源标为 `{kind:'plugin:agentchat', form:'relay'}`（DSH 语义：另一个 agent 发来的消息；v4 会拒绝已废弃的 `kind:'plugin'` 包装）。
 
 ### 为什么 `agent/disposed` 不退役节点
@@ -78,9 +78,19 @@ bundle 行 `config`（写进 `cordis.patch.yml`）：
 | 字段 | 默认 | 含义 |
 |---|---|---|
 | `pollMs` | `AGENTCHAT_POLL_MS` → `10000` | 空闲轮询间隔（毫秒）；消息在「已经 idle 之后」到达时靠它补拉 |
+| `busyInject` | `AGENTCHAT_BUSY_INJECT` → `true` | 忙时（`agent/status=running`）是否继续取件并 `steer` 注入。设 `false` 回退旧行为（忙时停轮询，消息排队到回合结束） |
+| `busyPollMs` | `AGENTCHAT_BUSY_POLL_MS` → `5000` | 忙时轮询间隔（毫秒，钳制 `[1s, 1h]`）。`steer` 在**最近的 step 边界**交付，**不能**抢占正在执行的工具 |
+| `busyInjectMax` | `AGENTCHAT_BUSY_INJECT_MAX` → `1` | **每个忙回合**最多注入几次（`0` = 忙时只发心跳不注入）。配额用尽只发心跳、不认领，其余消息排队到回合结束 |
 | `name` | `dsh@<host>` | 实例节点可读名；同一台机器跑多个不同 `AGENTCHAT_HOME` 的实例时用它避重名（`agents.name` 有唯一索引） |
 | `titleAsName` | `true` | 把 **DSH 会话标题**写进 Hub **展示名**（`custom_name`）；设 `false` 则始终显示机器唯一名 |
 | `nativeTools` | `false` | 开启 DSH **原生工具面**（`ctx.tools.register`）：**逐调用**按调用者会话注入身份，多会话并发也精确；开启后建议去掉 MCP 行（否则模型会看到两套工具） |
+
+**忙时取件（默认开）**：DSH 是 pull 厂商（Hub 永不 push），所以 `running` 期间若停轮询就**没有任何取件触发者**
+（真机症状：忙时完全收不到消息）。现在忙时按 `busyPollMs` 继续取件，认领到的新消息经 `agent.steer` 在
+**最近的 step 边界**交付并唤醒——注意它**不会**打断正在执行的工具，`cancel` 之后紧接的 `steer` 会被 DSH
+降级为 next-turn。心跳携带真实状态（忙时报 `busy`；否则 Hub 的 `busy` 会被反翻成 `online`）。为避免把回合
+切碎，每个忙回合最多插 `busyInjectMax`（默认 1）次；配额用尽后只发心跳不认领，其余消息在回合结束后的空闲
+取件里一次性送达。需要完全回退时设 `busyInject: false`（或 `AGENTCHAT_BUSY_INJECT=0`）。
 
 **节点名与展示名（两件事）**：`agents.name` 是机器唯一名（`<目录名>-<会话 id 短标识>`，保证唯一与 `task_ref` 收养稳定），
 Hub 里**显示**的是 `COALESCE(custom_name, name)`。适配器默认为每个会话把 DSH 标题
@@ -90,7 +100,8 @@ Hub 里**显示**的是 `COALESCE(custom_name, name)`。适配器默认为每个
 
 环境变量（与其它适配器一致）：`AGENTCHAT_URL` / `AGENTCHAT_PORT`（默认 `127.0.0.1:4646`）、
 `HUB_TOKEN`（缺省回退 `<AGENTCHAT_HOME>/hub_token`）、`AGENTCHAT_HOME`（默认 `~/.agentchat`）、
-`AGENTCHAT_POLL_MS`、`AGENTCHAT_TIMEOUT_MS`（HTTP 超时，默认 3000ms）。
+`AGENTCHAT_POLL_MS`、`AGENTCHAT_BUSY_INJECT`、`AGENTCHAT_BUSY_POLL_MS`、`AGENTCHAT_BUSY_INJECT_MAX`、
+`AGENTCHAT_TIMEOUT_MS`（HTTP 超时，默认 3000ms）。
 
 ## 已知限制：MCP 出站身份只能「单会话精确，多会话退回容器」
 

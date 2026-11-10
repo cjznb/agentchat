@@ -12,7 +12,7 @@
  *
  * 事件映射（DSH 扩展点，核实自安装包的 `lib/types`，见 `docs/harness-api-notes.md`）：
  * - `agent/created`  → 懒注册实例节点；把该会话注册为子节点并上报 `online`
- * - `agent/status`   → `running` 上报 `busy` 并停轮询；`idle` 上报 `idle` 并启动空闲轮询
+ * - `agent/status`   → `running` 上报 `busy` 并切到**忙时轮询**（见下）；`idle` 上报 `idle` 并切回空闲轮询
  * - `agent/disposed` → **只停本地跟踪，不退役**（见下）
  * - 空闲轮询         → 与 idle 状态**同一 `flush` 路径**（消息在「已经 idle 之后」到达时无事件可依）
  * - 插件卸载         → 停轮询 + 实例节点（根）上报 `offline`
@@ -26,6 +26,13 @@
  * 唤醒语义（核实自 `dsh-agent-loop` 运行时）：`agent.followup(msg)` = 开新回合并唤醒驱动；
  * `agent.steer(msg)` = 就近 step 边界交付并唤醒；`agent.inject(msg)` **不唤醒**（故不用于取件）。
  * 注入消息来源取 `{kind:'plugin:agentchat', form:'relay'}`（语义：另一个 agent 发来的消息；**不能**用 v4 已废弃的 `kind:'plugin'` 包装——会话格式校验会直接拒绝整轮）。
+ *
+ * **忙时取件（P3）**：`running` 时**不停**取件，而是按 `busyPollMs`（默认 5s）继续轮询——回合进行中认领到的
+ * 新消息经 `agent.steer` 在**最近的 step 边界**交付。能力边界：`steer` **无法抢占正在执行的工具**，
+ * `cancel` 后紧接的 `steer` 会被 DSH 降级为 next-turn（`wakingAfterAbort`）——故这里承诺的是
+ * 「下一个 step 边界」，**不是**「即时打断」。心跳同步携带真实状态（忙时报 `busy`，绝不把 Hub 的
+ * `busy` 反翻成 `online`）；每个忙回合最多注入 `busyInjectMax`（默认 1）次，配额用尽后只发心跳、
+ * 不认领，其余消息排队到回合结束由空闲取件送达。`busyInject: false` 可整体回退「忙时停轮询」旧行为。
  *
  * 纪律：所有事件处理都**不阻塞宿主**——异步工作自行捕获异常并落日志，绝不冒泡到宿主事件循环。
  */
@@ -43,7 +50,7 @@ import { createRegistrationRetry } from "./lib/retry.js"
 import { createTitleSync } from "./lib/title.js"
 import { ADAPTER_VENDOR, createSessionHint, instanceName, sessionName } from "./lib/session-hint.js"
 import { agentIdPath, clearToken, readToken, tokenPath, writeToken } from "./lib/token.js"
-import { createBoundedSet, createGuard, describe, isRecord } from "./lib/util.js"
+import { createBoundedSet, createGuard, describe, isRecord, parseCount, parseSwitch } from "./lib/util.js"
 
 /** 插件名（DSH bundle 行与日志前缀）。 */
 export const name = "agentchat"
@@ -61,12 +68,28 @@ const SEEN_LIMIT = 256
 const RETRY_MS = 15_000
 
 /**
+ * 忙时轮询间隔默认值（`config.busyPollMs` / `AGENTCHAT_BUSY_POLL_MS` 覆盖；钳制 `[1s, 1h]`）。
+ * 比空闲缺省（10s）短：忙时的目标是在回合进行中尽快送达；轮询本身不切碎回合（切碎回合的是注入）。
+ */
+const BUSY_POLL_MS = 5_000
+
+/**
+ * 每个 busy 回合最多「插入对话」（`steer`）的次数（`config.busyInjectMax` / `AGENTCHAT_BUSY_INJECT_MAX`
+ * 覆盖；`0` = 忙时只发心跳、不注入）。默认 1：忙时最多插一次，其余消息排队到回合结束。
+ */
+const BUSY_INJECT_MAX = 1
+
+/**
  * 插件入口：注册实例/会话节点、镜像状态、空闲取件注入。所有资源用 `ctx.on` / `ctx.effect`
  * 注册，卸载时由 Cordis 自动释放；实例节点（根）在释放时上报 `offline`。
  *
  * @param {object} ctx Cordis 上下文（DSH Host）
- * @param {object} [config] bundle 行 `config`：`pollMs`（覆盖 `AGENTCHAT_POLL_MS`）、
- *   `name`（覆盖实例节点可读名 `dsh@<host>`，同一台机器跑多个不同 `AGENTCHAT_HOME` 的实例时用它避重名）
+ * @param {object} [config] bundle 行 `config`：
+ *   - `pollMs`（覆盖 `AGENTCHAT_POLL_MS`）：空闲轮询间隔；
+ *   - `busyInject`（覆盖 `AGENTCHAT_BUSY_INJECT`，默认 `true`）：忙时是否取件（`false` = 回退「忙时停轮询」）；
+ *   - `busyPollMs`（覆盖 `AGENTCHAT_BUSY_POLL_MS`，默认 `5000`）：忙时轮询间隔；
+ *   - `busyInjectMax`（覆盖 `AGENTCHAT_BUSY_INJECT_MAX`，默认 `1`）：每个 busy 回合最多注入几次；
+ *   - `name`（覆盖实例节点可读名 `dsh@<host>`，同一台机器跑多个不同 `AGENTCHAT_HOME` 的实例时用它避重名）
  */
 export function apply(ctx, config) {
   const cfg = isRecord(config) ? config : {}
@@ -76,6 +99,17 @@ export function apply(ctx, config) {
   const hub = createHubClient({ env, fetch: globalThis.fetch, log })
   const pollMs = parsePollMs(
     cfg["pollMs"] === undefined ? env["AGENTCHAT_POLL_MS"] : String(cfg["pollMs"]),
+  )
+  /** 忙时轮询间隔：未配置用 `BUSY_POLL_MS`（**不能**直接 `parsePollMs(undefined)`——那会回落空闲缺省 10s）。 */
+  const busyPollRaw = cfg["busyPollMs"] === undefined ? env["AGENTCHAT_BUSY_POLL_MS"] : String(cfg["busyPollMs"])
+  const busyPollMs = busyPollRaw === undefined || busyPollRaw.trim() === "" ? BUSY_POLL_MS : parsePollMs(busyPollRaw)
+  const busyInject = parseSwitch(
+    cfg["busyInject"] === undefined ? env["AGENTCHAT_BUSY_INJECT"] : cfg["busyInject"],
+    true,
+  )
+  const busyInjectMax = parseCount(
+    cfg["busyInjectMax"] === undefined ? env["AGENTCHAT_BUSY_INJECT_MAX"] : cfg["busyInjectMax"],
+    BUSY_INJECT_MAX,
   )
   const tokenFile = tokenPath(home)
   const idFile = agentIdPath(home)
@@ -91,7 +125,10 @@ export function apply(ctx, config) {
    */
   const flushByRecipient = new Map()
 
-  /** sessionId → { nodeId, agent, busy }；`busy` 决定注入用 followup 还是 steer。 */
+  /**
+   * sessionId → `{ nodeId, agent, busy, busyInjections }`；`busy` 决定注入用 followup 还是 steer，
+   * `busyInjections` = **本忙回合**已注入次数（配额，回合切换时复位）。
+   */
   const sessions = new Map()
   /**
    * sessionId → agent：**见过的**会话（加载期回填 + `agent/created`/`agent/status`）。
@@ -103,7 +140,7 @@ export function apply(ctx, config) {
    * 会话重开后是新 agent，故走新注册，旧注册据 `pending` 归属把自己作废）。
    */
   const pending = new Map()
-  /** 各空闲会话的轮询器。 */
+  /** sessionId → `{ poller, intervalMs }`：忙/闲用不同间隔，间隔变化即重启轮询器（见 `ensurePolling`）。 */
   const pollers = new Map()
   /** nodeId → 最近一次上报状态（同态去重；心跳走 `always`）。 */
   const lastState = new Map()
@@ -208,10 +245,15 @@ export function apply(ctx, config) {
     await reportState(instanceAgentId, next, always)
   }
 
-  /** 取件心跳：会话节点 + 实例节点（根容器不搭车心跳会被判 offline）。 */
-  async function heartbeat(nodeId) {
-    await reportState(nodeId, "idle", true)
-    await reportInstance("idle", true)
+  /**
+   * 取件心跳：会话节点 + 实例节点（根容器不搭车心跳会被判 offline）。
+   *
+   * `state` 必须是**会话的真实忙闲**（由 `flush` 逐轮传入）：忙时报 `busy`。若忙时仍报 `idle`，
+   * Hub 会把该节点从 `busy` 翻回 `online`（状态回退 + 后续 `busy` 上报被同态吞掉，roster 语义错乱）。
+   */
+  async function heartbeat(nodeId, state = "idle") {
+    await reportState(nodeId, state, true)
+    await reportInstance(state, true)
   }
 
   /** 会话标题 → Hub 展示名（`custom_name`；`name` 不动）：见 `lib/title.js`。`config.titleAsName: false` 可关。 */
@@ -225,8 +267,9 @@ export function apply(ctx, config) {
 
   /**
    * 注入入口（`flush` 的唯一宿主相关操作）：把认领到的消息交给该会话的 agent。
-   * 空闲 → `followup`（开新回合并唤醒）；运行中 → `steer`（下一个 step 边界即见）。
-   * 抛错/找不到 agent 一律 `refused`（不写 `seen`，下次仍会尝试）。
+   * 空闲 → `followup`（开新回合并唤醒）；运行中 → `steer`（**最近的 step 边界**即见；不抢占正在跑的工具）。
+   * 忙时注入同时记入本回合配额（`busyInjections`）。抛错/找不到 agent 一律 `refused`
+   * （不写 `seen`，下次仍会尝试）。
    */
   async function deliver(sessionId, texts) {
     const entry = sessions.get(sessionId)
@@ -236,8 +279,12 @@ export function apply(ctx, config) {
     }
     try {
       const message = await buildMessage(texts.join("\n\n"))
-      if (entry.busy) entry.agent.steer(message)
-      else entry.agent.followup(message)
+      if (entry.busy) {
+        entry.agent.steer(message)
+        entry.busyInjections += 1
+      } else {
+        entry.agent.followup(message)
+      }
       return "delivered"
     } catch (error) {
       warn(`注入失败（${sessionId}）：${describe(error)}`)
@@ -250,7 +297,7 @@ export function apply(ctx, config) {
    * 同一收件方重投同一消息时依然不重复注入，只幂等补回执；不同收件方各自独立去重。
    *
    * @param {string} nodeId 收件方（Hub 会话节点 id）
-   * @returns {(nodeId: string, agentId: string) => Promise<boolean>}
+   * @returns {(nodeId: string, agentId: string, options?: {state?: "idle" | "busy", claim?: boolean}) => Promise<boolean>}
    */
   function flushFor(nodeId) {
     let instance = flushByRecipient.get(nodeId)
@@ -261,21 +308,41 @@ export function apply(ctx, config) {
     return instance
   }
 
-  /** 空闲取件：`sessionId` 供注入定位 agent，`nodeId` = 本轮收件方（Hub 会话节点 id）。 */
+  /**
+   * 取件一轮（轮询器与状态事件共用同一路径）：
+   * - 心跳状态 = 会话真实忙闲（忙时报 `busy`，见 `heartbeat`）；
+   * - 忙时配额用尽 → `claim: false`（只心跳、不认领）：绝不「认领了却投不出去」，
+   *   剩余消息留在 Hub 排队，回合结束后的空闲取件一次性送达。
+   *
+   * `sessionId` 供注入定位 agent，`nodeId` = 本轮收件方（Hub 会话节点 id）。
+   */
   function flush(sessionId, nodeId) {
-    return flushFor(nodeId)(sessionId, nodeId)
+    const entry = sessions.get(sessionId)
+    const busy = entry?.busy === true
+    return flushFor(nodeId)(sessionId, nodeId, {
+      state: busy ? "busy" : "idle",
+      claim: !busy || entry.busyInjections < busyInjectMax,
+    })
   }
 
   function stopPolling(sessionId) {
-    pollers.get(sessionId)?.stop()
+    pollers.get(sessionId)?.poller.stop()
     pollers.delete(sessionId)
   }
 
-  /** 会话进入 idle 时启动（幂等）；每轮走与 idle 状态同一的 `flush` 路径。 */
+  /**
+   * 确保该会话的轮询器按**当前忙闲的间隔**运行（幂等）：空闲用 `pollMs`，忙时用 `busyPollMs`。
+   * 间隔变化即重启（`IdlePoller` 的间隔在构造时固定）；`stop` 后 `start` 是最廉价的切换方式，
+   * 代价只是重置失败退避计数——状态切换本就代表宿主还活着，可接受。
+   */
   function ensurePolling(sessionId, nodeId) {
-    if (pollers.has(sessionId)) return
-    const poller = new IdlePoller({ intervalMs: pollMs, run: () => flush(sessionId, nodeId) })
-    pollers.set(sessionId, poller)
+    const entry = sessions.get(sessionId)
+    const intervalMs = entry?.busy === true ? busyPollMs : pollMs
+    const current = pollers.get(sessionId)
+    if (current !== undefined && current.intervalMs === intervalMs) return
+    stopPolling(sessionId)
+    const poller = new IdlePoller({ intervalMs, run: () => flush(sessionId, nodeId) })
+    pollers.set(sessionId, { poller, intervalMs })
     poller.start()
   }
 
@@ -328,7 +395,7 @@ export function apply(ctx, config) {
           warn(`会话 ${sessionId} 的注册已作废（期间被释放或被更新的注册取代），放弃登记`)
           return undefined
         }
-        const entry = { nodeId: result.agentId, agent, busy: false }
+        const entry = { nodeId: result.agentId, agent, busy: false, busyInjections: 0 }
         sessions.set(sessionId, entry)
         hint.onRegistered(sessionId, result.agentId, topLevel)
         await reportState(entry.nodeId, "online")
@@ -352,11 +419,16 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 回合始/末：`running` → busy（停轮询 + 容器搭车同态上报）；`idle` → 先起空闲轮询再取件。
+   * 回合始/末：`running` → busy（**忙时也继续取件**，见下）；`idle` → 先确保空闲轮询再取件。
    *
    * 顺序要点：`ensurePolling` **在 `flush` 的网络往返之前**调用——Hub 慢或挂住时（单请求超时
    * 3s、含退避更久）空闲会话不能因此失去补拉通道；状态本身由 `flush` 的心跳（会话节点 + 实例
-   * 节点 `idle`，`always`）上报。
+   * 节点，`always`，状态 = 本轮忙闲）上报。
+   *
+   * **忙时（P3）**：`running` 不再停轮询——DSH 是 pull 厂商（Hub 永不 push），停了取件就没有
+   * 任何触发者，消息只能干等到回合结束。改为切到 `busyPollMs` 间隔继续取件，命中新消息时走
+   * `deliver` 的 `entry.busy → steer` 分支（最近 step 边界）。配额（`busyInjectMax`，默认 1／回合）
+   * 用尽后只发心跳不认领；`busyInject: false` 则回退为停轮询（旧行为）。
    */
   async function onStatus(payload) {
     const agent = payload?.agent
@@ -364,12 +436,16 @@ export function apply(ctx, config) {
     if (entry === undefined) return
     const sessionId = agent.session.header.id
     const running = payload?.status === "running"
+    // 回合切换（idle↔running）复位忙时配额：配额是「每个 busy 回合」的上限。
+    if (entry.busy !== running) entry.busyInjections = 0
     entry.busy = running
     entry.agent = agent
     if (running) {
-      stopPolling(sessionId)
+      // 回退开关：旧行为要**先同步停轮询**（Hub 慢/挂住时也不该出现忙时取件）。
+      if (!busyInject) stopPolling(sessionId)
       await reportState(entry.nodeId, "busy")
       await reportInstance("busy")
+      if (busyInject) ensurePolling(sessionId, entry.nodeId)
       return
     }
     ensurePolling(sessionId, entry.nodeId)
@@ -404,7 +480,9 @@ export function apply(ctx, config) {
   const guard = createGuard(warn)
 
   // 加载期回填 + 加载日志（见 lib/backfill.js）：运行中安装/HMR 时，已存在的会话没有 created 事件。
-  log(`插件已加载（轮询间隔 ${pollMs}ms，Hub ${resolveHubConfig(env).baseUrl}）`)
+  log(
+    `插件已加载（空闲轮询 ${pollMs}ms，忙时轮询 ${busyPollMs}ms，忙时注入 ${busyInject ? `开（每回合最多 ${busyInjectMax} 次）` : "关"}，Hub ${resolveHubConfig(env).baseUrl}）`,
+  )
   backfillSessions(ctx, ensureSession, warn)
 
   // 补注册重试（见 lib/retry.js）：每轮重新枚举 ctx.agents，覆盖"加载瞬间 list 为空 / 错过 created"与 Hub 抖动。
@@ -427,7 +505,7 @@ export function apply(ctx, config) {
     () => () => {
       stopRetry()
       nativeTools?.dispose()
-      for (const poller of pollers.values()) poller.stop()
+      for (const { poller } of pollers.values()) poller.stop()
       pollers.clear()
       sessions.clear()
       known.clear()

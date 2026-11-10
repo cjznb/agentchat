@@ -61,6 +61,41 @@ export function createTaskQueue() {
 }
 
 /**
+ * 解析布尔开关配置：布尔原值直用；数字只认 `1`/`0`（YAML 里 `busyInject: 1` 很常见）；
+ * 字符串认 `true/false`、`1/0`、`on/off`、`yes/no`（大小写不敏感、两端空白忽略）；
+ * **缺省或无法识别**一律回落 `fallback`（绝不把空串当 `false`）。
+ *
+ * @param {unknown} raw bundle `config` 值或 env 原值
+ * @param {boolean} fallback 缺省/非法时的取值
+ * @returns {boolean}
+ */
+export function parseSwitch(raw, fallback) {
+  if (typeof raw === "boolean") return raw
+  if (typeof raw === "number") return raw === 1 ? true : raw === 0 ? false : fallback
+  if (typeof raw !== "string") return fallback
+  const value = raw.trim().toLowerCase()
+  if (value === "true" || value === "1" || value === "on" || value === "yes") return true
+  if (value === "false" || value === "0" || value === "off" || value === "no") return false
+  return fallback
+}
+
+/**
+ * 解析非负整数配额配置：**缺省/空串/非数值/负数**一律回落 `fallback`（空串绝不当作 `0`），
+ * 小数向下取整。
+ *
+ * @param {unknown} raw bundle `config` 值或 env 原值
+ * @param {number} fallback 缺省/非法时的取值（非负整数）
+ * @returns {number}
+ */
+export function parseCount(raw, fallback) {
+  const text = typeof raw === "number" ? String(raw) : String(raw ?? "").trim()
+  if (text === "") return fallback
+  const value = Number(text)
+  if (!Number.isFinite(value) || value < 0) return fallback
+  return Math.floor(value)
+}
+
+/**
  * 上游错误的审计字符串（**不抛错**，任何形状都能渲染）。
  *
  * - `HubError`（鸭类型：`kind` 为字符串且 `name === "HubError"`）→ `kind: message`；
