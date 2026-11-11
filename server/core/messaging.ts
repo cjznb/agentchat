@@ -570,6 +570,12 @@ export interface InboxOptions {
   /** **额外**下界（seq，不含），用于翻页；缺省 0。未读判据是每会话 `read_states` 位点。 */
   readonly after?: number
   readonly limit?: number
+  /**
+   * `true` = 保留旧行为（页内含自己发出的消息）；缺省 = **排除自发**（喊话会话例外）。
+   * 默认排除是为了杜绝"轮询 inbox → 逐条回复"的自激环路——自己发出的消息同样落在自己的读位点
+   * 之后（发消息不推进读位点，只有 `ack` 会），不过滤就会把自家消息当来信回复并再次被轮询到。
+   */
+  readonly includeSelf?: boolean
   /** 阻塞等待（spec §9 `inbox.timeout` = §6.2 语义）；给出则返回 Promise 的等待结果。 */
   readonly wait?: WaitOptions
 }
@@ -601,6 +607,7 @@ export function inbox(
       shoutConversationId: shoutConversationId(db),
       after: options.after ?? 0,
       limit: options.limit ?? DEFAULT_INBOX_LIMIT,
+      includeSelf: options.includeSelf === true,
     })
   if (options.wait === undefined) return page()
   return waitFor<never>(

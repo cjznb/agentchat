@@ -145,6 +145,8 @@ export function runInbox(ctx: ToolContext, input: McpToolInput<"inbox">): Promis
   const id = requireIdentity(ctx)
   const paging = {
     ...(input.after === undefined ? {} : { after: input.after }),
+    // 默认排除自发（自激环路防护）；`include_self:true` 找回旧行为（喊话会话本就例外）。
+    ...(input.include_self === undefined ? {} : { includeSelf: input.include_self }),
   }
   if (input.timeout !== undefined) {
     return inbox(ctx.db, id, { ...paging, wait: { until: "either", timeoutMs: input.timeout } }).then(

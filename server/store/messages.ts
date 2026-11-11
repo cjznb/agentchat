@@ -209,6 +209,11 @@ export interface InboxQuery {
    */
   readonly after: number
   readonly limit: number
+  /**
+   * `true` = 保留旧行为（页内含自己发出的消息）；缺省/`false` = **排除自发**（喊话会话例外）。
+   * 默认排除是为了杜绝"轮询 inbox → 逐条回复"的自激环路（见 `inboxMessages` 文档）。
+   */
+  readonly includeSelf?: boolean
 }
 
 export const DEFAULT_INBOX_LIMIT = 50
@@ -225,25 +230,39 @@ export const DEFAULT_INBOX_LIMIT = 50
  *
  * 可见性不变（决议 3 + 复审 Important #1）：参与会话 + 喊话广播会话；human = 隐含成员 +
  * 超级观察者（`vendor='human'` 跳过成员过滤、可见全部会话）。
- * **不过滤己方消息**（与 `claimableInboxMessages` 的关键差别 —— 后者是投递台账，按 P2 口径
- * 过滤自发；此处只加未读游标，不改这一条）。
+ *
+ * **默认排除自发消息**（`includeSelf !== true`）——与 `claimableInboxMessages`（投递台账，本就
+ * 过滤自发）口径对齐，杜绝"轮询 inbox → 逐条回复"的自激环路：自己发出的消息同样落在自己的
+ * 读位点之后（发消息不推进自己的读位点，只有 `ack` 会），不过滤就会回复自己并再次被轮询到。
+ * **两类例外仍保留自发可见**：① 喊话广播会话（既有 DoD「对每个节点各得一条，含发送者本人」）；
+ * ② `kind='system'` 通知（入群/ask 卡等系统事件，既有 DoD「全员收件箱可达」）——自激环路只会
+ * 由**文本**消息产生，这两类豁免不影响防护。
+ * 需要旧行为（文本自发也含）时传 `includeSelf: true`。
  * `after` 语义保留为额外下界（翻页）：缺省 0 时由未读游标主导。
  */
 export function inboxMessages(db: Db, query: InboxQuery): Message[] {
+  // `includeSelf` 落成 0/1 绑定参数（better-sqlite3 不支持 boolean 绑定）；SQL 里做默认排除。
+  // 注意用 `Omit` 生成 SQL 参数类型：直接与 `{includeSelf: number}` 求交会把布尔字段变成 `never`。
+  type SqlParams = Omit<InboxQuery, "includeSelf"> & { readonly includeSelf: number }
+  const params: SqlParams = { ...query, includeSelf: query.includeSelf === true ? 1 : 0 }
   const rows = db
-    .prepare<InboxQuery, MessageRow>(
+    .prepare<SqlParams, MessageRow>(
       `SELECT * FROM messages
         WHERE seq > $after
           AND seq > COALESCE((SELECT last_read_seq FROM read_states r
                                WHERE r.agent_id = $agentId
                                  AND r.conversation_id = messages.conversation_id), 0)
+          AND ($includeSelf = 1
+               OR conversation_id = $shoutConversationId
+               OR kind = 'system'
+               OR from_agent_id != $agentId)
           AND (conversation_id = $shoutConversationId
                OR EXISTS (SELECT 1 FROM agents WHERE id = $agentId AND vendor = 'human')
                OR conversation_id IN (SELECT conversation_id FROM participants WHERE agent_id = $agentId))
         ORDER BY seq ASC
         LIMIT $limit`,
     )
-    .all(query)
+    .all(params)
   return rows.map(toMessage)
 }
 

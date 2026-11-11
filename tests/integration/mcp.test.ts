@@ -1308,3 +1308,34 @@ describe("whoami：agent 能查到自己的展示名（真机反馈「不知道�
     }
   })
 })
+
+describe("inbox 默认排除自发（自激环路防护；测试员A 提议）", () => {
+  it("自发文本不在 inbox；include_self:true 复原旧行为；他人消息照常可见", async () => {
+    const actor = makeAgent("inbox-self-actor")
+    const peer = makeAgent("inbox-self-peer")
+    const human = ensureHuman(db)
+    const group = createGroup(db, { name: "inbox-self-group", createdBy: human.id, memberIds: [actor.id, peer.id] })
+    if (!("approved" in group)) throw new Error("human group creation must execute immediately")
+    const client = await connect(actor.id)
+    try {
+      // ① 自己在群里发一条：默认 inbox 不含它（否则"轮询 inbox→逐条回复"会自激）
+      const mine = await callTool(client, "send", { to: group.approved.id, body: "我自己的群消息" })
+      expect(toolFailed(mine)).toBe(false)
+      const myId = JSON.parse(textOf(mine)).message.id
+      const box = await callTool(client, "inbox", {})
+      expect(toolFailed(box)).toBe(false)
+      expect(JSON.parse(textOf(box)).messages.map((m: { id: string }) => m.id)).not.toContain(myId)
+
+      // ② 逃生口：include_self:true 找回旧行为
+      const withSelf = await callTool(client, "inbox", { include_self: true })
+      expect(JSON.parse(textOf(withSelf)).messages.map((m: { id: string }) => m.id)).toContain(myId)
+
+      // ③ 他人发来的消息照常在页内（排除自发的边界只针对自己）
+      const inbound = sendMessage(db, { from: peer.id, to: group.approved.id, body: "别人的群消息" })
+      const box2 = await callTool(client, "inbox", {})
+      expect(JSON.parse(textOf(box2)).messages.map((m: { id: string }) => m.id)).toContain(inbound.message.id)
+    } finally {
+      await client.close()
+    }
+  })
+})

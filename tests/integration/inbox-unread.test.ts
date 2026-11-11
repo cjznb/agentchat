@@ -17,7 +17,7 @@ import { ack, ensureHuman, inbox, sendMessage, unreadFor } from "../../server/co
 import { openDb, type Db } from "../../server/db"
 import { insertAgent, type Agent } from "../../server/store/agents"
 import { createDm, createGroup } from "../../server/store/conversations"
-import type { Message } from "../../server/store/messages"
+import { send as storeSend, type Message } from "../../server/store/messages"
 
 let home = ""
 let db: Db
@@ -141,15 +141,33 @@ describe("P9：inbox 只看未读", () => {
     expect(unreadFor(db, s.a.id)).toBe(3)
   })
 
-  it("文档化边界：inbox 不过滤自发消息（未改），unreadFor 过滤 → 差恰为自发未读条数", () => {
+  it("默认排除自发（自激环路防护）：文本自发不在页内；includeSelf:true 复原；喊话/system 例外", () => {
     const s = scenario()
     const mine = sendMessage(db, { from: s.a.id, to: s.group.id, body: "我自己的" }).message
 
     expect(unreadFor(db, s.a.id)).toBe(3) // 自发消息不计未读
     const page = inbox(db, s.a.id)
-    expect(ids(page)).toContain(mine.id) // 但 inbox 照旧不过滤自发（本任务明确不改）
-    expect(page).toHaveLength(4)
-    expect(page.length - unreadFor(db, s.a.id)).toBe(1)
+    expect(ids(page)).not.toContain(mine.id) // 默认排除自发：杜绝"轮询 inbox→逐条回复"的自激环路
+    expect(page).toHaveLength(3)
+    expect(page.length - unreadFor(db, s.a.id)).toBe(0) // 口径与 unreadFor 对齐（旧行为差 1）
+
+    // 逃生口：旧行为可显式找回
+    const withSelf = inbox(db, s.a.id, { includeSelf: true })
+    expect(ids(withSelf)).toContain(mine.id)
+    expect(withSelf).toHaveLength(4)
+
+    // 例外①喊话：发送者仍能看到自己那条广播（既有 DoD）
+    const shout = sendMessage(db, { from: s.a.id, to: "*", body: "我自己喊的" }).message
+    expect(ids(inbox(db, s.a.id))).toContain(shout.id)
+
+    // 例外②system 通知：自发系统消息仍全员可达（既有 DoD）
+    const system = storeSend(db, {
+      conversationId: s.group.id,
+      fromAgentId: s.a.id,
+      kind: "system",
+      body: "（系统）通知",
+    })
+    expect(ids(inbox(db, s.a.id))).toContain(system.id)
   })
 })
 
