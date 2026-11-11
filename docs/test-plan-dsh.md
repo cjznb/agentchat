@@ -221,3 +221,6 @@ node adapters/test/cli.mjs --scenario busy --spawn        # 单场景
   - **两种失败签名可直接分诊**（A 从适配器日志取证）：重启窗口内 `/internal/state`、`/internal/wake` 报 **`network: fetch failed`**（连接层，Hub 不在）；而 `/mcp tools/call` 报 **`http … 404`**（Hub 在，但缓存的 `mcp-session-id` 已失效）。不必等重跑就知道是哪一种。
   - **不止重启会触发**：MCP 会话还有**空闲 TTL**（`DEFAULT_SESSION_TTL_MS = 30 分钟`，`sweepSessions` 定期淘汰）→ 长时间空闲后的第一次工具调用同样会吃到 404，走同一套自愈路径。
   - **重试安全性的代码依据**（给未来加固用）：`server/routes/mcp.ts` 在**转发之前**查表——未知 `mcp-session-id` 直接 `404 {error:"session_not_found"}` ⇒ **404 保证该次调用未被分发执行**，因此"同调用内重握手 + 重试一次"对读/写工具都安全；若调用方传了 `idempotencyKey`，重试复用同一 key（Hub 按 `(from, key)` 去重）则更强。
+  - **TTL 只作用于 MCP 会话路径**（A 澄清）：`/internal/state`、`/internal/wake` 走内部 HTTP + Bearer、**不用 `mcp-session-id`** ⇒ **pull 取件不受 30 分钟 TTL 影响**，其 `fetch failed` 也**不是** TTL 404。预热只需要覆盖**原生工具面**，不要对 pull 路径做预热、也不要混判签名。
+  - **为什么"重启后预热"替代不了加固**（B 的反驳）：空闲 agent 恰恰是**被唤醒时**才调工具——它不会、也无法预热；第一次调用就撞 404，而且撞在"正要回话"的时刻。重启窗口还能靠预热绕开，**空闲 TTL 绕不开**。
+  - **加固的硬性要求**（A/B 联合，实施时逐条锁）：① 重握手**单飞**（single-flight：并发多个 404 只握手一次，client 原子替换）；② 重试**原样重发同一 payload**（复用 `idempotencyKey`）；③ 若重握手本身失败（Hub 仍在重启/网络错）**必须透出原始错误**，绝不吞掉或报成功；④ 终态错误码稳定为 `mcp_session_expired`，文案同时写明「**该次调用未执行**」与「已自动重握手，可原样重试」；⑤ 自愈后的**首次成功调用**，Hub 侧记账的 `from_agent_id` 仍须是**原会话节点**（逐调用 `x-agentchat-session`），不得退化为无身份或容器——需一条身份回归断言。
