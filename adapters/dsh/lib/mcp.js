@@ -227,7 +227,8 @@ export function createMcpClient(transport, bearer, options = {}) {
       options.log?.(`MCP 会话失效（404：Hub 重启或空闲 TTL）→ 自动重握手并原样重发一次（${who}；该次调用未执行）`)
       try {
         parsed = await attempt(method, params, extra)
-        options.log?.(`MCP 会话自愈成功（404 → 重握手 → 重发成功；${who}）`)
+        // 带上重握手后的**新会话 id**：并发两个 404 若打印同一个 id，即证明"单飞握手只发生一次"。
+        options.log?.(`MCP 会话自愈成功（404 → 重握手 → 重发成功；${who}；新 MCP 会话=${String(sessionId)}）`)
       } catch (retry) {
         if (retry?.status === 404) {
           /** @type {HubError & {code?: string}} */
