@@ -218,3 +218,6 @@ node adapters/test/cli.mjs --scenario busy --spawn        # 单场景
   - 原生工具面**已自愈**：`lib/native-tools.js` 在 400/404 时丢弃缓存 client，**下一次调用**重新 `initialize` 握手——所以表现为"第一次调用报错、重跑即恢复"（实测：默认视图那次 404，并发的另一路成功，重跑成功）。
   - pull 适配器的**取件**走 `/internal/wake`（无 MCP 会话），只表现为一次请求失败 + 退避重试，**不丢消息**，但会拉长一次投递。
   - 复测建议：重启 Hub 后先做一次"预热调用"（任一只读工具），再开始正式的对照记录。
+  - **两种失败签名可直接分诊**（A 从适配器日志取证）：重启窗口内 `/internal/state`、`/internal/wake` 报 **`network: fetch failed`**（连接层，Hub 不在）；而 `/mcp tools/call` 报 **`http … 404`**（Hub 在，但缓存的 `mcp-session-id` 已失效）。不必等重跑就知道是哪一种。
+  - **不止重启会触发**：MCP 会话还有**空闲 TTL**（`DEFAULT_SESSION_TTL_MS = 30 分钟`，`sweepSessions` 定期淘汰）→ 长时间空闲后的第一次工具调用同样会吃到 404，走同一套自愈路径。
+  - **重试安全性的代码依据**（给未来加固用）：`server/routes/mcp.ts` 在**转发之前**查表——未知 `mcp-session-id` 直接 `404 {error:"session_not_found"}` ⇒ **404 保证该次调用未被分发执行**，因此"同调用内重握手 + 重试一次"对读/写工具都安全；若调用方传了 `idempotencyKey`，重试复用同一 key（Hub 按 `(from, key)` 去重）则更强。
