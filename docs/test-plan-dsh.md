@@ -217,10 +217,15 @@ node adapters/test/cli.mjs --scenario busy --spawn        # 单场景
 - **Hub 重启窗口的 404（瞬态，已知）**（B 实测）：重启 Hub 后，客户端缓存的 `mcp-session-id` 随之失效，`POST /mcp tools/call` 会先回 **404**。
   - 原生工具面**已自愈**：`lib/native-tools.js` 在 400/404 时丢弃缓存 client，**下一次调用**重新 `initialize` 握手——所以表现为"第一次调用报错、重跑即恢复"（实测：默认视图那次 404，并发的另一路成功，重跑成功）。
   - pull 适配器的**取件**走 `/internal/wake`（无 MCP 会话），只表现为一次请求失败 + 退避重试，**不丢消息**，但会拉长一次投递。
-  - 复测建议：重启 Hub 后先做一次"预热调用"（任一只读工具），再开始正式的对照记录。
+  - ~~复测建议：重启 Hub 后先做一次"预热调用"（任一只读工具），再开始正式的对照记录。~~
+  **已加固（`lib/mcp.js`）**：404 会在**同一调用内**自动重握手并原样重发一次 ⇒ 预热降级为**可选**（只省一次内部重试，不影响正确性）。
   - **两种失败签名可直接分诊**（A 从适配器日志取证）：重启窗口内 `/internal/state`、`/internal/wake` 报 **`network: fetch failed`**（连接层，Hub 不在）；而 `/mcp tools/call` 报 **`http … 404`**（Hub 在，但缓存的 `mcp-session-id` 已失效）。不必等重跑就知道是哪一种。
   - **不止重启会触发**：MCP 会话还有**空闲 TTL**（`DEFAULT_SESSION_TTL_MS = 30 分钟`，`sweepSessions` 定期淘汰）→ 长时间空闲后的第一次工具调用同样会吃到 404，走同一套自愈路径。
   - **重试安全性的代码依据**（给未来加固用）：`server/routes/mcp.ts` 在**转发之前**查表——未知 `mcp-session-id` 直接 `404 {error:"session_not_found"}` ⇒ **404 保证该次调用未被分发执行**，因此"同调用内重握手 + 重试一次"对读/写工具都安全；若调用方传了 `idempotencyKey`，重试复用同一 key（Hub 按 `(from, key)` 去重）则更强。
   - **TTL 只作用于 MCP 会话路径**（A 澄清）：`/internal/state`、`/internal/wake` 走内部 HTTP + Bearer、**不用 `mcp-session-id`** ⇒ **pull 取件不受 30 分钟 TTL 影响**，其 `fetch failed` 也**不是** TTL 404。预热只需要覆盖**原生工具面**，不要对 pull 路径做预热、也不要混判签名。
   - **为什么"重启后预热"替代不了加固**（B 的反驳）：空闲 agent 恰恰是**被唤醒时**才调工具——它不会、也无法预热；第一次调用就撞 404，而且撞在"正要回话"的时刻。重启窗口还能靠预热绕开，**空闲 TTL 绕不开**。
-  - **加固的硬性要求**（A/B 联合，实施时逐条锁）：① 重握手**单飞**（single-flight：并发多个 404 只握手一次，client 原子替换）；② 重试**原样重发同一 payload**（复用 `idempotencyKey`）；③ 若重握手本身失败（Hub 仍在重启/网络错）**必须透出原始错误**，绝不吞掉或报成功；④ 终态错误码稳定为 `mcp_session_expired`，文案同时写明「**该次调用未执行**」与「已自动重握手，可原样重试」；⑤ 自愈后的**首次成功调用**，Hub 侧记账的 `from_agent_id` 仍须是**原会话节点**（逐调用 `x-agentchat-session`），不得退化为无身份或容器——需一条身份回归断言。
+  - **加固的硬性要求**（A/B 联合，**已全部实现**，回归见 `adapters/dsh/__tests__/mcp-session-heal.test.ts`）：① 重握手**单飞**（single-flight：并发多个 404 只握手一次，client 原子替换）；② 重试**原样重发同一 payload**（复用 `idempotencyKey`）；③ 若重握手本身失败（Hub 仍在重启/网络错）**必须透出原始错误**，绝不吞掉或报成功；④ 终态错误码稳定为 `mcp_session_expired`，文案同时写明「**该次调用未执行**」与「已自动重握手，可原样重试」；⑤ 自愈后的**首次成功调用**，Hub 侧记账的 `from_agent_id` 仍须是**原会话节点**（逐调用 `x-agentchat-session`），不得退化为无身份或容器——需一条身份回归断言。
+- **两类失败的可重试性必须分开告诉模型**（B 提出，已落地在原生工具失败文案里）：
+  - `mcp_session_expired`（404 且重发仍 404）→「该次调用**未执行**，可原样重试」；
+  - transport 类（网络/超时/耗尽，`status` 无值）→「**结果未知**：请求可能已执行；若要重试请带 `idempotencyKey`」。
+  - 二者不可混为一谈：前者重发安全，后者盲重发可能造成**重复消息**（`send`/`ask` 尤其）。

@@ -151,6 +151,8 @@ export async function mcpRegister(transport, bearer, args) {
 export function createMcpClient(transport, bearer, options = {}) {
   const base = options.identity === undefined ? bearer : { ...bearer, "x-agent-id": options.identity }
   let sessionId
+  /** 单飞握手：并发多个调用同时发现会话失效时**只握手一次**（避免 N 次 initialize 与撕裂状态）。 */
+  let handshake
   /**
    * JSON-RPC 请求 id **每 client 自增**（`initialize` 恒为 1）。
    *
@@ -161,40 +163,79 @@ export function createMcpClient(transport, bearer, options = {}) {
   let nextId = 2
   async function ensureSession() {
     if (sessionId !== undefined) return sessionId
-    const init = await transport.send(
-      "/mcp",
-      {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-06-18",
-          capabilities: {},
-          clientInfo: { name: "agentchat-dsh", version: "0.1.0" },
+    handshake ??= (async () => {
+      const init = await transport.send(
+        "/mcp",
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "agentchat-dsh", version: "0.1.0" },
+          },
         },
-      },
-      mcpHeaders(base, undefined),
-    )
-    expectStatus(200, init, "POST /mcp initialize")
-    if (init.sessionId === undefined) {
-      throw new HubError("protocol", undefined, "initialize returned no mcp-session-id")
-    }
-    sessionId = init.sessionId
-    await transport.send(
-      "/mcp",
-      { jsonrpc: "2.0", method: "notifications/initialized" },
-      mcpHeaders(bearer, sessionId),
-    )
-    return sessionId
+        mcpHeaders(base, undefined),
+      )
+      expectStatus(200, init, "POST /mcp initialize")
+      if (init.sessionId === undefined) {
+        throw new HubError("protocol", undefined, "initialize returned no mcp-session-id")
+      }
+      await transport.send(
+        "/mcp",
+        { jsonrpc: "2.0", method: "notifications/initialized" },
+        mcpHeaders(bearer, init.sessionId),
+      )
+      sessionId = init.sessionId
+      return init.sessionId
+    })().finally(() => {
+      handshake = undefined
+    })
+    return await handshake
   }
-  async function rpc(method, params, extra) {
+  /** 单次尝试（**同一 payload**，供 404 后原样重发；调用方的 `idempotencyKey` 因此自动复用）。 */
+  async function attempt(method, params, extra) {
     const sid = await ensureSession()
     const response = await transport.send(
       "/mcp",
       { jsonrpc: "2.0", id: nextId++, method, params },
       mcpHeaders({ ...bearer, ...extra }, sid),
     )
-    const parsed = parseSseJson(expectStatus(200, response, `POST /mcp ${method}`))
+    return parseSseJson(expectStatus(200, response, `POST /mcp ${method}`))
+  }
+  /**
+   * 一次 RPC：**404 视为 MCP 会话失效**（Hub 重启或空闲 TTL 淘汰）→ 丢缓存、重新握手、**原样重发一次**。
+   *
+   * 为什么可以安全重发：`server/routes/mcp.ts` 在**转发之前**查会话表，未知 `mcp-session-id` 直接
+   * `404 {error:"session_not_found"}` ⇒ **该次调用未被分发执行**（读/写工具同理）。重发用同一 payload，
+   * 调用方带的 `idempotencyKey` 自动复用（Hub 按 `(from,key)` 去重）。
+   * 重握手本身失败 → **原样透出原始错误**（绝不吞掉或伪装成功）；重发仍 404 → 稳定码
+   * `mcp_session_expired`，文案明说"该次调用未执行、可原样重试"。
+   */
+  async function rpc(method, params, extra) {
+    let parsed
+    try {
+      parsed = await attempt(method, params, extra)
+    } catch (error) {
+      if (error?.status !== 404) throw error
+      sessionId = undefined
+      try {
+        parsed = await attempt(method, params, extra)
+      } catch (retry) {
+        if (retry?.status === 404) {
+          /** @type {HubError & {code?: string}} */
+          const expired = new HubError(
+            "http",
+            404,
+            "mcp_session_expired：MCP 会话已失效，自动重握手后仍失败；该次调用未执行，可原样重试",
+          )
+          expired.code = "mcp_session_expired"
+          throw expired
+        }
+        throw retry
+      }
+    }
     if (method === "tools/list") {
       const tools = /** @type {{result?: {tools?: unknown}}} */ (parsed)["result"]?.["tools"]
       return Array.isArray(tools) ? tools : []

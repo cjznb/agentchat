@@ -88,6 +88,23 @@ export function createNativeTools(options) {
   let client
   const mcp = () => (client ??= options.hub.mcp())
 
+  /**
+   * 面向模型的失败文案：**区分两类可重试性**（测试员B 提出）——
+   * - `mcp_session_expired`（404 且重试仍 404）：调用**未执行**，可原样重发；
+   * - transport 类（网络/超时/耗尽，`status` 无值）：**结果未知**，重发须带 `idempotencyKey`，
+   *   否则"重讲一遍内容"会造重复消息。
+   */
+  function failureText(name, error) {
+    const base = `AgentChat 调用失败（${name}）：${describe(error)}`
+    if (/** @type {{code?: string}} */ (error)?.code === "mcp_session_expired") {
+      return `${base}｜该次调用**未执行**，已自动重握手，可原样重试`
+    }
+    if (/** @type {{status?: number}} */ (error)?.status === undefined) {
+      return `${base}｜结果未知：请求可能已执行；若要重试请带 idempotencyKey（send/ask 尤其如此）`
+    }
+    return base
+  }
+
   /** 执行体：解析调用者会话 → 该会话的 `task_ref` 作为逐调用身份；解析不到就拒发。 */
   async function run(name, args, exec) {
     const sessionId = exec?.agent?.session?.header?.id
@@ -95,10 +112,11 @@ export function createNativeTools(options) {
     try {
       return await mcp().call(name, args ?? {}, sessionId)
     } catch (error) {
-      // Hub 侧会话失效（换库/重启 → 400/404）：丢弃缓存会话，下次调用重新握手自愈。
+      // 400 = 身份/请求形状问题；404 = 会话失效（`lib/mcp.js` 已做同调用重握手+重发，走到这里说明仍失败）。
+      // 丢弃缓存会话，让下一次调用重新握手。
       if (error?.status === 400 || error?.status === 404) client = undefined
       options.log(`原生工具 ${name} 调用失败：${describe(error)}`)
-      return `AgentChat 调用失败：${describe(error)}`
+      return failureText(name, error)
     }
   }
 
