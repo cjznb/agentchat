@@ -135,3 +135,21 @@ describe("POST /internal/retire", () => {
     expect(MCP_TOOLS).toHaveLength(13)
   })
 })
+
+describe("POST /internal/mcp-sessions/clear（404 自愈的确定性触发器；B 的窄参数设计）", () => {
+  it("无票 401；空 body 400；{all:true} 与 {sessionId} 各 200 且返回 cleared 计数", async () => {
+    const unauthorized = await post("/internal/mcp-sessions/clear", { all: true }, false)
+    expect(unauthorized.status).toBe(401)
+
+    const empty = await post("/internal/mcp-sessions/clear", {})
+    expect(empty.status).toBe(400) // 防误清全量：必须显式 all 或 sessionId
+
+    const all = await post("/internal/mcp-sessions/clear", { all: true })
+    expect(all.status).toBe(200)
+    expect(await all.json()).toEqual({ ok: true, cleared: 0 }) // 本夹具未建立 MCP 会话
+
+    const scoped = await post("/internal/mcp-sessions/clear", { sessionId: "unknown-session" })
+    expect(scoped.status).toBe(200)
+    expect(await scoped.json()).toEqual({ ok: true, cleared: 0 })
+  })
+})

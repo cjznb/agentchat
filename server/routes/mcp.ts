@@ -112,10 +112,15 @@ function initializeContext(
  *
  * 多次 `mcpRoutes()` 时以最近一次实例为准（测试用；生产只有一个实例）。返回清掉的会话数。
  */
-let sessionControl: { readonly clear: () => number } | undefined
+let sessionControl: { readonly clear: (only?: string) => number } | undefined
 
-export function clearMcpSessions(): number {
-  return sessionControl?.clear() ?? 0
+/**
+ * 清空 MCP 会话（关闭 transport）。`sessionId` 给出时只清该会话，否则全清。
+ * 供 `/api/test/mcp-sessions/clear`（测试面）与 `/internal/mcp-sessions/clear`（Bearer 门内，
+ * 真机可用的确定性触发器）调用。返回清掉的个数。
+ */
+export function clearMcpSessions(sessionId?: string): number {
+  return sessionControl?.clear(sessionId) ?? 0
 }
 
 /** 单路由（`/mcp`）表；`db` 缺省时惰性取进程配置库（测试显式注入临时库 + home）。 */
@@ -125,11 +130,15 @@ export function mcpRoutes(db?: Db, options?: McpRoutesOptions): Hono {
   const sessionTtlMs = options?.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS
   const sessions = new Map<string, McpSession>()
   sessionControl = {
-    clear: () => {
-      const count = sessions.size
-      for (const session of sessions.values()) void session.transport.close().catch(() => undefined)
-      sessions.clear()
-      return count
+    clear: (only?: string) => {
+      const ids = only === undefined ? [...sessions.keys()] : sessions.has(only) ? [only] : []
+      for (const id of ids) {
+        const session = sessions.get(id)
+        if (session === undefined) continue
+        void session.transport.close().catch(() => undefined)
+        sessions.delete(id)
+      }
+      return ids.length
     },
   }
   let hubToken: string | undefined

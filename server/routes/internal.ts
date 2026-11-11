@@ -30,6 +30,7 @@ import { publishReceipt } from "../core/publish"
 import { config } from "../config"
 import { openDb, type Db } from "../db"
 import { AgentNotFoundError, getAgent, touchAgent } from "../store/agents"
+import { clearMcpSessions } from "./mcp"
 import { getConversationByKey, SHOUT_KEY } from "../store/conversations"
 import {
   claimableInboxMessages,
@@ -208,6 +209,11 @@ const resultBodySchema = z.object({
   ),
 })
 const retireBodySchema = z.object({ agentId: z.string().min(1) })
+/** 确定性触发器：`{sessionId}` 只清该会话；`{all:true}` 全清；两者都不给 → 400（防误清全量）。 */
+const clearSessionsBodySchema = z.object({
+  sessionId: z.string().min(1).optional(),
+  all: z.boolean().optional(),
+})
 
 export interface InternalRoutesOptions {
   /** `hub_token` 路径（缺省 `config.hubTokenPath`）；测试注入临时 home。 */
@@ -291,5 +297,26 @@ export function internalRoutes(db?: Db, options?: InternalRoutesOptions): Hono {
         throw error
       }
       return c.json({ ok: true })
+    })
+    /**
+     * 确定性触发器（B 的窄参数设计）：清空 MCP 会话，让适配器下一次 `tools/call` 吃到
+     * `404 {error:"session_not_found"}` —— 这是 **404 自愈路径**的可重复验收手段，不必重启 Hub。
+     *
+     * 为什么放 `/internal/*` 而不是测试面：真机 Hub 故意不开测试面（那会一并暴露 reset/硬删），
+     * 而本端点只关闭会话、不动任何数据；Bearer 与其它 `/internal/*` 同门（无票 401）。
+     *
+     * 契约：**404 的响应体形状必须是 `session_not_found`** —— DSH 适配器按状态码丢缓存，
+     * opencode 桥按 body 判定（`mcp-bridge.mjs`）；换成裸 404 会让 opencode 不自愈。
+     *
+     * 参数：`{sessionId}` 只清该会话；`{all:true}` 全清；两者都不给 → 400。返回 `{ok:true, cleared}`。
+     */
+    .post("/internal/mcp-sessions/clear", async (c) => {
+      const parsed = clearSessionsBodySchema.safeParse(await c.req.json().catch(() => undefined))
+      if (!parsed.success) return c.json({ ok: false, error: "invalid_body" }, 400)
+      if (parsed.data.all !== true && parsed.data.sessionId === undefined) {
+        return c.json({ ok: false, error: "invalid_body" }, 400)
+      }
+      const cleared = clearMcpSessions(parsed.data.all === true ? undefined : parsed.data.sessionId)
+      return c.json({ ok: true, cleared })
     })
 }

@@ -229,3 +229,14 @@ node adapters/test/cli.mjs --scenario busy --spawn        # 单场景
   - `mcp_session_expired`（404 且重发仍 404）→「该次调用**未执行**，可原样重试」；
   - transport 类（网络/超时/耗尽，`status` 无值）→「**结果未知**：请求可能已执行；若要重试请带 `idempotencyKey`」。
   - 二者不可混为一谈：前者重发安全，后者盲重发可能造成**重复消息**（`send`/`ask` 尤其）。
+- **确定性触发器（真机可用，不必重启 Hub）**：`POST /internal/mcp-sessions/clear`
+  （Bearer `hub_token` 门内，与 `/internal/wake` 同门）——清空 MCP 会话后，适配器下一次
+  `tools/call` 必吃 404 → 触发同调用自愈，可**反复**验收。
+  - 参数：`{sessionId:"<id>"}` 只清该会话；`{all:true}` 全清；**两者都不给 → 400**（防误清）。
+  - 为什么放 `/internal/*` 而非测试面：真机 Hub 故意不开测试面（会一并暴露 reset/硬删），
+    而本端点只关闭会话、不动数据。
+- **契约：404 的响应体形状必须是 `{"ok":false,"error":"session_not_found"}`**（`server/routes/mcp.ts` 现状）。
+  原因：**两个适配器的自愈触发面不同**——DSH 原生面按**状态码** 400/404 丢缓存
+  （`native-tools.js`）；**opencode 桥按 body 判定**（`mcp-bridge.mjs` 只在 `session_not_found`
+  时才重握手，其它 404 原样上抛，避免误开新会话）。若把该 404 改成裸 404 或换码，**opencode 不会自愈**，
+  会失败到适配器重启。改 `/mcp` 的 404 形状时**必须同时跑**两个适配器的自愈回归。
