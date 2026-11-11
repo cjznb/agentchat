@@ -81,6 +81,11 @@ describe("MCP 会话失效自愈（404 → 重握手 + 原样重发）", () => {
     expect(toolCalls).toBe(2) // 404 + 重发
     expect(logs.join("\n")).toContain("404") // 自愈可观测（真机验收靠这条日志判定"确实发生过 404"）
     expect(logs.join("\n")).toContain("重握手")
+    // 归因：进程级共享 client，日志必须带工具名与调用方会话，否则无法判断谁消费了这次 404
+    expect(logs.join("\n")).toContain("tool=inbox")
+    expect(logs.join("\n")).toContain("session=session-abc")
+    // 成功路径也要有痕（否则机制成功时线上零证据）
+    expect(logs.join("\n")).toContain("自愈成功")
     const toolRequests = transport.calls.filter((c) => c.body["method"] === "tools/call")
     expect(toolRequests[1]?.headers["x-agentchat-session"]).toBe("session-abc") // 身份不丢（A 的回归要求）
     expect(toolRequests[1]?.headers["mcp-session-id"]).toBe("s2") // 用的是新会话

@@ -214,15 +214,20 @@ export function createMcpClient(transport, bearer, options = {}) {
    * `mcp_session_expired`，文案明说"该次调用未执行、可原样重试"。
    */
   async function rpc(method, params, extra) {
+    /** 归因信息：原生工具面是**进程级共享 client**，只写"会话失效"事后无法判断是谁消费了这次 404。 */
+    const toolName = method === "tools/call" ? String(/** @type {{name?: unknown}} */ (params)?.name ?? "?") : method
+    const caller = extra?.["x-agentchat-session"]
+    const who = `tool=${toolName}${typeof caller === "string" ? ` session=${caller}` : ""}`
     let parsed
     try {
       parsed = await attempt(method, params, extra)
     } catch (error) {
       if (error?.status !== 404) throw error
       sessionId = undefined
-      options.log?.("MCP 会话失效（404：Hub 重启或空闲 TTL）→ 自动重握手并原样重发一次（该次调用未执行）")
+      options.log?.(`MCP 会话失效（404：Hub 重启或空闲 TTL）→ 自动重握手并原样重发一次（${who}；该次调用未执行）`)
       try {
         parsed = await attempt(method, params, extra)
+        options.log?.(`MCP 会话自愈成功（404 → 重握手 → 重发成功；${who}）`)
       } catch (retry) {
         if (retry?.status === 404) {
           /** @type {HubError & {code?: string}} */
