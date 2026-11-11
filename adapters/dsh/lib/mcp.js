@@ -145,7 +145,7 @@ export async function mcpRegister(transport, bearer, args) {
  *
  * @param {{send: (path: string, body: unknown, headers: Record<string, string>) => Promise<{status: number, text: string, sessionId: string | undefined}>}} transport
  * @param {Record<string, string>} bearer 共享 bearer 头
- * @param {{identity?: string}} [options] `initialize` 的兜底身份（可选；一般不需要，逐调用头更精确）
+ * @param {{identity?: string, log?: (message: string) => void}} [options] `identity` = `initialize` 的兜底身份（一般不需要，逐调用头更精确）；`log` = 自愈等事件的可观测出口
  * @returns {{list: () => Promise<unknown[]>, call: (name: string, args: unknown, taskRef?: string) => Promise<string>, reset: () => void}}
  */
 export function createMcpClient(transport, bearer, options = {}) {
@@ -220,6 +220,7 @@ export function createMcpClient(transport, bearer, options = {}) {
     } catch (error) {
       if (error?.status !== 404) throw error
       sessionId = undefined
+      options.log?.("MCP 会话失效（404：Hub 重启或空闲 TTL）→ 自动重握手并原样重发一次（该次调用未执行）")
       try {
         parsed = await attempt(method, params, extra)
       } catch (retry) {

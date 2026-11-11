@@ -103,12 +103,35 @@ function initializeContext(
   return { db, home }
 }
 
+/**
+ * 测试面用的**确定性触发器**：清空最近一次 `mcpRoutes()` 实例里的全部 MCP 会话（关闭 transport）。
+ *
+ * 为什么需要：404 自愈路径（Hub 重启 / 空闲 TTL）在真机上是"**单次进程级资源**"——所有会话共享
+ * 同一个 adapter client，谁先调用谁就消费掉那次 stale-session。有了本触发器，测试可**反复**
+ * 制造 stale session，不必重启 Hub（仅 `/api/test/mcp-sessions/clear` 调用；该面默认关闭 + 仅回环）。
+ *
+ * 多次 `mcpRoutes()` 时以最近一次实例为准（测试用；生产只有一个实例）。返回清掉的会话数。
+ */
+let sessionControl: { readonly clear: () => number } | undefined
+
+export function clearMcpSessions(): number {
+  return sessionControl?.clear() ?? 0
+}
+
 /** 单路由（`/mcp`）表；`db` 缺省时惰性取进程配置库（测试显式注入临时库 + home）。 */
 export function mcpRoutes(db?: Db, options?: McpRoutesOptions): Hono {
   const resolveDb = (): Db => db ?? (defaultDb ??= openDb(config.dbPath))
   const home = options?.home ?? config.home
   const sessionTtlMs = options?.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS
   const sessions = new Map<string, McpSession>()
+  sessionControl = {
+    clear: () => {
+      const count = sessions.size
+      for (const session of sessions.values()) void session.transport.close().catch(() => undefined)
+      sessions.clear()
+      return count
+    },
+  }
   let hubToken: string | undefined
   const token = (): string => {
     hubToken ??= ensureHubToken(options?.hubTokenPath ?? config.hubTokenPath)

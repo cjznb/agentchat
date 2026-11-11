@@ -136,6 +136,6 @@ export function createHubClient(options) {
      * 注意：`createMcpClient` 收的是**传输对象**（`{send}`），不是裸 `send` 函数
      * （真机事故：传裸函数 → `transport.send is not a function`，整条原生工具面静默失效）。
      */
-    mcp: () => createMcpClient({ send }, bearer),
+    mcp: () => createMcpClient({ send }, bearer, options.log === undefined ? {} : { log: options.log }),
   }
 }

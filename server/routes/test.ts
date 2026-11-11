@@ -53,6 +53,7 @@ import {
 import { deleteMessagesInConversation, history, latestInConversation } from "../store/messages"
 import { markRead } from "../store/read_states"
 import { defaultIsLoopback } from "./admin"
+import { clearMcpSessions } from "./mcp"
 import {
   addMemberBodySchema,
   agentRoutes,
@@ -300,4 +301,13 @@ export function testRoutes(db?: Db, options?: TestRoutesOptions): Hono {
         throw error
       }
     }))
+    /**
+     * 22. 确定性触发器：清空当前 Hub 的**全部 MCP 会话**（关闭 transport）。
+     *
+     * 用途（B 提出）：404 自愈路径在真机上是"单次进程级资源"——adapter 的共享 client 只要有一次
+     * 成功调用就把那次 stale-session 消费掉。用本端点可**反复**制造 stale session，无需重启 Hub：
+     * 清空后 adapter 下一次 `tools/call` 必吃 404 → 触发同调用内重握手 + 原样重发。
+     * 返回 `{ok:true, cleared:<清掉的会话数>}`；无 mcpRoutes 实例时 `cleared:0`。
+     */
+    .post("/api/test/mcp-sessions/clear", handle((c) => c.json({ ok: true, cleared: clearMcpSessions() })))
 }

@@ -1849,3 +1849,21 @@ describe("I. 真机冒烟（start + 真实 socket fetch）", () => {
     }
   })
 })
+
+describe("MCP 会话确定性触发器（POST /api/test/mcp-sessions/clear，B 提出）", () => {
+  it("默认无会话 → 200 {ok:true,cleared:0}；非回环 → 403（三重防线不变）", async () => {
+    const { app } = fixture()
+    const ok = await post(app, "/api/test/mcp-sessions/clear")
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toEqual({ ok: true, cleared: 0 })
+
+    const { app: blocked } = fixture({ loopback: false })
+    const forbidden = await post(blocked, "/api/test/mcp-sessions/clear")
+    expect(forbidden.status).toBe(403)
+
+    // 开关关闭时该路径根本不存在（404），与其它测试端点一致
+    const { app: off } = fixture({ testApi: false })
+    const missing = await post(off, "/api/test/mcp-sessions/clear")
+    expect(missing.status).toBe(404)
+  })
+})

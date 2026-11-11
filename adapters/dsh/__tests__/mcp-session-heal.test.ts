@@ -62,9 +62,10 @@ function handshake(state: { sessions: number }, call: Call): Reply | undefined {
 }
 
 describe("MCP 会话失效自愈（404 → 重握手 + 原样重发）", () => {
-  it("首次 404 → 同调用内重握手并原样重发一次；逐调用身份头与 payload 不变", async () => {
+  it("首次 404 → 同调用内重握手并原样重发一次；逐调用身份头与 payload 不变，且留下可观测日志", async () => {
     const state = { sessions: 0 }
     let toolCalls = 0
+    const logs: string[] = []
     const transport = makeTransport((call) => {
       const init = handshake(state, call)
       if (init !== undefined) return init
@@ -72,12 +73,14 @@ describe("MCP 会话失效自愈（404 → 重握手 + 原样重发）", () => {
       toolCalls += 1
       return toolCalls === 1 ? sessionGone : toolOk(call.body["id"], "pong")
     })
-    const client = createMcpClient(transport, bearer)
+    const client = createMcpClient(transport, bearer, { log: (message: string) => logs.push(message) })
 
     await expect(client.call("inbox", { ack: true }, "session-abc")).resolves.toBe("pong")
 
     expect(state.sessions).toBe(2) // 首次握手 + 失效后重握手
     expect(toolCalls).toBe(2) // 404 + 重发
+    expect(logs.join("\n")).toContain("404") // 自愈可观测（真机验收靠这条日志判定"确实发生过 404"）
+    expect(logs.join("\n")).toContain("重握手")
     const toolRequests = transport.calls.filter((c) => c.body["method"] === "tools/call")
     expect(toolRequests[1]?.headers["x-agentchat-session"]).toBe("session-abc") // 身份不丢（A 的回归要求）
     expect(toolRequests[1]?.headers["mcp-session-id"]).toBe("s2") // 用的是新会话
