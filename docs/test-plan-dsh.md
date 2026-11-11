@@ -209,5 +209,8 @@ node adapters/test/cli.mjs --scenario busy --spawn        # 单场景
 - **自发消息已由产品侧排除（0.3.2 起，历史/兼容说明）**（A 提出、用户拍板）：`inbox` 默认**排除自发**（`include_self:true` 找回旧行为），因此"轮询 `inbox` → 逐条回复"不再有自激环路。
   历史背景：在此之前 `inbox` 会返回**自己发出的**消息——而发消息**不推进**自己的读位点（只有 `ack` 会），于是不过滤就会形成"回复→新消息→又被轮询到"的环路，且 **`self_send` 挡不住**（它只覆盖 `to=自己`，群回复是对群 id 的正常发送）。两类例外仍保留自发可见：**喊话广播**（发送者需看到自己那条）与 **`system` 通知**（入群/ask 卡必须达）；自激只由文本消息产生，故豁免不影响防护。
   DSH 适配器自始不受影响（注入按 `wake_jobs` 走，不读 inbox 页）；受影响的只是脚本化 MCP 客户端——若你仍在用 `include_self:true`，请自行按 `fromAgentId ≠ 自己` 过滤。
+  **开关作用面（避免三处口径漂移）**：`include_self` **只影响 `inbox` 的页内容**；`conversation`（按会话读全部历史）**本来就含自己**、`ack`（推进读位点）与未读计数（`directUnreadSeqs` 本就 `from_agent_id <> 自己`）**都不受它影响**。三类适配器的取件路径走 `/internal/wake`（`claimableInboxMessages` 自带自发过滤），同样不受影响。
+  **shout 分支的口径差**：喊话例外让页内含自己那条广播，而未读计数按 `directUnreadSeqs` **不计**自发 → 该分支页/计数天然不同口径。这是有意保留的（既有 DoD），且该分支**自激不可达**：agent 直接向 shout 会话 id `send` 会被成员资格拒绝（实测 `not_participant`，已锁进 `inbox-unread.test.ts`）。
+  **页/计数同口径的回归断言**：默认（不带 `include_self`）应满足 `inbox 页内条数 == unread`（改动前是"计数排除自发、页却含自发"，会被误判成取件失败）。
 - **`ack` 与认领的竞态（已知，非缺陷）**（B 定位）：`claimWakeBacklog` 在**认领当时**按回执阶段跳过 `delivered/read`（`server/routes/internal.ts:175`），但认领与 `ack` 是两个独立事务——若认领先提交、`ack` 后提交，已被认领的消息仍会在**下一个 step 边界**注入给模型，表现为"我已 ack 了它才出现"。这是 at-least-once + 工具不可抢占的必然结果，**不要记成二次注入**。
 - **记录纪律**：只对**注入帧实际送达**的消息 `ack`，不要对仅"inbox 可见"的消息提前 `ack`——否则自己的清理动作会污染「可见/被唤醒/已交付」三态记录。

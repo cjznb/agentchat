@@ -234,9 +234,11 @@ export const DEFAULT_INBOX_LIMIT = 50
  * **默认排除自发消息**（`includeSelf !== true`）——与 `claimableInboxMessages`（投递台账，本就
  * 过滤自发）口径对齐，杜绝"轮询 inbox → 逐条回复"的自激环路：自己发出的消息同样落在自己的
  * 读位点之后（发消息不推进自己的读位点，只有 `ack` 会），不过滤就会回复自己并再次被轮询到。
- * **两类例外仍保留自发可见**：① 喊话广播会话（既有 DoD「对每个节点各得一条，含发送者本人」）；
+ * **两类例外仍保留自发可见**：① 喊话广播会话（按 `conversations.key='shout'` 判定——不绑死单个
+ * id，将来多个广播会话也不会静默回退 DoD；既有 DoD「对每个节点各得一条，含发送者本人」）；
  * ② `kind='system'` 通知（入群/ask 卡等系统事件，既有 DoD「全员收件箱可达」）——自激环路只会
- * 由**文本**消息产生，这两类豁免不影响防护。
+ * 由**文本**消息产生，这两类豁免不影响防护（且 shout 分支自激**不可达**：agent 直接向 shout
+ * 会话 id `send` 会被成员资格拒绝 `not_participant`）。
  * 需要旧行为（文本自发也含）时传 `includeSelf: true`。
  * `after` 语义保留为额外下界（翻页）：缺省 0 时由未读游标主导。
  */
@@ -253,7 +255,7 @@ export function inboxMessages(db: Db, query: InboxQuery): Message[] {
                                WHERE r.agent_id = $agentId
                                  AND r.conversation_id = messages.conversation_id), 0)
           AND ($includeSelf = 1
-               OR conversation_id = $shoutConversationId
+               OR conversation_id IN (SELECT id FROM conversations WHERE key = 'shout')
                OR kind = 'system'
                OR from_agent_id != $agentId)
           AND (conversation_id = $shoutConversationId

@@ -320,7 +320,7 @@ const mcpInboxInput = z.object({
   conversation: z.string().optional().describe("只看该会话（群/DM 会话 id）的消息。"),
   after: z.number().int().nonnegative().optional().describe("分页游标：只取 seq 大于它的消息（默认 0=全部未读）。"),
   ack: z.boolean().optional().describe("true=读到即自动标已读（等价于顺手 ack），但**不等于回复**。"),
-  include_self: z.boolean().optional().describe("true=连自己发出的消息一起返回（旧行为）；缺省 false=**排除自发**（喊话广播会话例外，仍能看到自己那条）。"),
+  include_self: z.boolean().optional().describe("true=连自己发出的文本消息一起返回（旧行为；喊话发送者核对'我广播出去的那条'也用它）；缺省 false=**排除自发**（喊话广播与 system 通知本就例外，仍可见）。"),
   timeout: z.number().int().positive().optional().describe("阻塞等新消息的毫秒数；超时返回 timedOut=true，不是错误。"),
 })
 

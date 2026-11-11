@@ -141,24 +141,35 @@ describe("P9：inbox 只看未读", () => {
     expect(unreadFor(db, s.a.id)).toBe(3)
   })
 
-  it("默认排除自发（自激环路防护）：文本自发不在页内；includeSelf:true 复原；喊话/system 例外", () => {
+  it("默认排除自发（自激环路防护）：文本自发不在页内；includeSelf:true 复原；页与 unread 同口径", () => {
     const s = scenario()
     const mine = sendMessage(db, { from: s.a.id, to: s.group.id, body: "我自己的" }).message
 
-    expect(unreadFor(db, s.a.id)).toBe(3) // 自发消息不计未读
+    expect(unreadFor(db, s.a.id)).toBe(3) // 自发消息不计未读（directUnreadSeqs 本就 JOIN from <> 自己）
     const page = inbox(db, s.a.id)
     expect(ids(page)).not.toContain(mine.id) // 默认排除自发：杜绝"轮询 inbox→逐条回复"的自激环路
     expect(page).toHaveLength(3)
-    expect(page.length - unreadFor(db, s.a.id)).toBe(0) // 口径与 unreadFor 对齐（旧行为差 1）
+    // A 的口径：页内容与未读计数**同口径**（改动前是"计数排除自发、页却含自发"，会误判成取件失败）
+    expect(page).toHaveLength(unreadFor(db, s.a.id))
 
     // 逃生口：旧行为可显式找回
     const withSelf = inbox(db, s.a.id, { includeSelf: true })
     expect(ids(withSelf)).toContain(mine.id)
     expect(withSelf).toHaveLength(4)
+  })
 
-    // 例外①喊话：发送者仍能看到自己那条广播（既有 DoD）
-    const shout = sendMessage(db, { from: s.a.id, to: "*", body: "我自己喊的" }).message
-    expect(ids(inbox(db, s.a.id))).toContain(shout.id)
+  it("例外：喊话与 system 通知仍含自发；且 shout 分支自激**不可达**（agent 不能向 shout 会话 send）", () => {
+    const s = scenario()
+    const human = ensureHuman(db)
+    // 用人做发送者：human 的 shout 立即执行（agent 的 shout 会走审批闸门）
+    const shout = sendMessage(db, { from: human.id, to: "*", body: "全体通知" }).message
+    expect(ids(inbox(db, human.id))).toContain(shout.id) // 发送者看得到自己那条广播（例外生效）
+    expect(ids(inbox(db, s.a.id))).toContain(shout.id) // 其余节点各得一条（既有 DoD）
+
+    // 自激不可达：agent 对 shout 会话 id 直接 send → 成员资格拒绝（喊话会话无 participants 行）
+    expect(() =>
+      sendMessage(db, { from: s.a.id, to: shout.conversationId, body: "回声" }),
+    ).toThrow(expect.objectContaining({ code: "not_participant" }))
 
     // 例外②system 通知：自发系统消息仍全员可达（既有 DoD）
     const system = storeSend(db, {
