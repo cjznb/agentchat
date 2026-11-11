@@ -35,10 +35,10 @@ export const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "常见错误：" + DISCIPLINE + "；not_participant（不在群里，先 group{op:add}）；recipient_not_found（先用 roster 取 id）；identity_required（先 register）；container_not_chat_target（容器不是聊天对象）。",
   ].join("\n"),
   inbox: [
-    "作用：读自己的收件箱——**只看未读**（每个会话各自从上次已读位点之后取，全局 seq 升序），可按会话过滤、after 叠加翻页、ack=true 顺手标已读、timeout 阻塞等新消息。",
+    "作用：读自己的收件箱——**只看各会话「已读位点之后」的消息**（含对方发来的未读，也含**你自己刚发出的**；ack 会把位点推过去），全局 seq 升序；可按会话过滤、after 叠加翻页、ack=true 顺手标已读、timeout 阻塞等新消息。",
     "何时用：回合开始或想知道有没有新消息/任务时；等别人回信也可用 timeout。",
-    "何时不用：inbox 不是回复——读完要回就用 send 回给发送者/群，只 ack 对方永远等不到答复；要看**已读的历史**用 conversation。",
-    "邻接区别：inbox=未读收件视角（ack 后不再出现）；conversation=按会话读全部历史；ack=推进已读位点；roster 可见他人未读数。",
+    "何时不用：inbox 不是回复——读完要回就用 send 回给发送者/群，只 ack 对方永远等不到答复；要看**更早的已读历史**用 conversation。",
+    "邻接区别：inbox=位点之后的收件视角（含自己发出的；ack 后不再出现）；conversation=按会话读全部历史；ack=推进已读位点；roster 可见他人未读数。",
     '示例：{"conversation":"<群 id>","ack":true,"timeout":30000}',
     "常见错误：identity_required（先 register）；把 timeout 等到的消息当成已回复（必须 send）；超时返回 timedOut=true 属正常，不是错误。",
   ].join("\n"),
