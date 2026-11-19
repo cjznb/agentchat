@@ -48,35 +48,158 @@ export function runWhoami(ctx: ToolContext): unknown {
   }
 }
 
+/** `roster` compact 视图的默认分页大小（节点数）。 */
+const COMPACT_ROSTER_LIMIT = 100
+/** `conversation` 正文预览默认字符数（`preview_chars:0` = 全文）。 */
+const DEFAULT_PREVIEW_CHARS = 300
+
+/**
+ * 正文预览：按**码点**截断并标记 `truncated`/`body_chars`，让调用方知道"还有更多"而不是以为正文就这么短。
+ * 全量正文用 `conversation{preview_chars:0}` 或按 id 精读。
+ */
+export function previewMessages(
+  messages: readonly { readonly body: string }[],
+  previewChars: number,
+): Record<string, unknown>[] {
+  if (previewChars <= 0) return messages as unknown as Record<string, unknown>[]
+  return messages.map((message) => {
+    const chars = [...message.body]
+    if (chars.length <= previewChars) return message as unknown as Record<string, unknown>
+    return {
+      ...(message as unknown as Record<string, unknown>),
+      body: `${chars.slice(0, previewChars).join("")}…`,
+      truncated: true,
+      body_chars: chars.length,
+    }
+  })
+}
+
+/** 扁平化 + 默认剔除离线/退役；**祖先链保留**（子节点在则父节点也在，层级不丢）。 */
+function flattenRoster(
+  nodes: readonly RosterNode[],
+  options: { readonly includeOffline: boolean; readonly includeRetired: boolean },
+): Record<string, unknown>[] {
+  const allowed = (node: RosterNode): boolean =>
+    (options.includeOffline || node.status !== "offline") &&
+    (options.includeRetired || node.status !== "retired")
+  const walk = (list: readonly RosterNode[], depth: number): Record<string, unknown>[] => {
+    const rows: Record<string, unknown>[] = []
+    for (const node of list) {
+      const children = walk(node.children, depth + 1)
+      if (!allowed(node) && children.length === 0) continue
+      rows.push({
+        id: node.id,
+        name: node.name,
+        status: node.status,
+        vendor: node.vendor,
+        kind: node.kind,
+        parent_id: node.parent_id,
+        role_tag: node.role_tag,
+        unread: node.unread,
+        depth,
+      })
+      rows.push(...children)
+    }
+    return rows
+  }
+  return walk(nodes, 0)
+}
+
+/** `summary` 视图：只给计数与根节点概览（约 100 B），要谁再 `filter` 精确定位。 */
+function summarizeRoster(tree: readonly RosterNode[]): Record<string, unknown> {
+  const nodes: RosterNode[] = []
+  const walk = (list: readonly RosterNode[]): void => {
+    for (const node of list) {
+      nodes.push(node)
+      walk(node.children)
+    }
+  }
+  walk(tree)
+  const byVendor: Record<string, number> = {}
+  const byStatus: Record<string, number> = {}
+  for (const node of nodes) {
+    byVendor[node.vendor] = (byVendor[node.vendor] ?? 0) + 1
+    byStatus[node.status] = (byStatus[node.status] ?? 0) + 1
+  }
+  return {
+    view: "summary",
+    total: nodes.length,
+    by_vendor: byVendor,
+    by_status: byStatus,
+    roots: tree.map((node) => ({
+      id: node.id,
+      name: node.name,
+      vendor: node.vendor,
+      status: node.status,
+      children_count: node.children.length,
+    })),
+  }
+}
+
+/** 名称/在线过滤（既有语义）：自身命中或任一子命中即保留，祖先链不丢。 */
+function pruneRoster(
+  nodes: readonly RosterNode[],
+  needle: string | undefined,
+  onlineOnly: boolean,
+): RosterNode[] {
+  const keep = (node: RosterNode): boolean =>
+    (needle === undefined || node.name.toLowerCase().includes(needle)) &&
+    (!onlineOnly || node.status === "online")
+  return nodes.flatMap((node) => {
+    const children = pruneRoster(node.children, needle, onlineOnly)
+    return keep(node) || children.length > 0 ? [{ ...node, children }] : []
+  })
+}
+
 export function runRoster(ctx: ToolContext, input: McpToolInput<"roster">): unknown {
   const requester = requireIdentity(ctx)
+  const conversationMode = input.conversation !== undefined
   // Task 5：`conversation` → 只返回该会话成员（带成员闸门，非成员 agent → not_participant）。
-  const tree =
+  const base =
     input.conversation === undefined
       ? rosterTree(ctx.db)
       : conversationRoster(ctx.db, requester, input.conversation)
   const needle = input.filter?.toLowerCase()
   const onlineOnly = input.online_only === true
-  if (needle === undefined && !onlineOnly) return tree
-  // 单一 prune：自身命中或任一子命中即保留（祖先链不丢）。
-  const keep = (node: RosterNode): boolean =>
-    (needle === undefined || node.name.toLowerCase().includes(needle)) &&
-    (!onlineOnly || node.status === "online")
-  const prune = (nodes: readonly RosterNode[]): RosterNode[] =>
-    nodes.flatMap((node) => {
-      const children = prune(node.children)
-      return keep(node) || children.length > 0 ? [{ ...node, children }] : []
-    })
-  return prune(tree)
+  const tree = needle === undefined && !onlineOnly ? base : pruneRoster(base, needle, onlineOnly)
+  // 成员树模式保持旧形状（view 不适用）。
+  if (conversationMode) return tree
+
+  const view = input.view ?? "compact"
+  if (view === "tree") return tree
+  if (view === "summary") return summarizeRoster(tree)
+
+  const rows = flattenRoster(tree, {
+    includeOffline: input.include_offline === true,
+    includeRetired: input.include_retired === true,
+  })
+  const limit = input.limit ?? COMPACT_ROSTER_LIMIT
+  const cursor = input.cursor ?? 0
+  const page = rows.slice(cursor, cursor + limit)
+  const hasMore = cursor + page.length < rows.length
+  return {
+    view: "compact",
+    nodes: page,
+    total: rows.length,
+    has_more: hasMore,
+    ...(hasMore ? { next_cursor: cursor + page.length } : {}),
+  }
 }
 
 export function runConversation(ctx: ToolContext, input: McpToolInput<"conversation">): unknown {
   const reader = requireIdentity(ctx)
-  // 撤回消息对未投递读者遮蔽正文（与 MCP inbox / UI 会话消息接口同一单点）。
+  const limit = input.limit ?? 20
+  const previewChars = input.preview_chars ?? DEFAULT_PREVIEW_CHARS
+  // 多取一条判断 has_more（store history 升序返回，多出的那条是最早的）。
+  const raw = history(ctx.db, input.id, input.before, limit + 1)
+  const hasMore = raw.length > limit
+  const page = hasMore ? raw.slice(1) : raw
+  const masked = page.map((message) => maskRevokedForReader(ctx.db, message, reader))
+  const first = masked[0]?.seq
   return {
-    messages: history(ctx.db, input.id, input.before, input.limit).map((message) =>
-      maskRevokedForReader(ctx.db, message, reader),
-    ),
+    messages: previewMessages(masked, previewChars),
+    has_more: hasMore,
+    ...(hasMore && first !== undefined ? { next_before: first } : {}),
   }
 }
 
@@ -100,7 +223,7 @@ export function runGroup(ctx: ToolContext, input: McpToolInput<"group">): unknow
       return "approved" in result ? { ok: true } : { approval: result.approval }
     }
     case "list": {
-      const groups = listConversations(ctx.db)
+      const all = listConversations(ctx.db)
         .filter((conversation) => conversation.kind === "group" && conversation.key !== SHOUT_KEY)
         .map((conversation) => {
           const members = listParticipants(ctx.db, conversation.id).map(
@@ -117,7 +240,16 @@ export function runGroup(ctx: ToolContext, input: McpToolInput<"group">): unknow
             is_member: members.includes(actor),
           }
         })
-      return { groups }
+      // P3：群多时分页（缺省 50），避免 `group{op:list}` 随群数线性膨胀。
+      const limit = input.limit ?? 50
+      const cursor = input.cursor ?? 0
+      const groups = all.slice(cursor, cursor + limit)
+      const hasMore = cursor + groups.length < all.length
+      return {
+        groups,
+        has_more: hasMore,
+        ...(hasMore ? { next_cursor: cursor + groups.length } : {}),
+      }
     }
   }
 }

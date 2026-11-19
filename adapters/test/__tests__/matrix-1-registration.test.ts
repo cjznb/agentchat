@@ -77,8 +77,9 @@ describe("T13-A 正常使用：注册与身份", () => {
     const row = (await dumpOf(host)).agents.find((agent) => agent.id === logical.agentId)
     expect({ kind: row?.kind, status: row?.status }).toEqual({ kind: "logical", status: "offline" })
 
-    const tree: unknown = await host.call("a", "roster", {})
-    expect(collectIds(tree), "roster（真 MCP 工具）应含逻辑节点").toContain(logical.agentId)
+    // P1 之后 `roster` 默认返回 compact 扁平对象；要沿用"树形可见性"断言须显式 view:"tree"（旧形状）。
+    const tree: unknown = await host.call("a", "roster", { view: "tree" })
+    expect(collectIds(tree), "roster（真 MCP 工具，view:tree）应含逻辑节点").toContain(logical.agentId)
 
     // P5 的入群守卫只拦容器 → 逻辑节点可入群（可见、可取件）。
     const group = await host.createGroup("n03-g", [logical.agentId])

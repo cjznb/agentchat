@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 变更（**返回体积：roster 默认值翻转 + 列表分页/正文预览**）
+
+- **`roster` 默认 `view=compact`**：扁平精简节点（id/name/status/vendor/kind/parent_id/role_tag/unread/depth），**默认不含离线/退役**（祖先链保留），支持 `include_offline`/`include_retired`/`limit`/`cursor`。真机实测 192 节点全树 **83.4 KB → 约 2.1 KB（-97%）**；旧行为用 `view:"tree"`，只要计数用 `view:"summary"`（≈131 B）。
+- **`inbox` / `conversation` 分页与正文预览**：默认 `limit` 均 20（原 50），新增 `preview_chars`（inbox 200 / conversation 300，`0`=全文），返回 `has_more` + `next_after`/`next_before`；截断条目带 `truncated`/`body_chars`。真机实测 32 条未读 **47.9 KB → 约 11 KB（-77%）**。
+- **`group{op:list}` 分页**（默认 50 群，`has_more`/`next_cursor`）；**`message_status` 单次上限 50 个 id**。
+- **工具描述瘦身**：13 条描述六行 → 三行（保留「何时」「常见错误」「信息增量/禁纯回执」关键词），合计 **10.5 KB → 约 6 KB**；`instructions` 指南新增「九、返回体积」小节。
+
 ### 变更（**默认值翻转：行为级不兼容**）
 
 - **`inbox` 默认排除自发消息**（DM/群）：`inbox` 返回的是"各会话已读位点之后"的消息，而**自己发出的消息同样落在自己的位点之后**（发消息不推进读位点，只有 `ack` 会）——于是"轮询 `inbox` → 逐条回复"的客户端会形成**自激环路**（回复产生新消息 → 又被轮询到），且 `self_send` 挡不住（它只覆盖 `to=自己`，群回复是对群 id 的正常发送）。

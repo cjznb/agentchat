@@ -26,6 +26,7 @@ import {
   MCP_TOOLS,
   MCP_TOOL_OUTPUTS,
   type McpToolName,
+  type RosterNode,
 } from "../../shared/contracts"
 import { loadConfig } from "../../server/config"
 import { openDb, type Db } from "../../server/db"
@@ -110,6 +111,16 @@ async function connectHeaders(headers: Record<string, string>): Promise<Client> 
 
 function callTool(client: Client, name: McpToolName, args: Record<string, unknown>) {
   return client.callTool({ name, arguments: args })
+}
+
+/**
+ * `roster` 出参现在是三形态联合（compact / summary / tree）；`conversation` 模式恒为树。
+ * 需要按数组断言的用例统一走这里（非树形态 → 直接失败，避免静默通过）。
+ */
+function rosterNodes(output: unknown): RosterNode[] {
+  const parsed = MCP_TOOL_OUTPUTS.roster.parse(output)
+  if (!Array.isArray(parsed)) throw new Error("expected roster tree output (conversation mode)")
+  return parsed
 }
 
 /** 裸 HTTP 建会话（返回 `mcp-session-id`），用于精确观测 404/TTL 行为。 */
@@ -604,7 +615,7 @@ describe("roster{conversation} 过滤与成员闸门（Task 5，spec §4.4）", 
     try {
       const result = await callTool(memberClient, "roster", { conversation: group.approved.id })
       expect(toolFailed(result)).toBe(false)
-      const nodes = MCP_TOOL_OUTPUTS.roster.parse(JSON.parse(textOf(result)))
+      const nodes = rosterNodes(JSON.parse(textOf(result)))
       expect(new Set(nodes.map((node) => node.id))).toEqual(new Set([human.id, member.id]))
       for (const node of nodes) expect(node.name.length).toBeGreaterThan(0)
     } finally {
@@ -631,7 +642,7 @@ describe("roster{conversation} 过滤与成员闸门（Task 5，spec §4.4）", 
     try {
       const result = await callTool(client, "roster", { conversation: shoutConversation.id })
       expect(toolFailed(result)).toBe(false)
-      expect(MCP_TOOL_OUTPUTS.roster.parse(JSON.parse(textOf(result)))).toEqual([])
+      expect(rosterNodes(JSON.parse(textOf(result)))).toEqual([])
     } finally {
       await client.close()
     }
@@ -1334,6 +1345,87 @@ describe("inbox 默认排除自发（自激环路防护；测试员A 提议）",
       const inbound = sendMessage(db, { from: peer.id, to: group.approved.id, body: "别人的群消息" })
       const box2 = await callTool(client, "inbox", {})
       expect(JSON.parse(textOf(box2)).messages.map((m: { id: string }) => m.id)).toContain(inbound.message.id)
+    } finally {
+      await client.close()
+    }
+  })
+})
+
+describe("P1-P3 返回体积纪律（roster 视图 / 预览分页 / group 分页）", () => {
+  it("roster 默认 compact 且不含离线；include_offline 找回；summary 只给计数；tree 保持旧数组形状", async () => {
+    const me = makeAgent("compact-me")
+    const offline = insertAgent(db, { name: "compact-offline", kind: "runtime", status: "offline", vendor: "opencode" })
+    const client = await connect(me.id)
+    try {
+      const compact = JSON.parse(textOf(await callTool(client, "roster", {})))
+      expect(compact.view).toBe("compact")
+      expect(compact.nodes.some((n: { id: string }) => n.id === me.id)).toBe(true)
+      expect(compact.nodes.some((n: { id: string }) => n.id === offline.id)).toBe(false)
+      expect(compact.total).toBeGreaterThan(0)
+
+      const withOffline = JSON.parse(textOf(await callTool(client, "roster", { include_offline: true })))
+      expect(withOffline.nodes.some((n: { id: string }) => n.id === offline.id)).toBe(true)
+
+      const summary = JSON.parse(textOf(await callTool(client, "roster", { view: "summary" })))
+      expect(summary.view).toBe("summary")
+      expect(summary.total).toBeGreaterThan(0)
+      expect(summary.by_status).toBeTypeOf("object")
+
+      const tree = JSON.parse(textOf(await callTool(client, "roster", { view: "tree" })))
+      expect(Array.isArray(tree)).toBe(true)
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("inbox 默认 20 条 + 正文预览 200 + has_more/next_after；conversation 默认 20 条 + 预览 300 + has_more/next_before", async () => {
+    const sender = makeAgent("bulk-sender")
+    const reader = makeAgent("bulk-reader")
+    let conversationId = ""
+    for (let index = 0; index < 25; index += 1) {
+      const sent = sendMessage(db, { from: sender.id, to: reader.id, body: `bulk-${index}-${"x".repeat(400)}` })
+      conversationId = sent.message.conversationId
+    }
+    const client = await connect(reader.id)
+    try {
+      const page = JSON.parse(textOf(await callTool(client, "inbox", {})))
+      expect(page.messages).toHaveLength(20)
+      expect(page.has_more).toBe(true)
+      expect(page.next_after).toBe(page.messages.at(-1)?.seq)
+      expect(page.messages[0]?.truncated).toBe(true)
+      expect(String(page.messages[0]?.body).length).toBeLessThan(260)
+      expect(page.messages[0]?.body_chars).toBeGreaterThan(400)
+
+      const page2 = JSON.parse(textOf(await callTool(client, "inbox", { after: page.next_after })))
+      expect(page2.messages.length).toBeGreaterThan(0)
+
+      const full = JSON.parse(textOf(await callTool(client, "conversation", { id: conversationId, preview_chars: 0 })))
+      expect(full.messages).toHaveLength(20)
+      expect(full.has_more).toBe(true)
+      expect(full.next_before).toBe(full.messages[0]?.seq)
+      expect(full.messages[0]?.body_chars).toBeUndefined() // 全文不带截断标记
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("group{op:list} 分页：limit=1 → has_more/next_cursor 可续页", async () => {
+    const human = ensureHuman(db)
+    for (const name of ["page-g1", "page-g2"]) {
+      const created = createGroup(db, { name, createdBy: human.id, memberIds: [] })
+      if (!("approved" in created)) throw new Error("human group creation must execute immediately")
+    }
+    const me = makeAgent("page-viewer")
+    const client = await connect(me.id)
+    try {
+      const first = JSON.parse(textOf(await callTool(client, "group", { op: "list", limit: 1 })))
+      expect(first.groups).toHaveLength(1)
+      expect(first.has_more).toBe(true)
+      expect(first.next_cursor).toBe(1)
+      const second = JSON.parse(
+        textOf(await callTool(client, "group", { op: "list", limit: 1, cursor: first.next_cursor })),
+      )
+      expect(second.groups[0]?.id).not.toBe(first.groups[0]?.id)
     } finally {
       await client.close()
     }

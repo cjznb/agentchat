@@ -22,7 +22,7 @@ import { getConversation } from "../store/conversations"
 import { getById, type Message } from "../store/messages"
 import { errorResult, McpToolError, requireIdentity, sendView, toolResult, type ToolContext } from "./context"
 import { runAsk, runRespondAsk } from "./ask-tools"
-import { runConversation, runGroup, runRoster, runShout, runWhoami } from "./read-tools"
+import { previewMessages, runConversation, runGroup, runRoster, runShout, runWhoami } from "./read-tools"
 // P4：12 条 description 与使用指南各自成模块（单文件 ≤250 纯行的硬约束；文本量大且与逻辑无关）。
 import { TOOL_DESCRIPTIONS } from "./descriptions"
 import { AGENTCHAT_GUIDE } from "./guide"
@@ -141,33 +141,42 @@ function maskMessages(ctx: ToolContext, readerId: string, messages: readonly Mes
   return messages.map((message) => maskRevokedForReader(ctx.db, message, readerId))
 }
 
+/** `inbox` 的缺省页大小与正文预览长度（P1 降体积：32 条全正文 48KB → 前 20 条 + 200 字符 ≈ 11KB）。 */
+const INBOX_DEFAULT_LIMIT = 20
+const INBOX_DEFAULT_PREVIEW = 200
+
 export function runInbox(ctx: ToolContext, input: McpToolInput<"inbox">): Promise<unknown> | unknown {
   const id = requireIdentity(ctx)
+  const limit = input.limit ?? INBOX_DEFAULT_LIMIT
+  const previewChars = input.preview_chars ?? INBOX_DEFAULT_PREVIEW
   const paging = {
     ...(input.after === undefined ? {} : { after: input.after }),
     // 默认排除自发（自激环路防护）；`include_self:true` 找回旧行为（喊话会话本就例外）。
     ...(input.include_self === undefined ? {} : { includeSelf: input.include_self }),
+    // 多取一条用于判断 has_more。
+    limit: limit + 1,
+  }
+  const project = (raw: readonly Message[], timedOut?: boolean): Record<string, unknown> => {
+    const filtered = filterConversation(raw, input.conversation)
+    const hasMore = filtered.length > limit
+    const page = hasMore ? filtered.slice(0, limit) : filtered
+    const messages = maskMessages(ctx, id, page)
+    if (input.ack === true) ack(ctx.db, id, messages.map((m) => m.id))
+    const last = messages[messages.length - 1]
+    return {
+      messages: previewMessages(messages, previewChars),
+      unread: unreadFor(ctx.db, id),
+      has_more: hasMore,
+      ...(hasMore && last !== undefined ? { next_after: last.seq } : {}),
+      ...(timedOut === undefined ? {} : { timedOut }),
+    }
   }
   if (input.timeout !== undefined) {
     return inbox(ctx.db, id, { ...paging, wait: { until: "either", timeoutMs: input.timeout } }).then(
-      (result) => {
-        const messages = maskMessages(
-          ctx,
-          id,
-          filterConversation(result.messages, input.conversation),
-        )
-        if (input.ack === true) ack(ctx.db, id, messages.map((m) => m.id))
-        return { messages, unread: unreadFor(ctx.db, id), timedOut: result.timedOut }
-      },
+      (result) => project(result.messages, result.timedOut),
     )
   }
-  const messages = maskMessages(
-    ctx,
-    id,
-    filterConversation(inbox(ctx.db, id, paging), input.conversation),
-  )
-  if (input.ack === true) ack(ctx.db, id, messages.map((m) => m.id))
-  return { messages, unread: unreadFor(ctx.db, id) }
+  return project(inbox(ctx.db, id, paging))
 }
 
 function runAck(ctx: ToolContext, input: McpToolInput<"ack">): unknown {

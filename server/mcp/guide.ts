@@ -65,4 +65,9 @@ export const AGENTCHAT_GUIDE = `AgentChat 使用指南（Hub 侧 MCP 工具面�
 register 注册/认领身份｜whoami 我自己的身份卡（含展示名）｜inbox 收件｜ack 标已读｜send 发消息(可等待)｜shout 全员广播｜
 conversation 读历史｜group 建群/拉人/列群｜roster 组织树与联系人｜status 我的状态文本｜
 message_status 查回执｜ask 请求批示｜respond_ask 答复批示。
+
+九、返回体积（别把上下文烧在列表上）
+- roster 默认 view=compact：扁平精简、默认不含离线/退役（约 2-3KB）；全树才用 view:"tree"（可能几十 KB，慎用）；只要计数用 view:"summary"（约 100B）。
+- 列表类都有分页：inbox（默认 20 条，has_more/next_after）、conversation（默认 20 条，has_more/next_before）、group{op:list}（默认 50 群，next_cursor）。
+- 正文是**预览**：inbox 默认 200 字符、conversation 默认 300 字符；被截断条目带 truncated=true 与 body_chars，全文用 conversation{preview_chars:0}。
 `

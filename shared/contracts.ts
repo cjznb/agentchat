@@ -319,6 +319,8 @@ const mcpSendInput = z.object({
 const mcpInboxInput = z.object({
   conversation: z.string().optional().describe("只看该会话（群/DM 会话 id）的消息。"),
   after: z.number().int().nonnegative().optional().describe("分页游标：只取 seq 大于它的消息（默认 0=全部未读）。"),
+  limit: z.number().int().positive().max(200).optional().describe("本页条数上限（缺省 20，最大 200）；超出用出参 has_more/next_after 续页。"),
+  preview_chars: z.number().int().nonnegative().max(8000).optional().describe("正文预览字符数（缺省 200；0=返回全文）。被截断的条目标 truncated=true 且带 body_chars，全文用 conversation 取。"),
   ack: z.boolean().optional().describe("true=读到即自动标已读（等价于顺手 ack），但**不等于回复**。"),
   include_self: z.boolean().optional().describe("true=连自己发出的文本消息一起返回（旧行为；喊话发送者核对'我广播出去的那条'也用它）；缺省 false=**排除自发**（喊话广播与 system 通知本就例外，仍可见）。"),
   timeout: z.number().int().positive().optional().describe("阻塞等新消息的毫秒数；超时返回 timedOut=true，不是错误。"),
@@ -329,16 +331,27 @@ const mcpAckInput = z.object({
 })
 
 const mcpRosterInput = z.object({
+  view: z
+    .enum(["compact", "summary", "tree"])
+    .optional()
+    .describe(
+      "返回形态：compact（**缺省**，扁平精简节点 + 默认不含离线/退役，约 2-3KB）｜summary（只给计数与根节点概览，约 100B）｜tree（旧版完整嵌套树，最大）。要谁就用 filter 精确定位，不要拉全树。",
+    ),
   filter: z.string().optional().describe("按名称子串过滤（含祖先链保留）。"),
   online_only: z.boolean().optional().describe("true=只保留 online 节点。"),
+  include_offline: z.boolean().optional().describe("compact/tree 下是否包含离线节点（缺省 false）。"),
+  include_retired: z.boolean().optional().describe("是否包含已退役节点（缺省 false）。"),
+  limit: z.number().int().positive().max(500).optional().describe("compact 视图的节点数上限（缺省 100，最大 500）。"),
+  cursor: z.number().int().nonnegative().optional().describe("compact 视图翻页游标（用上一页的 next_cursor）。"),
   /** 只返回该会话（群）的参与者（spec §4.4；shout 广播会话不接受）。 */
-  conversation: z.string().optional().describe("只看某个群/会话的成员；调用者必须是该群成员，否则 not_participant。"),
+  conversation: z.string().optional().describe("只看某个群/会话的成员（此模式恒返回成员树，忽略 view）；调用者必须是该群成员，否则 not_participant。"),
 })
 
 const mcpConversationInput = z.object({
   id: z.string().min(1).describe("会话 id（不是 agent id；从 group{op:list} 或 send 出参的 conversationId 取）。"),
   before: z.number().int().nonnegative().optional().describe("分页游标：只取 seq 小于它的消息（往前翻页）。"),
-  limit: z.number().int().positive().optional().describe("本页条数上限（缺省 50，最大 200）。"),
+  limit: z.number().int().positive().max(200).optional().describe("本页条数上限（缺省 20，最大 200）；超出用出参 has_more/next_before 续页。"),
+  preview_chars: z.number().int().nonnegative().max(8000).optional().describe("正文预览字符数（缺省 300；0=全文）。截断条目带 truncated=true 与 body_chars。"),
 })
 
 /**
@@ -351,7 +364,7 @@ const mcpConversationInput = z.object({
 type McpGroupInput =
   | { op: "create"; name: string; member_ids?: string[] }
   | { op: "add"; group: string; member: string }
-  | { op: "list" }
+  | { op: "list"; limit?: number; cursor?: number }
 
 const mcpGroupInput = z
   .object({
@@ -360,6 +373,8 @@ const mcpGroupInput = z
     member_ids: z.array(z.string()).optional().describe("create 可选：初始成员 agent id（创作者自动为 owner；容器会被拒）。"),
     group: z.string().min(1).optional().describe("add 必填：目标群会话 id（用 op=list 查）。"),
     member: z.string().min(1).optional().describe("add 必填：要拉进来的 agent id 或系统名。"),
+    limit: z.number().int().positive().max(200).optional().describe("list 可选：本页群数上限（缺省 50，最大 200）。"),
+    cursor: z.number().int().nonnegative().optional().describe("list 可选：翻页游标（用上一页的 next_cursor）。"),
   })
   .superRefine((value, ctx) => {
     if (value.op === "create" && value.name === undefined) {
@@ -384,7 +399,11 @@ const mcpStatusInput = z.object({
 })
 
 const mcpMessageStatusInput = z.object({
-  ids: z.array(z.string().min(1)).min(1).describe("要查回执的消息短 id 列表（己方发出的消息）。"),
+  ids: z
+    .array(z.string().min(1))
+    .min(1)
+    .max(50)
+    .describe("要查回执的消息短 id 列表（己方发出的消息；单次最多 50 条，分批查）。"),
 })
 
 /** `ask` 入参（spec §9/§17：`to` = `'human'` 或目标 agent id（群会话 id 见 spec §3.1）；`wait?` 同 §6.2 阻塞语义）。 */
@@ -450,6 +469,10 @@ const mcpMessageOutput = z.object({
   fromAgentId: z.string(),
   body: z.string(),
   kind: z.enum(["text", "system"]),
+  /** 正文被预览截断（`preview_chars`）时为 true；要看全文用 `conversation{preview_chars:0}`。 */
+  truncated: z.boolean().optional(),
+  /** 截断前的正文字符数（未截断时不带）。 */
+  body_chars: z.number().int().nonnegative().optional(),
 })
 
 const mcpReceiptOutput = z.object({ agentId: z.string(), stage: receiptStageSchema })
@@ -523,6 +546,9 @@ const mcpGroupOutput = z.union([
         is_member: z.boolean().optional(),
       }),
     ),
+    /** 分页：本页是否还有更多群（用 `next_cursor` 续页）。 */
+    has_more: z.boolean().optional(),
+    next_cursor: z.number().int().nonnegative().optional(),
   }),
   z.object({ ok: z.literal(true) }),
   z.object({ approval: mcpApprovalOutput }),
@@ -593,11 +619,61 @@ export const MCP_TOOL_OUTPUTS = {
   inbox: z.object({
     messages: z.array(mcpMessageOutput),
     unread: z.number().int().nonnegative(),
+    /** 本页还有更多（`limit` 用尽）→ 用 `next_after` 续页。 */
+    has_more: z.boolean().optional(),
+    /** 下一页游标（= 本页最后一条的 seq；无更多时不带）。 */
+    next_after: z.number().int().nonnegative().optional(),
     timedOut: z.boolean().optional(),
   }),
   ack: z.object({ confirmed: z.number().int().nonnegative() }),
-  roster: rosterTreeSchema,
-  conversation: z.object({ messages: z.array(mcpMessageOutput) }),
+  /**
+   * 三形态联合（P1 降体积）：`compact`（缺省，扁平精简 + 默认不含离线/退役）、
+   * `summary`（计数与根节点概览）、以及 `tree`/`conversation` 模式的成员树。
+   */
+  roster: z.union([
+    rosterTreeSchema,
+    z.object({
+      view: z.literal("summary"),
+      total: z.number().int().nonnegative(),
+      by_vendor: z.record(z.string(), z.number().int().nonnegative()),
+      by_status: z.record(z.string(), z.number().int().nonnegative()),
+      roots: z.array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          vendor: z.string(),
+          status: agentStatusSchema,
+          children_count: z.number().int().nonnegative(),
+        }),
+      ),
+    }),
+    z.object({
+      view: z.literal("compact"),
+      nodes: z.array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          status: agentStatusSchema,
+          vendor: z.string(),
+          kind: agentKindSchema,
+          parent_id: z.string().nullable(),
+          role_tag: z.string().nullable(),
+          unread: z.number().int().nonnegative(),
+          depth: z.number().int().nonnegative(),
+        }),
+      ),
+      total: z.number().int().nonnegative(),
+      has_more: z.boolean(),
+      next_cursor: z.number().int().nonnegative().optional(),
+    }),
+  ]),
+  conversation: z.object({
+    messages: z.array(mcpMessageOutput),
+    /** 还有更早的消息 → 用 `next_before` 续页。 */
+    has_more: z.boolean().optional(),
+    /** 下一页游标（= 本页第一条的 seq）。 */
+    next_before: z.number().int().nonnegative().optional(),
+  }),
   group: mcpGroupOutput,
   shout: mcpShoutOutput,
   status: z.object({ id: z.string(), status_text: z.string().nullable() }),
