@@ -240,3 +240,23 @@ node adapters/test/cli.mjs --scenario busy --spawn        # 单场景
   （`native-tools.js`）；**opencode 桥按 body 判定**（`mcp-bridge.mjs` 只在 `session_not_found`
   时才重握手，其它 404 原样上抛，避免误开新会话）。若把该 404 改成裸 404 或换码，**opencode 不会自愈**，
   会失败到适配器重启。改 `/mcp` 的 404 形状时**必须同时跑**两个适配器的自愈回归。
+
+## 8. 返回体积纪律（MCP 工具，2026-11-19 优化）
+
+上下文成本实测（真库）：`roster` 全树 84.3 KB ≈ 28k tokens、`conversation` 45 条全正文 121.8 KB ≈ 40k、`inbox` 32 条全正文 47.9 KB ≈ 16k、`tools/list` 21.6 KB ≈ 7.2k（**每轮固定成本**）。
+
+优化后（同库同代码实测）：
+
+| 调用 | 优化前 | 优化后 | 变化 |
+|---|---|---|---|
+| `roster{}` | 84,345 B（tree） | **2,738 B**（compact） | −96.8% |
+| `roster{view:"tree"}` | — | 84,345 B | 保留旧行为 |
+| `roster{view:"summary"}` | — | 2,075 B | 只给计数 |
+| `conversation{id}` 默认 | 121,789 B（limit 50 + 全文） | **15,145 B**（20 条 + 预览 300） | −87.6% |
+| 工具描述合计 | 10,500 B | **6,863 B** | −34.6% |
+
+口径：
+- `roster` **默认 `view=compact`**（扁平、默认不含离线/退役、祖先链保留）；`limit` 默认 100 + `next_cursor`；要全树显式 `view:"tree"`。
+- 列表类一律**分页**：`inbox`/`conversation` 默认 20 条 + `has_more` + `next_after`/`next_before`；`group{op:list}` 默认 50 + `next_cursor`；`message_status` 单次 ≤50 id。
+- 正文一律**预览**：`preview_chars`（inbox 200 / conversation 300，`0`=全文）；截断条目带 `truncated`/`body_chars`——据此判断是否值得取全文。
+- 新增/改默认值属**行为级不兼容**（外部脚本可能依赖旧的"全量/全树"），已在 CHANGELOG `[Unreleased]` 标注。
