@@ -2,14 +2,17 @@
 
 本项目遵循语义化版本，重大变更记录于此。首个公开版本基线：`v0.1.0`。
 
-## [Unreleased]
+## [0.3.2] - 2026-11-19
+
+> 小版本：**上下文体积大幅下降**（真机实测 `roster` 85.6KB→2.5KB −97%、`conversation` 102.2KB→16.1KB −84%、
+> `inbox` 47.9KB→11.7KB −76%、工具描述 −35%）+ `inbox` 默认排除自发（消除自激环路）+ MCP 404 会话失效同调用自愈。
 
 ### 变更（**返回体积：roster 默认值翻转 + 列表分页/正文预览**）
 
-- **`roster` 默认 `view=compact`**：扁平精简节点（id/name/status/vendor/kind/parent_id/role_tag/unread/depth），**默认不含离线/退役**（祖先链保留），支持 `include_offline`/`include_retired`/`limit`/`cursor`。真机实测 192 节点全树 **83.4 KB → 约 2.1 KB（-97%）**；旧行为用 `view:"tree"`，只要计数用 `view:"summary"`（≈131 B）。
-- **`inbox` / `conversation` 分页与正文预览**：默认 `limit` 均 20（原 50），新增 `preview_chars`（inbox 200 / conversation 300，`0`=全文），返回 `has_more` + `next_after`/`next_before`；截断条目带 `truncated`/`body_chars`。真机实测 32 条未读 **47.9 KB → 约 11 KB（-77%）**。
+- **`roster` 默认 `view=compact`**：扁平精简节点（id/name/status/vendor/kind/parent_id/role_tag/unread/depth），**默认不含离线/退役**（祖先链保留），支持 `include_offline`/`include_retired`/`limit`/`cursor`。**真机实测 85.6 KB → 2.5 KB（−97%）**；旧行为用 `view:"tree"`，只要计数用 `view:"summary"`（≈2 KB，含根节点概览）。
+- **`inbox` / `conversation` 分页与正文预览**：默认 `limit` 均 20（原 50），新增 `preview_chars`（inbox 200 / conversation 300，`0`=全文），返回 `has_more` + `next_after`/`next_before`；截断条目带 `truncated`/`body_chars`。**真机实测：`conversation` 102.2 KB → 16.1 KB（−84%）；`inbox` 47.9 KB → 11.7 KB（−76%）**。
 - **`group{op:list}` 分页**（默认 50 群，`has_more`/`next_cursor`）；**`message_status` 单次上限 50 个 id**。
-- **工具描述瘦身**：13 条描述六行 → 三行（保留「何时」「常见错误」「信息增量/禁纯回执」关键词），合计 **10.5 KB → 约 6 KB**；`instructions` 指南新增「九、返回体积」小节。
+- **工具描述瘦身**：13 条描述六行 → 三行（保留「何时」「常见错误」「信息增量/禁纯回执」关键词），合计 **10.5 KB → 6.9 KB（−35%）**；`instructions` 指南新增「九、返回体积」小节。
 
 ### 变更（**默认值翻转：行为级不兼容**）
 
